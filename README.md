@@ -61,10 +61,28 @@ Al detectar una interrupción, los trabajos que estaban ejecutándose pasan a `n
 
 Las instrucciones, las respuestas y los eventos se guardan localmente en texto. Mantén esta carpeta privada y conserva una copia de `data` para recuperarte de fallos de disco. Los archivos no se cifran. La recuperación evita repetir trabajos ambiguos, pero no puede garantizar ejecución exactamente una vez ante fallos externos o del equipo.
 
+## Vigilancia local con límites
+
+El vigilante consulta únicamente archivos locales cada cinco segundos: no llama a modelos mientras la cola está vacía o pausada. Se inicia en simulación; solo `--execute` permite ejecutar. Atiende un trabajo cada vez y cuenta también los intentos fallidos, con los mismos bloqueos y límites de presupuesto de la cola.
+
+```powershell
+node watch.mjs --hours 8 --max-jobs 10
+node watch.mjs --execute --hours 8 --max-jobs 10
+```
+
+Termina al alcanzar el tiempo o el número de intentos configurado (por defecto, ocho horas o diez intentos). Acepta entre un segundo y 24 horas, y entre uno y cien intentos. Un trabajo que requiere revisión detiene el vigilante. Crear un archivo vacío `data\PAUSE` impide despachar trabajos nuevos; retirar ese archivo permite continuar. La pausa no interrumpe un trabajo que ya esté en marcha.
+
+`Ctrl+C` o `SIGTERM` solicita la parada. Al alcanzar el límite de tiempo también se solicita abortar el trabajador activo y se espera su cierre seguro; la limpieza puede prolongar la salida. Una ejecución interrumpida puede quedar en `needs_attention`: revisa antes de reintentar. No fuerces la terminación ni borres bloqueos mientras quede un trabajador activo.
+
+Este proceso vive **solo en este PC**, que debe permanecer encendido y conectado. No arranca automáticamente tras reiniciar ni cambia el inicio de Windows o el Programador de tareas. El acceso móvil depende de la sesión de Orca configurada por separado.
+
+`PAUSAR.cmd` crea el archivo de pausa. El script separado `mantener-activo.ps1` puede impedir temporalmente la suspensión durante ocho horas mientras Orca está abierto, permitiendo apagar la pantalla; libera esa petición al salir o detectar `data\PAUSE`. No cambia permanentemente la configuración de energía de Windows. El vigilante por sí mismo no modifica la suspensión.
+
 ## Verificar sin consumo
 
 ```powershell
 node --test tests/queue.test.mjs
+node --test tests/watch.test.mjs
 ```
 
 Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace. `centro.cmd` usa el Node 24 portable existente si está disponible y, en su defecto, `node` del sistema.
