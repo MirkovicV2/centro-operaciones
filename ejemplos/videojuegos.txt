@@ -1,0 +1,1 @@
+Propón tres conceptos de videojuegos indie pequeños que una persona pueda prototipar en dos semanas. Explica la mecánica principal, el alcance mínimo, los mayores riesgos y una prueba sencilla para validar interés. No abras ni modifiques ningún repositorio existente.

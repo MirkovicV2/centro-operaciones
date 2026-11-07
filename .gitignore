@@ -1,0 +1,13 @@
+data/
+.artifacts/
+node_modules/
+analysis/
+workspaces/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+credentials*.json
+*.key
+*.pem
