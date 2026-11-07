@@ -4,6 +4,18 @@ import { randomUUID } from 'node:crypto';
 
 const MAX_JOBS = 500;
 const ACTIVE = new Set(['queued', 'running', 'retry_wait', 'needs_attention']);
+const WORKFLOW_STAGES = [
+  { key: 'ux', label: 'Diseño UX', profile: 'ux' },
+  { key: 'developer', label: 'Implementación', profile: 'desarrollador' },
+  { key: 'qa', label: 'Control de calidad', profile: 'qa' },
+  { key: 'reviewer', label: 'Revisión de código', profile: 'revisor' },
+];
+const ANALYSIS_STAGE = [{ key: 'planner', label: 'Planificación', profile: 'planificador' }];
+function workflowFor(kind, provider) {
+  if (provider !== 'orca') return null;
+  const stages = kind === 'analysis' ? ANALYSIS_STAGE : WORKFLOW_STAGES;
+  return { version: 1, name: kind === 'analysis' ? 'analysis-v1' : 'ui-quality-v1', status: 'queued', currentStage: null, updatedAt: stamp(), steps: stages.map(stage => ({ ...stage, status: 'queued' })) };
+}
 export class QueueError extends Error {
   constructor(message, code = 'queue_error') { super(message); this.code = code; }
 }
@@ -118,13 +130,14 @@ async function mutate(root, action) {
 function validateSpec(spec) {
   if (!['games', 'agency'].includes(spec.business)) throw new QueueError('business debe ser games o agency.');
   if (!['analysis', 'code'].includes(spec.kind)) throw new QueueError('kind debe ser analysis o code.');
+  if (spec.projectId != null && spec.projectId !== '' && !/^[a-zA-Z0-9_-]{1,80}$/.test(spec.projectId)) throw new QueueError('Identificador de proyecto inválido.');
   if (!spec.title || spec.title.length > 160) throw new QueueError('El título debe tener entre 1 y 160 caracteres.');
   if (!spec.prompt || Buffer.byteLength(spec.prompt, 'utf8') > 12_000) throw new QueueError('La instrucción debe tener entre 1 y 12.000 bytes.');
   if (/\bsk-[A-Za-z0-9_-]{12,}/.test(spec.prompt + spec.title) || ['OPENAI_API_KEY', 'CODEX_API_KEY'].some(name => process.env[name] && (spec.prompt + spec.title).includes(process.env[name]))) throw new QueueError('No guardes claves en títulos o instrucciones; usa solo variables de entorno.');
   if (!Number.isInteger(spec.maxAttempts ?? 2) || (spec.maxAttempts ?? 2) < 1 || (spec.maxAttempts ?? 2) > 3) throw new QueueError('maxAttempts debe estar entre 1 y 3.');
   if (!Number.isInteger(spec.timeoutMs ?? 180_000) || (spec.timeoutMs ?? 180_000) < 10 || (spec.timeoutMs ?? 180_000) > 1_800_000) throw new QueueError('timeoutMs debe estar entre 10 y 1.800.000.');
   if (!Number.isFinite(spec.maxUsd ?? 0.1) || (spec.maxUsd ?? 0.1) <= 0) throw new QueueError('maxUsd debe ser positivo.');
-  if (!['auto', 'codex', 'api'].includes(spec.provider ?? 'auto')) throw new QueueError('provider debe ser auto, api o codex.');
+  if (!['orca', 'auto', 'codex', 'api'].includes(spec.provider ?? 'orca')) throw new QueueError('provider debe ser orca, auto, api o codex.');
   if (spec.kind === 'code' && (!spec.workspace || !spec.isolated)) throw new QueueError('Los trabajos de código requieren workspace y confirmación isolated.');
 }
 
@@ -135,7 +148,10 @@ export async function addJob(root, spec) {
     const id = spec.id ?? randomUUID();
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) throw new QueueError('Identificador inválido.');
     if (state.jobs.some(job => job.id === id)) throw new QueueError('Este identificador ya existe; no se añadirá dos veces.', 'duplicate');
-    const job = { id, business: spec.business, kind: spec.kind, title: spec.title, prompt: spec.prompt, provider: spec.kind === 'code' ? 'codex' : (spec.provider ?? 'auto'), workspace: spec.workspace ? path.resolve(spec.workspace) : null, isolated: !!spec.isolated, maxAttempts: spec.maxAttempts ?? 2, timeoutMs: spec.timeoutMs ?? 180_000, maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0 };
+    const provider = spec.kind === 'code' ? (spec.provider ?? 'codex') : (spec.provider ?? 'auto');
+    const workflow = workflowFor(spec.kind, provider);
+    const timeoutMs = spec.timeoutMs ?? (provider === 'orca' && spec.kind === 'code' ? 1_800_000 : 180_000);
+    const job = { id, business: spec.business, projectId: spec.projectId || null, projectName: spec.projectName || '', kind: spec.kind, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, isolated: !!spec.isolated, maxAttempts: spec.maxAttempts ?? 2, timeoutMs, maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0 };
     await commit(root, state, 'job_added', { jobs: [job] }, { jobId: id });
     return job;
   });
@@ -234,6 +250,23 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
           const charged = uncertain ? reserved : Math.max(0, Number(estimatedUsd) || 0);
           job = { ...current, reservedUsd: 0, estimatedUsd: (current.estimatedUsd ?? 0) + charged, costUncertain: uncertain };
           await commit(root, state, 'budget_settled', { jobs: [job], budget: { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - reserved), estimatedSpentUsd: state.budget.estimatedSpentUsd + charged } }, { jobId: job.id, estimatedUsd: charged, uncertain });
+        }),
+        reportStage: update => operation(async () => {
+          if (!update?.key || !['queued', 'running', 'succeeded', 'blocked', 'failed', 'skipped'].includes(update.status)) throw new QueueError('Estado de etapa de flujo no válido.');
+          const current = state.jobs.find(j => j.id === job.id);
+          const stages = current.kind === 'analysis' ? ANALYSIS_STAGE : WORKFLOW_STAGES;
+          const workflow = current.workflow ?? { version: 1, name: current.kind === 'analysis' ? 'analysis-v1' : 'ui-quality-v1', status: 'running', currentStage: null, steps: stages.map(stage => ({ ...stage, status: 'queued' })) };
+          const index = workflow.steps.findIndex(step => step.key === update.key);
+          if (index < 0) throw new QueueError('La etapa no pertenece al flujo configurado.');
+          const steps = [...workflow.steps];
+          steps[index] = { ...steps[index], ...update, updatedAt: stamp() };
+          delete steps[index].key;
+          steps[index].key = update.key;
+          const workflowStatus = ['blocked', 'failed'].includes(update.status)
+            ? 'needs_attention'
+            : update.status === 'skipped' ? workflow.status : 'running';
+          job = { ...current, workflow: { ...workflow, status: workflowStatus, currentStage: ['succeeded', 'skipped'].includes(update.status) ? workflow.currentStage : update.key, updatedAt: stamp(), steps } };
+          await commit(root, state, 'job_stage_updated', { jobs: [job] }, { jobId: job.id, stage: update.key, status: update.status });
         })
       };
       let timer;
@@ -265,7 +298,8 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
         active = false;
         await operations;
         await commitChains.get(state);
-        job = { ...state.jobs.find(j => j.id === job.id), state: 'succeeded', finishedAt: stamp(), result: output };
+        const current = state.jobs.find(j => j.id === job.id);
+        job = { ...current, state: 'succeeded', finishedAt: stamp(), result: output, ...(current.workflow ? { workflow: { ...current.workflow, status: 'succeeded', currentStage: null, completedAt: stamp(), updatedAt: stamp() } } : {}) };
         await commit(root, state, 'job_succeeded', { jobs: [job] }, { jobId: job.id });
       } catch (error) {
         clearTimeout(timer);
@@ -292,5 +326,5 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
 }
 
 export function summarize(state) {
-  return { revision: state.revision, budget: state.budget, counts: Object.fromEntries(['queued', 'running', 'retry_wait', 'needs_attention', 'succeeded', 'cancelled'].map(s => [s, state.jobs.filter(j => j.state === s).length])), jobs: state.jobs.map(({ id, business, kind, title, state, attempts, maxAttempts, nextAttemptAt, error }) => ({ id, business, kind, title, state, attempts, maxAttempts, nextAttemptAt, error })), active: state.jobs.filter(j => ACTIVE.has(j.state)).length };
+  return { revision: state.revision, budget: state.budget, counts: Object.fromEntries(['queued', 'running', 'retry_wait', 'needs_attention', 'succeeded', 'cancelled'].map(s => [s, state.jobs.filter(j => j.state === s).length])), jobs: state.jobs.map(({ id, business, kind, title, state, attempts, maxAttempts, nextAttemptAt, error, workflow }) => ({ id, business, kind, title, state, attempts, maxAttempts, nextAttemptAt, error, workflow })), active: state.jobs.filter(j => ACTIVE.has(j.state)).length };
 }

@@ -1,10 +1,16 @@
 # Centro de operaciones local
 
-Cola pequeña para dos líneas de trabajo: videojuegos (`games`) y agencia digital (`agency`). Funciona con Node 20 o posterior, sin instalaciones ni dependencias. No es un panel web/móvil ni configura Orca: puedes abrir esta carpeta como espacio separado y utilizar su terminal.
+Centro local de trabajo para dos líneas: videojuegos (`games`) y agencia digital (`agency`). Funciona con Node 20 o posterior, sin dependencias. Incluye un panel web de solo loopback para la cola, Obsidian, ideas, renovaciones y la secretaria de Telegram; Orca conserva su propio panel de sesiones de agentes.
 
 ## Empezar
 
-En una terminal de esta carpeta:
+Para abrir el panel en una terminal de esta carpeta:
+
+```powershell
+node dashboard.mjs
+```
+
+Abre `http://127.0.0.1:4187` en el navegador. En Windows puedes iniciar el panel con `ABRIR_PANEL.cmd`; el acceso directo de escritorio `Centro de Operaciones` arranca el servidor si hace falta y abre la pagina. Para usar la cola desde terminal:
 
 ```powershell
 .\centro.cmd status
@@ -61,6 +67,12 @@ Al detectar una interrupción, los trabajos que estaban ejecutándose pasan a `n
 
 Las instrucciones, las respuestas y los eventos se guardan localmente en texto. Mantén esta carpeta privada y conserva una copia de `data` para recuperarte de fallos de disco. Los archivos no se cifran. La recuperación evita repetir trabajos ambiguos, pero no puede garantizar ejecución exactamente una vez ante fallos externos o del equipo.
 
+## Inventario de dominios y secretaria de Telegram
+
+El panel local y la secretaria de Telegram están en [`agency-assistant/README.md`](agency-assistant/README.md). Incluye una web en `http://127.0.0.1:4187` para cola, preguntas para Daniel, notas de Obsidian, inventario manual de dominios y avisos. Los resultados se escriben automáticamente en Markdown y el contexto reciente de cada negocio se ofrece al agente correspondiente.
+
+`agency-assistant/install-panel-autostart.ps1` registra el panel para que arranque al iniciar sesión en Windows, sin Telegram. Cuando tengas un bot, `agency-assistant/install-windows-autostart.ps1` sustituye esa misma tarea para arrancar panel y secretaria juntos. Requiere el PC encendido y que la sesión de Windows esté abierta; no funciona como servicio antes de iniciar sesión. El modo de ejecución automática de trabajos se activa desde el panel y se pausa ante una tarea que requiera revisión. Los datos se guardan localmente en `data/`, carpeta excluida de Git.
+
 ## Vigilancia local con límites
 
 El vigilante consulta únicamente archivos locales cada cinco segundos: no llama a modelos mientras la cola está vacía o pausada. Se inicia en simulación; solo `--execute` permite ejecutar. Atiende un trabajo cada vez y cuenta también los intentos fallidos, con los mismos bloqueos y límites de presupuesto de la cola.
@@ -86,3 +98,7 @@ node --test tests/watch.test.mjs
 ```
 
 Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace. `centro.cmd` usa el Node 24 portable existente si está disponible y, en su defecto, `node` del sistema.
+
+## Flujo de agentes desde el panel
+
+Los encargos nuevos creados en el panel se envían a Orca. Las ideas pasan por `planificador`; las tareas de código siguen `ux` → `desarrollador` → `qa` → `revisor`, con un perfil activo cada vez. Abre cada tarjeta de la cola para ver estados, perfiles, dispatches e informes de etapa. La ejecución se inicia con el botón del panel; el autoRun permanece apagado salvo que se active en Ajustes.

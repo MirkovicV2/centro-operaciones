@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Centro de Operaciones · Daniel</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#inicio" aria-label="Centro de Operaciones">
+        <span class="brand-mark">D</span>
+        <span><b>Centro</b><small>de operaciones</small></span>
+      </a>
+      <div class="workspace-label">ESPACIOS DE TRABAJO</div>
+      <nav class="nav" aria-label="Navegación principal">
+        <a class="nav-link active" href="#inicio"><span>◫</span> Resumen</a>
+        <a class="nav-link" href="#proyectos"><span>▦</span> Proyectos <i id="project-count">0</i></a>
+        <a class="nav-link" href="#trabajos"><span>▤</span> Trabajos</a>
+        <a class="nav-link" href="#ideas"><span>✳</span> Ideas y preguntas <i id="question-count">0</i></a>
+        <a class="nav-link" href="#conocimiento"><span>⌘</span> Conocimiento</a>
+        <a class="nav-link" href="#dominios"><span>◉</span> Dominios IONOS</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="connection-dot"><span id="panel-dot"></span><span id="panel-state">Panel local</span></div>
+        <div class="sidebar-note">Privado en este PC<br>Solo accesible desde localhost</div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumb">Daniel <span>/</span> <b id="page-name">Resumen</b></div>
+        <div class="topbar-right"><span id="updated-at">Actualizando…</span><button class="icon-button" id="refresh" title="Actualizar panel" aria-label="Actualizar">↻</button></div>
+      </header>
+
+      <section class="page-section" id="inicio">
+        <div class="hero-row">
+          <div>
+            <div class="eyebrow">VISTA GENERAL · TU ESTUDIO Y AGENCIA</div>
+            <h1>Todo en marcha,<br><em>en un solo sitio.</em></h1>
+            <p class="intro">Sigue el trabajo de los agentes, captura ideas y consulta lo que queda registrado en Obsidian.</p>
+          </div>
+          <div class="hero-orbit" aria-hidden="true"><span></span><span></span><span></span><b>DO</b></div>
+        </div>
+
+        <div class="status-grid">
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon purple">▤</span><span id="queue-badge" class="badge neutral">Leyendo</span></div>
+            <div class="metric" id="metric-active">—</div><div class="metric-label">trabajos activos en la cola</div>
+            <div class="metric-foot"><span id="metric-needs">—</span> necesitan revisión</div>
+          </article>
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon green">✳</span><span id="obsidian-badge" class="badge neutral">Sin conectar</span></div>
+            <div class="metric" id="metric-notes">—</div><div class="metric-label">resultados guardados en Obsidian</div>
+            <div class="metric-foot" id="obsidian-foot">Configura la bóveda una vez</div>
+          </article>
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon amber">?</span><span class="badge neutral">Bandeja</span></div>
+            <div class="metric" id="metric-questions">—</div><div class="metric-label">preguntas que esperan tu criterio</div>
+            <div class="metric-foot">Puedes responder aquí o por Telegram</div>
+          </article>
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon blue">◉</span><span id="telegram-badge" class="badge neutral">Desconectado</span></div>
+            <div class="metric" id="metric-domains">—</div><div class="metric-label">dominios activos en inventario</div>
+            <div class="metric-foot" id="telegram-foot">Telegram se configura localmente</div>
+          </article>
+        </div>
+
+        <div class="section-heading">
+          <div><div class="eyebrow">POR NEGOCIO</div><h2>Dos líneas, una vista clara</h2></div>
+          <button class="text-button" data-scroll="trabajos">Ver cola completa <span>→</span></button>
+        </div>
+        <div class="business-grid">
+          <article class="business-card agency-card">
+            <div class="business-kicker"><span class="business-orb agency-orb">A</span><span>AGENCIA DIGITAL</span></div>
+            <h3>Agency</h3><p>Clientes, servicios, dominios y entregas.</p>
+            <div class="business-stats"><div><b id="agency-active">0</b><span>activos</span></div><div><b id="agency-done">0</b><span>completados</span></div><div><b id="agency-domains">0</b><span>dominios</span></div></div>
+          </article>
+          <article class="business-card games-card">
+            <div class="business-kicker"><span class="business-orb games-orb">G</span><span>ESTUDIO INDIE</span></div>
+            <h3>Games</h3><p>Ideas, prototipos y trabajo de desarrollo.</p>
+            <div class="business-stats"><div><b id="games-active">0</b><span>activos</span></div><div><b id="games-done">0</b><span>completados</span></div><div><b id="games-domains">—</b><span>dominios</span></div></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="page-section" id="proyectos">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">SEGUIMIENTO POR APLICACIÓN</div><h2>Proyectos</h2><p class="section-copy">Cada juego, web o producto tiene su propia etapa, siguiente acción e historial de trabajos.</p></div>
+        </div>
+        <div class="project-toolbar">
+          <input id="project-search" type="search" placeholder="Buscar proyecto">
+          <select id="project-business-filter"><option value="all">Todas las líneas</option><option value="games">Videojuegos</option><option value="agency">Agencia</option></select>
+          <select id="project-status-filter"><option value="active">Activos</option><option value="all">Todos los estados</option><option value="paused">Pausados</option><option value="completed">Completados</option></select>
+        </div>
+        <form class="form-card project-create-form" id="project-create-form">
+          <label>Nombre del proyecto<input name="name" maxlength="100" required placeholder="Ej.: nombre del juego o aplicación"></label>
+          <label>Línea de negocio<select name="business" required><option value="games">Videojuegos</option><option value="agency">Agencia</option></select></label>
+          <button class="button primary" type="submit">Crear proyecto</button>
+        </form>
+        <div id="projects-grid" class="projects-grid"></div>
+      </section>
+
+      <section class="page-section" id="trabajos">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">EJECUCIÓN</div><h2>Trabajos de los agentes</h2><p class="section-copy">Los resultados terminados se guardan automáticamente en Obsidian cuando conectas la bóveda.</p></div>
+          <div class="button-row"><button class="button secondary" id="run-next">Procesar siguiente</button><button class="button primary" id="show-new-job">＋ Nuevo trabajo</button></div>
+        </div>
+        <div class="run-status" id="run-status" hidden></div>
+        <form class="form-card job-form" id="job-form" hidden>
+          <div class="form-title"><div><div class="eyebrow">AÑADIR A LA COLA</div><h3>Nuevo trabajo</h3></div><button type="button" class="icon-button" id="hide-new-job" aria-label="Cerrar">×</button></div>
+          <div class="form-grid">
+            <label>Empresa<select name="business" id="job-business" required><option value="agency">Agencia</option><option value="games">Videojuegos</option></select></label>
+            <label>Proyecto<select name="projectId" id="job-project" required></select></label>
+            <label>Tipo<select name="kind" id="job-kind" required><option value="analysis">Análisis</option><option value="code">Código en checkout aislado</option></select></label>
+            <label class="wide">Título<input name="title" maxlength="160" required placeholder="Resultado concreto que quieres obtener"></label>
+            <label class="wide">Objetivo e instrucciones<textarea name="prompt" maxlength="10000" rows="4" required placeholder="Qué resultado necesitas y el contexto relevante"></textarea></label>
+            <label class="wide">Criterio de éxito<textarea name="successCriteria" maxlength="1800" rows="2" required placeholder="Qué podremos comprobar para darlo por terminado"></textarea></label>
+            <label class="wide workspace-field" hidden>Ruta del checkout aislado<input name="workspace" placeholder="C:\\...\\workspaces\\mi-checkout"></label>
+            <label class="workspace-field" hidden><span class="check-label"><input name="isolated" type="checkbox"> Confirmo que es una copia aislada con su propio .git</span></label>
+          </div>
+          <div class="form-footer"><span>Las tareas de código quedan para revisión; no se fusionan ni publican desde aquí.</span><button class="button primary" type="submit">Añadir a la cola</button></div>
+        </form>
+        <div class="filters" role="group" aria-label="Filtrar trabajos">
+          <button class="filter active" data-filter="all">Todos <span id="filter-all">0</span></button><button class="filter" data-filter="active">Activos <span id="filter-active">0</span></button><button class="filter" data-filter="needs_attention">Necesitan revisión <span id="filter-attention">0</span></button><button class="filter" data-filter="succeeded">Completados <span id="filter-done">0</span></button>
+        </div>
+        <div id="jobs-list" class="jobs-list"></div>
+      </section>
+
+      <section class="page-section" id="ideas">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">DECISIONES Y DIRECCIÓN</div><h2>Ideas y preguntas</h2><p class="section-copy">Las respuestas que des aquí también quedan en Obsidian y se ofrecen como contexto a futuras tareas del mismo negocio.</p></div>
+        </div>
+        <div class="idea-layout">
+          <form class="form-card idea-form" id="idea-form">
+            <div class="eyebrow">CAPTURA RÁPIDA</div><h3>Una idea para el equipo</h3>
+            <label>Empresa<select name="business" id="idea-business"><option value="agency">Agencia</option><option value="games">Videojuegos</option></select></label>
+            <label>Proyecto<select name="projectId" id="idea-project" required></select></label>
+            <label>Idea o indicación<textarea name="text" rows="5" maxlength="6000" required placeholder="Escribe una idea, preferencia o dirección para el siguiente trabajo…"></textarea></label>
+            <button class="button primary full" type="submit">Guardar y enviar al planificador <span>→</span></button>
+            <button class="button secondary full" type="button" id="save-idea-only">Solo guardar la idea</button>
+            <p class="microcopy">Al enviarla, entra en la cola como análisis del planificador. No modifica código. La autoejecución de la cola determina si empieza sola.</p>
+          </form>
+          <div class="questions-panel"><div class="panel-heading"><div><div class="eyebrow">BANDEJA PERSONAL</div><h3>El equipo necesita tu criterio</h3></div><span class="count-pill" id="pending-pill">0</span></div><div id="questions-list" class="questions-list"></div></div>
+        </div>
+        <div class="telegram-inbox">
+          <div class="panel-heading"><div><div class="eyebrow">SECRETARIA · TELEGRAM</div><h3>Mensajes recibidos</h3></div><span class="count-pill" id="telegram-message-count">0</span></div>
+          <p class="section-copy">Los mensajes libres enviados al bot aparecen aquí y se guardan como nota local en Obsidian. Usa /anotar o /recordar para crear tareas directamente.</p>
+          <div id="telegram-messages" class="telegram-messages"></div>
+        </div>
+      </section>
+
+      <section class="page-section" id="conocimiento">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">OBSIDIAN · MAPA DE NOTAS</div><h2>Conocimiento conectado</h2><p class="section-copy">Vista de relaciones creada desde los enlaces [[wikilink]] de la bóveda. Es un mapa local del panel, no un conector oficial de Graphify.</p></div>
+          <button class="button secondary" id="refresh-graph">↻ Actualizar mapa</button>
+        </div>
+        <div class="knowledge-layout">
+          <div class="graph-card"><div class="graph-toolbar"><div><b id="graph-title">Bóveda sin conectar</b><span id="graph-subtitle">Los enlaces entre notas aparecerán aquí</span></div><span class="legend"><i class="legend-idea"></i>Idea <i class="legend-job"></i>Trabajo</span></div><div id="graph" class="graph-view"><div class="empty-graph"><span>⌘</span><b>Tu mapa de conocimiento aparecerá aquí</b><small>Conecta Obsidian y enlaza notas con [[wikilinks]].</small></div></div></div>
+          <aside class="settings-card"><div class="eyebrow">CONEXIÓN LOCAL</div><h3>Obsidian</h3><p>Elige la carpeta raíz de tu bóveda. El panel escribirá resultados e ideas como archivos Markdown.</p>
+            <form id="settings-form"><label>Ruta de la bóveda<input name="vaultPath" placeholder="C:\\Users\\...\\Obsidian\\Mi bóveda" required></label><div class="path-hint" id="vault-path-hint">Aún no hay una bóveda configurada.</div><label class="check-label auto-label"><input name="autoRun" type="checkbox"> Ejecutar automáticamente la cola</label><p class="microcopy warning-copy">Respeta el presupuesto y pausa al encontrar un trabajo que requiere revisión. Los cambios de código siguen en checkouts aislados y requieren revisión humana.</p><button class="button primary full" type="submit">Guardar conexión</button></form>
+            <a class="external-link" href="https://docs.getgraphify.com/docs/faq" target="_blank" rel="noreferrer">Sobre Graphify y Obsidian ↗</a>
+          </aside>
+        </div>
+        <div class="vault-recent"><div class="panel-heading"><div><div class="eyebrow">CAPTURAS AUTOMÁTICAS</div><h3>Últimas ideas guardadas</h3></div></div><div id="ideas-list" class="recent-ideas"></div></div>
+      </section>
+
+      <section class="page-section" id="dominios">
+        <div class="section-heading section-heading-spaced"><div><div class="eyebrow">AGENCIA DIGITAL</div><h2>Dominios IONOS</h2><p class="section-copy">Inventario manual. Los avisos de renovación salen por Telegram mientras el bot esté activo.</p></div><a id="open-obsidian" class="button secondary" href="obsidian://open">Abrir Obsidian</a></div>
+        <div id="domains-list" class="domains-list"></div>
+        <div class="tasks-panel"><div class="panel-heading"><div><div class="eyebrow">SECRETARIA</div><h3>Pendientes y recordatorios</h3></div></div><div id="assistant-tasks" class="assistant-tasks"></div></div>
+      </section>
+
+      <footer class="footer"><span>Centro de Operaciones · local</span><span>Agencia y games conservan sus colas separadas.</span></footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
