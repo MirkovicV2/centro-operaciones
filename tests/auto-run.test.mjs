@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { confirmSubmission, createAutoRunner, readAutoRun, setAutoRun, reviewAutoReceipt } from '../auto-run.mjs';
+import { confirmSubmission, createAutoRunner, readAutoRun, retryAutoReceipt, setAutoRun, reviewAutoReceipt } from '../auto-run.mjs';
 import { addJob, loadState, acquireLock, releaseLock, runQueue } from '../queue.mjs';
 import { verifyGitHubDestination, githubRepository } from '../project-destination.mjs';
 import { createProject, createIdea, loadDashboardState, mutateIdea } from '../workspaces/agency-assistant/agency-assistant/dashboard-state.mjs';
@@ -244,12 +244,97 @@ test('GitHub verification uses only mocked read-only Git commands and rejects ba
   assert.equal(githubRepository('git@github.com:Owner/Repo.git'), 'owner/repo');
 });
 
+test('verified automatic destination preserves its base branch through queue admission', async t => {
+  const root = await fixture(t);
+  const workspace = path.join(root, 'workspaces', 'checkout');
+  await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const sourceSha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
+  const job = spec('git-base', 'games', {
+    kind: 'code', workspace, isolated: true, branch: 'develop',
+    destination: { repository: 'owner/repo', baseBranch: 'main' },
+    autoIntent: { receiptId: 'receipt-git-base', eligible: true },
+  });
+  const verified = await verifyGitHubDestination(root, job, {
+    inspect: async () => ({ checkout: 'workspaces/checkout', workspace, branch: 'develop', valid: true }),
+    git: async args => {
+      if (args[0] === 'remote') return 'https://github.com/owner/repo.git';
+      if (args[0] === 'symbolic-ref') return 'develop';
+      if (args[0] === 'rev-parse') return sourceSha;
+      if (args[0] === 'status') return '';
+      if (args[0] === 'ls-remote' && args.at(-1) === 'refs/heads/develop') return `${sourceSha}\trefs/heads/develop`;
+      if (args[0] === 'ls-remote' && args.at(-1) === 'refs/heads/main') return `${baseSha}\trefs/heads/main`;
+      assert.fail(`Unexpected read-only Git command: ${args.join(' ')}`);
+    },
+  });
+  assert.equal(verified.baseBranch, 'main');
+  assert.equal(verified.baseSha, baseSha);
+});
+
+test('reviewed pre-dispatch retry restores base branch from immutable receipt and resumes the same job once', async t => {
+  const root = await fixture(t); await enable(root, 'games');
+  const workspace = path.join(root, 'workspaces', 'checkout'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const sent = await confirmSubmission(root, 'receipt-retry-destination', spec('retry-destination', 'games', {
+    kind: 'code', workspace, isolated: true, branch: 'develop',
+    destination: { checkout: 'workspaces/checkout', workspace, branch: 'develop', repository: 'owner/repo', baseBranch: 'main' },
+    autoIntent: { receiptId: 'receipt-retry-destination', eligible: true },
+  }));
+  let verification = 0, starts = 0;
+  const verify = async (_root, job) => {
+    verification++;
+    assert.equal(job.destination.baseBranch, 'main');
+    const result = { checkout: 'workspaces/checkout', workspace, branch: 'develop', repository: 'owner/repo', origin: 'https://github.com/owner/repo.git', sha: 'a'.repeat(40), remoteSha: 'a'.repeat(40), verified: true };
+    // Simulate the previously deployed verifier, which dropped baseBranch.
+    return verification === 1 ? result : { ...result, baseBranch: 'main', baseSha: 'b'.repeat(40) };
+  };
+  const failed = createAutoRunner(root, { verify, worker: async () => { starts++; throw new Error('pre-dispatch provider failure'); } });
+  await failed.tick();
+  assert.equal(starts, 1);
+  assert.equal((await loadState(root)).jobs[0].state, 'needs_attention');
+  assert.equal((await readAutoRun(root)).receipts[0].status, 'needs_attention');
+  assert.equal((await loadState(root)).jobs[0].workflow.steps.some(step => step.dispatchId || step.taskId || step.runId), false);
+  await assert.rejects(retryAutoReceipt(root, sent.job.id), /Confirma/);
+  await assert.rejects(retryAutoReceipt(root, sent.job.id, { confirm: true }), /no existe Run\/dispatch/);
+  const retried = await retryAutoReceipt(root, sent.job.id, { confirm: true, noDispatchConfirmed: true });
+  assert.equal(retried.id, sent.job.id);
+  assert.equal((await readAutoRun(root)).receipts[0].retryAuthorizedAttempt, 1);
+  const resumed = createAutoRunner(root, { verify, worker: async (_job, ctx) => {
+    starts++;
+    for (const step of _job.workflow.steps) await ctx.reportStage({ key: step.key, status: 'succeeded' });
+    return worker();
+  } });
+  await resumed.tick();
+  assert.equal(starts, 2);
+  assert.equal(verification, 2);
+  assert.equal((await loadState(root)).jobs[0].state, 'succeeded');
+  assert.equal((await loadState(root)).jobs[0].destination.baseBranch, 'main');
+  assert.equal((await readAutoRun(root)).receipts[0].status, 'completed');
+  await resumed.tick(); assert.equal(starts, 2);
+});
+
+test('auto retry refuses when a workflow stage already has a dispatch checkpoint', async t => {
+  const root = await fixture(t); await enable(root, 'games');
+  const workspace = path.join(root, 'workspaces', 'checkout');
+  const sent = await confirmSubmission(root, 'receipt-dispatched-retry', spec('dispatched-retry', 'games', {
+    kind: 'code', workspace, isolated: true, branch: 'develop',
+    destination: { checkout: 'workspaces/checkout', workspace, branch: 'develop', repository: 'owner/repo', baseBranch: 'main' },
+    autoIntent: { receiptId: 'receipt-dispatched-retry', eligible: true },
+  }));
+  const state = await loadState(root), previous = state.jobs[0];
+  const workflow = { ...previous.workflow, status: 'needs_attention', currentStage: 'ux', steps: previous.workflow.steps.map((step, index) => index === 0 ? { ...step, status: 'failed', runId: 'run_prior', taskId: 'task_prior', dispatchId: 'ctx_prior' } : step) };
+  const job = { ...previous, state: 'needs_attention', attempts: 1, workflow };
+  await fs.appendFile(path.join(root, 'data', 'events.jsonl'), JSON.stringify({ schema: 1, revision: state.revision + 1, at: new Date().toISOString(), type: 'simulated_started_dispatch', patch: { jobs: [job] } }) + '\n');
+  await alterAuto(root, current => { current.receipts[0].status = 'needs_attention'; });
+  await assert.rejects(retryAutoReceipt(root, sent.job.id, { confirm: true, noDispatchConfirmed: true }), /fallo previo al dispatch verificable/);
+  assert.equal((await loadState(root)).jobs[0].workflow.steps[0].dispatchId, 'ctx_prior');
+  assert.equal((await readAutoRun(root)).receipts[0].status, 'needs_attention');
+});
+
 test('code admission persists verified repository/branch/SHA and executes business workflow serially', async t => {
   const root = await fixture(t); await enable(root, 'games');
   const workspace = path.join(root, 'workspaces', 'code'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
-  await confirmSubmission(root, 'receipt-code-valid', spec('code', 'games', { kind: 'code', workspace, isolated: true, branch: 'main', destination: { repository: 'owner/repo' } }));
+  await confirmSubmission(root, 'receipt-code-valid', spec('code', 'games', { kind: 'code', workspace, isolated: true, branch: 'main', destination: { checkout: 'workspaces/code', workspace, branch: 'main', repository: 'owner/repo', baseBranch: 'main' } }));
   const phases = [];
-  const runner = createAutoRunner(root, { verify: async () => ({ workspace, repository: 'owner/repo', branch: 'main', sha: 'a'.repeat(40), verified: true }), worker: async (job, ctx) => {
+  const runner = createAutoRunner(root, { verify: async () => ({ workspace, repository: 'owner/repo', branch: 'main', baseBranch: 'main', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), verified: true }), worker: async (job, ctx) => {
     for (const step of job.workflow.steps) { phases.push(step.profile); await ctx.reportStage({ key: step.key, status: 'succeeded', dispatchId: `ctx_${step.key}` }); }
     return worker();
   } });

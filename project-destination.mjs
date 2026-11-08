@@ -75,9 +75,9 @@ export async function verifyGitHubDestination(root, job, { git, inspect = inspec
   const lines = remote.split(/\r?\n/).filter(Boolean);
   const [remoteSha, ref] = (lines[0] || '').split(/\s+/);
   if (lines.length !== 1 || ref !== `refs/heads/${job.branch}` || !/^[a-f0-9]{40,64}$/i.test(sha) || remoteSha !== sha) throw new Error('Rama remota ausente o SHA local/remoto distinto; sincroniza y revisa manualmente el checkout.');
+  const baseBranch = job.destination?.baseBranch || null;
   let baseSha = null;
   if (job.autoIntent?.eligible === true) {
-    const baseBranch = job.destination?.baseBranch;
     if (!baseBranch || baseBranch.includes('..') || /[\\\x00\r\n]/.test(baseBranch) || baseBranch.startsWith('-')) throw new Error('Rama base no configurada; la integración automática queda bloqueada.');
     const baseRemote = await run(['ls-remote', '--exit-code', '--heads', 'origin', `refs/heads/${baseBranch}`]);
     const baseRows = baseRemote.split(/\r?\n/).filter(Boolean);
@@ -85,5 +85,5 @@ export async function verifyGitHubDestination(root, job, { git, inspect = inspec
     if (baseRows.length !== 1 || baseRef !== `refs/heads/${baseBranch}` || !/^[a-f0-9]{40,64}$/i.test(candidate)) throw new Error('Rama base ausente o no verificable en origin.');
     baseSha = candidate;
   }
-  return { ...observed, repository, origin, sha, remoteSha, ...(baseSha ? { baseSha } : {}), verified: true, checkedAt: new Date().toISOString() };
+  return { ...observed, repository, origin, sha, remoteSha, ...(baseBranch ? { baseBranch } : {}), ...(baseSha ? { baseSha } : {}), verified: true, checkedAt: new Date().toISOString() };
 }

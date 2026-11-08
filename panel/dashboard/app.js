@@ -193,10 +193,14 @@ function renderJobs(data) {
         button.disabled = !data.executor?.available || (action === 'retry' && job.attempts >= job.maxAttempts);
         button.title = !data.executor?.available ? data.executor?.reason : action === 'retry' && job.attempts >= job.maxAttempts ? 'Máximo de intentos alcanzado' : '';
         button.addEventListener('click', async () => {
-          if (!confirm(`${label}: ${job.title} (${job.id}).\nMotivo: ${job.error?.message || 'Requiere revisión'}.\nConfirma que revisaste los efectos y que no queda ningún agente activo. ${action === 'retry' ? 'Se volverá a encolar este trabajo; su ejecución será manual.' : 'Se cerrará sin cancelar dispatches de Orca.'}`)) return;
+          const autoRetry = action === 'retry' && job.autoIntent?.eligible && receipt?.status === 'needs_attention';
+          const reviewText = autoRetry
+            ? 'Consulta Orca y confirma que no hay Run ni dispatch para este intento y que no hay agentes activos. El mismo trabajo se reintentará una vez con su recibo confirmado.'
+            : 'Confirma que revisaste los efectos y que no queda ningún agente activo.';
+          if (!confirm(`${label}: ${job.title} (${job.id}).\nMotivo: ${job.error?.message || 'Requiere revisión'}.\n${reviewText} ${action === 'retry' ? 'Se volverá a encolar este trabajo.' : 'Se cerrará sin cancelar dispatches de Orca.'}`)) return;
           button.disabled = true;
           try {
-            await api(`/api/jobs/${encodeURIComponent(job.id)}/${action}`, { method: 'POST', body: JSON.stringify({ confirmReviewed: true }) });
+            await api(`/api/jobs/${encodeURIComponent(job.id)}/${action}`, { method: 'POST', body: JSON.stringify({ confirmReviewed: true, noDispatchConfirmed: autoRetry }) });
             state.highlightJob = job.id;
             await refresh();
           } catch (error) { notify(error.message, true); button.disabled = false; }

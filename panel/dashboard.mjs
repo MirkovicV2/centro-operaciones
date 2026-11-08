@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveOperationsRoot } from './operations-root.mjs';
 import { addJob, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob } from './queue.mjs';
 import { inspectDestination } from '../project-destination.mjs';
-import { confirmSubmission, readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt } from '../auto-run.mjs';
+import { confirmSubmission, readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt } from '../auto-run.mjs';
 import { createWorker } from '../providers.mjs';
 import { checkoutChoices, sendIdeaToQueue, reconcileIdeaRequests } from './agency-assistant/idea-workflow.mjs';
 import { loadState as loadAssistantState } from './agency-assistant/store.mjs';
@@ -174,9 +174,16 @@ async function handleApi(request, response, url) {
   }
   const reviewedJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/(retry|resolve)$/);
   if (reviewedJob) {
-    const job = reviewedJob[2] === 'retry'
-      ? await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true })
-      : await resolveJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
+    let job;
+    if (reviewedJob[2] === 'retry') {
+      const current = (await loadQueue(QUEUE_ROOT)).jobs.find(item => item.id === reviewedJob[1]);
+      const receipt = current?.autoIntent?.eligible ? (await readAutoRun(QUEUE_ROOT)).receipts.find(item => item.jobId === current.id) : null;
+      job = receipt?.status === 'needs_attention'
+        ? await retryAutoReceipt(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true, noDispatchConfirmed: body.noDispatchConfirmed === true })
+        : await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
+    } else {
+      job = await resolveJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
+    }
     return send(response, 200, job);
   }
   if (url.pathname === '/api/jobs') {

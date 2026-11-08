@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { addJob, loadState, runQueue, recoverDashboardQueue, validateSpec } from './queue.mjs';
+import { addJob, loadState, runQueue, recoverDashboardQueue, retryJob, validateSpec } from './queue.mjs';
 import { verifyGitHubDestination } from './project-destination.mjs';
 
 const location = root => path.join(path.resolve(root), 'data', 'auto-run.json');
@@ -145,12 +145,13 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
       // was returned: transport uncertainty is not evidence of non-execution.
       for (const receipt of saved.receipts) {
         const job = queue.jobs.find(item => item.id === receipt.jobId);
-        if (receipt.status === 'claimed' || (receipt.status === 'pending' && job?.attempts > 0)) {
+        const reviewedRetry = job?.state === 'queued' && receipt.retryAuthorizedAttempt === job.attempts;
+        if (receipt.status === 'claimed' || (receipt.status === 'pending' && job?.attempts > 0 && !reviewedRetry)) {
           await update(receipt.id, job?.state === 'succeeded' ? 'completed' : 'needs_attention', { reason: 'Intento previo o despacho incierto; consulta Orca y revisa efectos antes de decidir.' });
         }
       }
       let state = await readAutoRun(root);
-      if (state.receipts.some(item => ['needs_attention', 'blocked'].includes(item.status)) || queue.jobs.some(job => ['needs_attention', 'running'].includes(job.state))) return;
+      if (state.receipts.some(item => ['needs_attention', 'blocked', 'retrying'].includes(item.status)) || queue.jobs.some(job => ['needs_attention', 'running'].includes(job.state))) return;
       // Recover confirmed outbox entries, including manual ones, without ever
       // promoting their original eligibility when settings change.
       for (const receipt of state.receipts.filter(item => item.status === 'pending')) {
@@ -162,16 +163,24 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
       queue = await loadState(root);
       state = await readAutoRun(root);
       try { await fs.access(path.join(root, 'data', 'PAUSE')); return; } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      const receipt = state.receipts.find(item => item.status === 'pending' && item.eligible && state.businesses[item.business] && queue.jobs.some(job => job.id === item.jobId && job.state === 'queued' && job.attempts === 0));
+      const receipt = state.receipts.find(item => item.status === 'pending' && item.eligible && state.businesses[item.business] && queue.jobs.some(job => job.id === item.jobId && job.state === 'queued' && (job.attempts === 0 || item.retryAuthorizedAttempt === job.attempts)));
       if (!receipt) return;
       let checkoutLock, lockPath, admitted = false, uncertain = false;
       try {
         const result = await run(root, { execute: true, maxJobs: 1, jobId: receipt.jobId, worker,
           beforeStart: async job => {
-            if (job.id !== receipt.jobId || job.attempts !== 0 || job.autoIntent?.receiptId !== receipt.id || !job.autoIntent.eligible) throw new Error('El recibo y el job no coinciden; requiere revisión.');
+            const reviewedRetry = job.attempts > 0 && receipt.retryAuthorizedAttempt === job.attempts;
+            if (job.id !== receipt.jobId || (job.attempts !== 0 && !reviewedRetry) || job.autoIntent?.receiptId !== receipt.id || !job.autoIntent.eligible) throw new Error('El recibo y el job no coinciden; requiere revisión.');
             let destination = job.destination;
+            let admittedJob = job;
             if (job.kind === 'code') {
-              destination = await verify(root, job);
+              const receiptSpec = (await readAutoRun(root)).receipts.find(item => item.id === receipt.id)?.spec;
+              if (!destination?.baseBranch && receiptSpec?.id === job.id && receiptSpec?.destination?.baseBranch) {
+                destination = { ...destination, baseBranch: receiptSpec.destination.baseBranch };
+              }
+              if (destination?.workspace !== job.workspace || destination?.branch !== job.branch || !destination?.baseBranch) throw new Error('Destino sin coincidencia exacta con el recibo confirmado; requiere revisión.');
+              admittedJob = { ...job, destination };
+              destination = await verify(root, admittedJob);
               lockPath = path.join(destination.workspace, '.git', 'centro-executor.lock');
               try { checkoutLock = await fs.open(lockPath, 'wx'); }
               catch (error) { throw new Error(`Checkout ocupado o bloqueo pendiente; revisa ${lockPath}. ${error.code}`); }
@@ -223,4 +232,52 @@ export async function reviewAutoReceipt(root, id, { confirm = false } = {}) {
     audit(state, 'reviewed', { receiptId: id, jobId: receipt.jobId });
     return receipt;
   });
+}
+
+// Reopen only a reviewed, pre-dispatch auto-run failure. The immutable receipt
+// remains the source of destination truth; uncertain or started stages stay blocked.
+export async function retryAutoReceipt(root, jobId, { confirm = false, noDispatchConfirmed = false } = {}) {
+  if (!confirm || !noDispatchConfirmed) throw new Error('Confirma que consultaste Orca: no existe Run/dispatch para este intento y no hay agentes activos.');
+  const candidate = await change(root, async state => {
+    const receipt = state.receipts.find(item => item.jobId === jobId);
+    const job = (await loadState(root)).jobs.find(item => item.id === jobId);
+    const untouched = job?.workflow?.status === 'queued' && job.workflow.currentStage == null
+      && job.workflow.steps?.every(step => step.status === 'queued' && !step.runId && !step.taskId && !step.dispatchId)
+      && !job.result && job.attempts < job.maxAttempts;
+    if (!receipt || receipt.status !== 'needs_attention' || !receipt.eligible
+      || !job || job.state !== 'needs_attention' || job.autoIntent?.receiptId !== receipt.id
+      || receipt.spec?.id !== job.id || receipt.spec?.workspace !== job.workspace
+      || receipt.spec?.destination?.workspace !== job.workspace || receipt.spec?.destination?.branch !== job.branch || !untouched) {
+      throw new Error('Este intento no es un fallo previo al dispatch verificable; consulta Orca y conserva el estado para revisión.');
+    }
+    receipt.status = 'retrying'; receipt.updatedAt = now();
+    audit(state, 'retrying', { receiptId: receipt.id, jobId, reason: 'Reintento confirmado: workflow sin dispatch ni resultado.' });
+    return { receiptId: receipt.id, workspace: job.workspace };
+  });
+  try {
+    const workspacesRoot = path.resolve(root, 'workspaces');
+    const workspace = path.resolve(candidate.workspace);
+    const relative = path.relative(workspacesRoot, workspace);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('Checkout fuera de workspaces; no se libera ningún bloqueo.');
+    const lockPath = path.join(workspace, '.git', 'centro-executor.lock');
+    try {
+      const lockOwner = JSON.parse(await fs.readFile(lockPath, 'utf8'));
+      if (lockOwner.jobId !== jobId || lockOwner.receiptId !== candidate.receiptId) throw new Error('Bloqueo del checkout pertenece a otro trabajo; requiere revisión.');
+      await fs.unlink(lockPath);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const job = await retryJob(root, jobId, { confirm: true });
+    await change(root, state => {
+      const receipt = state.receipts.find(item => item.id === candidate.receiptId);
+      if (!receipt || receipt.status !== 'retrying') throw new Error('El recibo cambió durante el reintento; requiere revisión.');
+      receipt.status = 'pending'; receipt.retryAuthorizedAttempt = job.attempts; receipt.updatedAt = now();
+      audit(state, 'retry_authorized', { receiptId: receipt.id, jobId, attempt: job.attempts });
+    });
+    return job;
+  } catch (error) {
+    await change(root, state => {
+      const receipt = state.receipts.find(item => item.id === candidate.receiptId);
+      if (receipt?.status === 'retrying') { receipt.status = 'needs_attention'; receipt.updatedAt = now(); audit(state, 'retry_blocked', { receiptId: receipt.id, jobId, reason: error.message }); }
+    });
+    throw error;
+  }
 }
