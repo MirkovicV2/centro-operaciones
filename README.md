@@ -4,6 +4,8 @@ Cola local para videojuegos (`games`) y agencia digital (`agency`). Este reposit
 
 ## Empezar
 
+Para abrir el panel web local, ejecuta `ABRIR_PANEL.cmd` desde el Explorador o desde PowerShell. El servidor escucha solo en `127.0.0.1:4187`; la interfaz y el backend del panel están versionados en `panel/` y usan la cola de este repositorio. El inicio abre el navegador, pero no crea tareas ni inicia la cola por sí solo.
+
 En una terminal de esta carpeta:
 
 ```powershell
