@@ -1,6 +1,6 @@
 # Centro de operaciones local
 
-Cola pequeña para dos líneas de trabajo: videojuegos (`games`) y agencia digital (`agency`). Funciona con Node 20 o posterior, sin instalaciones ni dependencias. No es un panel web/móvil ni configura Orca: puedes abrir esta carpeta como espacio separado y utilizar su terminal.
+Cola local para videojuegos (`games`) y agencia digital (`agency`). Este repositorio contiene la cola y el conector Orca. El progreso de cada etapa se guarda en `data/state.json`; `data/operations-dashboard.json` declara las etapas y la ubicación de ese estado para que el panel central pueda representarlos.
 
 ## Empezar
 
@@ -12,12 +12,12 @@ En una terminal de esta carpeta:
 .\centro.cmd run
 ```
 
-`run` solo muestra una simulación. Para ejecutar expresamente la cola, usa `run --execute`. No hay tareas programadas ni ejecución al abrir la carpeta. Como máximo se procesan cinco trabajos por llamada (ajustable entre 1 y 20). Cada trabajo tiene dos intentos y tres minutos por defecto, con un máximo de tres intentos y treinta minutos.
+`run` solo muestra una simulación. Para ejecutar expresamente la cola, usa `run --execute`. No hay tareas programadas ni ejecución al abrir la carpeta. Como máximo se procesan cinco trabajos por llamada (ajustable entre 1 y 20). Cada trabajo tiene dos intentos por defecto; el timeout es de tres minutos para análisis y treinta minutos para trabajos de código Orca, con un máximo de tres intentos y treinta minutos.
 
-Para un análisis con la suscripción de ChatGPT, añade `--provider codex`. Se exige que el Codex nativo instalado esté conectado mediante ChatGPT; la cola consulta `codex login status`, sin leer ni copiar credenciales. La ejecución elimina las claves API del entorno del subproceso e ignora la configuración personal, desactiva apps/plugins/hooks y utiliza modo de solo lectura. El modelo es `gpt-6-luna` con esfuerzo `high` para análisis y `gpt-6.1-sol` con `medium` para código; puedes cambiarlos mediante `OPERATIONS_CODEX_MODEL` y `OPERATIONS_CODEX_EFFORT`. Sigue sujeta a los límites del plan y a la disponibilidad de Codex.
+Por defecto, las tareas usan Orca y los perfiles existentes de `.codex/agents/`. Los análisis pasan por `planificador`; los trabajos de código siguen el pipeline secuencial `ux` → `desarrollador` → `qa` → `revisor`. No hay ejecuciones paralelas ni delegación entre perfiles. Los estados, resúmenes y dispatches de cada etapa quedan en `jobs[].workflow` para mostrarlos en el panel. La primera ejecución registra en Orca la carpeta de análisis o el checkout aislado.
 
 ```powershell
-.\centro.cmd add --business games --kind analysis --title "Propuesta de juego" --prompt-file ".\ejemplos\videojuegos.txt" --provider codex --id idea-juego
+.\centro.cmd add --business games --kind analysis --title "Propuesta de juego" --prompt-file ".\ejemplos\videojuegos.txt" --id idea-juego
 .\centro.cmd run --execute --max-jobs 1
 .\centro.cmd show --id idea-juego
 ```
@@ -44,7 +44,7 @@ La cola no usa el repositorio de juego activo ni sus worktrees. Para código, pr
 .\centro.cmd add --business games --kind code --title "Cambio acotado" --prompt-file ".\mi-tarea.txt" --workspace ".\workspaces\mi-checkout" --isolated
 ```
 
-`--isolated` declara que has preparado y revisado ese checkout. El trabajador usa `workspace-write`, sin aprobaciones automáticas de acciones externas, y recibe instrucciones de no hacer commits, push, merge, publicaciones, compras, mensajes ni otros agentes. Esta versión entrega cambios para revisión; no integra ni publica automáticamente. Las instrucciones limitan el comportamiento del agente, pero no sustituyen la revisión humana ni un aislamiento del sistema operativo para código no fiable.
+`--isolated` declara que has preparado y revisado ese checkout. El trabajador usa `workspace-write`, sin aprobaciones automáticas de acciones externas, y recibe instrucciones de no hacer commits, push, merge, publicaciones, compras, mensajes ni otros agentes. Los trabajos manuales entregan cambios para revisión; solo los recibos automáticos elegibles pueden pasar al paso separado de integración después de las cuatro aprobaciones, según [GITHUB_INTEGRATION.md](GITHUB_INTEGRATION.md). Las instrucciones limitan el comportamiento del agente, pero no sustituyen la revisión humana ni un aislamiento del sistema operativo para código no fiable.
 
 ## Recuperación y revisión
 
@@ -86,3 +86,52 @@ node --test tests/watch.test.mjs
 ```
 
 Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace. `centro.cmd` usa el Node 24 portable existente si está disponible y, en su defecto, `node` del sistema.
+
+## Retirar falsos éxitos de código
+
+Si un trabajo figura como completado pero su respuesta guardada confirma que no implementó nada, conserva la evidencia original y retira ese estado:
+
+```powershell
+.\centro.cmd retract --id IDENTIFICADOR --confirm-reviewed
+```
+
+El registro conserva la respuesta y anota la corrección como cancelada. El ejecutor de código exige ahora cambios verificables en el checkout antes de marcar un trabajo como completado.
+Tras revisar la implementación, una compilación y el APK, el coordinador puede registrar la entrega de un falso éxito ya retirado sin atribuírsela a Codex:
+
+```powershell
+.\centro.cmd complete --id IDENTIFICADOR --evidence-file .\informe.md --confirm-reviewed
+```
+
+El registro exige cambios visibles en el checkout, conserva la respuesta original bajo `retractedAttemptResult` y etiqueta la entrega como `coordinator-reviewed`.
+
+## Pipeline de calidad de Orca
+
+Antes de inspeccionar contenido del checkout de Videojuegos, la ruta confirmada por job/panel debe ser absoluta y canónica (`path.isAbsolute` y `path.normalize(rutaConfirmada) === rutaConfirmada`). La ruta real consultada localmente con `realpath` debe normalizarse con `path.normalize` y coincidir exactamente con esa ruta absoluta; la referencia de rama activa consultada mediante Git debe coincidir exactamente con la branch ref confirmada. Si la ruta confirmada no es absoluta y canónica, no se puede leer/verificar la ruta local o la branch ref, o cualquiera difiere, el desarrollador se detiene antes de inspeccionar contenido y reporta el dato no verificable o el desajuste.
+
+En Videojuegos, la etapa `developer` se presenta como **Desarrollo de videojuegos (Godot)** y conserva el perfil `desarrollador_games` (**Desarrollador de videojuegos (Godot)**). Antes de inspeccionar o cambiar archivos del checkout, el perfil exige comprobar que su ruta real y la referencia de rama activa (branch ref), leídas del sistema de archivos y Git, coincidan exactamente con la ruta y rama confirmadas en el job/panel. «Destino» incluye checkout y branch ref; una confirmación textual por sí sola no basta. Si alguno de esos valores no se puede leer/verificar o no coincide, el desarrollador se detiene sin inspeccionar ni editar el checkout y reporta el dato no verificable o el desajuste al usuario/panel. Una mención genérica a Godot o un brief vago no autoriza una migración. Un brief confirmado que pida explícitamente migrar Flecha Trampa a Godot puede crear el scaffold inicial mínimo, incluso si todavía falta `project.godot`, cuando el job o UX aporte un criterio verificable suficiente y haya resuelto las decisiones imprescindibles; el scaffold permanece dentro del destino confirmado y no autoriza migrar todo el juego. Nunca se toca el juego original, se crean o cambian ramas/remotes ni se descarga o instala Godot. Esto no afirma que Flecha Trampa ya use Godot ni que exista una validación real del motor. Agencia conserva «Implementación» y el pipeline sigue UX → Desarrollo → QA → Revisión, con los mismos identificadores históricos.
+
+Antes de leer contenido del checkout, el perfil Games ejecuta `node games-checkout-guard.mjs "<ruta-absoluta-confirmada>" "<branch-ref-confirmada>"` desde un entorno que tenga el helper. La herramienta consulta `realpath` y `git symbolic-ref` en modo de solo lectura y solo permite continuar cuando la ruta confirmada es absoluta y normalizada, la ruta canónica coincide exactamente y la branch ref activa coincide exactamente con la confirmada. Ante ruta relativa/vacía, observación no verificable o cualquier diferencia, se detiene; si el helper no está disponible, se pide validación por el panel sin inspeccionar el juego. La función pura valida únicamente los valores que recibe, y la ejecución de esta guarda no equivale a ejecutar o validar un proyecto Godot.
+
+Las tareas de análisis usan el planificador existente. Las tareas de código con el proveedor Orca pasan por diseño UX, implementación, QA y revisión de código, un trabajador cada vez. QA no ejecuta suites de pruebas salvo que el encargo lo solicite. QA y revisión bloquean la entrega si falta evidencia de aceptación o detectan un problema concreto; sus resultados, intentos y dispatches se conservan en `jobs[].workflow` dentro de `data/state.json`.
+
+El panel y la CLI usan el mismo motor de cola y el mismo lanzador Orca; `workspaces/agency-assistant/queue.mjs` y `orca-provider.mjs` son adaptadores finos, no copias del ejecutor. Esto evita que sus reglas de reintento o argumentos se desvíen.
+
+La CLI conserva el despacho manual con `run --execute`; el panel admite además la autoejecución por empresa cuando se activa explícitamente. Tras una interrupción, el reintento confirmado conserva el Run y las etapas aprobadas: consulta el dispatch existente y recupera su respuesta si ya terminó, o se vuelve a conectar si sigue activo. Si Orca no confirmó un dispatch, el flujo se queda en revisión y no lanza otro trabajador a ciegas. Obsidian recibe una nota versionada al quedar `needs_attention` y otra al completarse, con estado, perfiles, dispatches e informes por etapa; así conserva lo escrito previamente.
+
+El panel conserva la empresa seleccionada y separa proyectos, ideas, trabajos y conocimiento. Los cerrados se consultan en Historial; los bloqueos de la cola compartida se muestran incluso cuando afectan al otro negocio. Guardar ideas no requiere Git; enviarlas a desarrollo exige objetivo, criterio de éxito y confirmar proyecto, checkout aislado y rama observada. La validación no crea ni cambia ramas y vuelve a comprobar la rama antes de despachar cada etapa. Los perfiles nuevos de código usan el sufijo `_agency` o `_games` en UX, Desarrollo, QA y Revisión, manteniendo el orden y los perfiles genéricos de registros anteriores; análisis conserva `planificador`.
+
+## Autoejecución local con activación por empresa
+
+El panel incorpora controles explícitos de activar/pausar Agencia y Videojuegos en Trabajos. Ambas empresas empiezan pausadas; la configuración histórica `autoRun` no activa esta función. Esta entrega no activa datos reales ni reinicia el servicio. Las referencias anteriores al despacho exclusivamente manual describen el modo predeterminado: la excepción requiere confirmar la activación por empresa.
+
+Cada envío confirmado de Ideas o Nuevo trabajo conserva un recibo idempotente en `data/auto-run.json`, con brief, job ID y la elegibilidad observada al confirmar. Guardar, editar, archivar, restaurar o activar una empresa no hace elegible la cola anterior. Los recibos manuales permanecen manuales. La UI conserva identificadores de operación en el almacenamiento local del navegador para repetir un envío tras una respuesta ambigua o un refresco sin duplicarlo. Un envío idéntico conserva su recibo; para otro resultado define un encargo distinto.
+
+El ejecutor de fondo del panel procesa un solo job ID por admisión, usando el bloqueo y pipeline existentes. Pausar impide nuevas admisiones y permite terminar el job admitido, incluidas sus etapas. `data/PAUSE` sigue siendo la pausa global. Una intención pendiente se recupera al abrir el panel; un intento admitido sin cierre o con dispatch incierto requiere revisión y nunca se repite automáticamente. Un fallo, timeout o destino bloqueado detiene la cadena compartida, incluso entre empresas.
+
+En jobs elegibles de código, tras UX → Desarrollo → QA → Revisión se muestra `Integración GitHub`. Solo usa el recibo creado al confirmar con autoRun activo; los envíos manuales y anteriores no se integran. El proyecto debe tener repositorio, checkout, rama fuente y rama base configurados explícitamente; sin rama base la integración queda bloqueada para revisión. La acción terminal es commit/push confirmado para misma rama, o PR/checks/merge confirmado para ramas distintas. Cada intención queda guardada antes del efecto; los resultados ambiguos pasan a revisión y no se repiten a ciegas. No hay garantía exactly-once, ni se publican APK o workflows. Consulta el preflight, estados, pruebas simuladas y validaciones remotas pendientes en [GITHUB_INTEGRATION.md](GITHUB_INTEGRATION.md).
+
+Para código del panel, configura `propietario/repositorio` GitHub, rama base y un checkout independiente relativo bajo `workspaces`, ya situado en su rama fuente existente. Antes del inicio se verifica origin, ramas y SHA local/remoto mediante Git de solo consulta; después de las cuatro aprobaciones, solo un recibo autoelegible puede ejecutar la integración Git/`gh` descrita arriba. No se despachan workflows de Actions, ni se crean checkouts, ramas o remotes. La verificación vuelve a ejecutarse en el comienzo del job. El bloqueo `.git/centro-executor.lock` excluye otros ejecutores automáticos del checkout y se conserva ante incertidumbre: revisa el proceso propietario y los efectos antes de retirarlo manualmente.
+
+Consulta recibos, historial, etapa y dispatch en Trabajos. Tras revisar y resolver el job, se puede cerrar su recibo sin reejecutarlo. El reintento de un job sigue siendo manual; desde la raíz usa `node cli.mjs run --execute --id IDENTIFICADOR` para seleccionar exclusivamente ese job. Nunca uses un drenado general para resolver un recibo individual. La función requiere que el panel y el PC sigan abiertos; no instala servicios ni inicio automático.
+
+Regresiones sin consumo ni red: `node --test tests/auto-run.test.mjs` y `node workspaces/agency-assistant/tests/auto-run.browser.mjs`. El informe de desarrollo, limitaciones y pasos de activación tras QA y Revisión está en `AUTO_RUN_DEVELOPMENT.md`.

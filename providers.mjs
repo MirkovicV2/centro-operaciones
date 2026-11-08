@@ -1,7 +1,9 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { QueueError } from './queue.mjs';
+import { runOrca } from './orca-provider.mjs';
 
 const CODEX_EXE = 'C:\\Users\\brank\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe';
 const CREDIT_CODES = new Set(['insufficient_quota', 'billing_hard_limit_reached', 'credits_exhausted', 'credit_balance_exhausted']);
@@ -40,6 +42,32 @@ export async function validateWorkspace(job, root) {
   const gitReal = await fs.realpath(gitPath);
   if (path.dirname(gitReal).toLowerCase() !== workspace.toLowerCase()) throw new ProviderError('unsafe_workspace', 'Los metadatos Git deben pertenecer al checkout aislado.');
   return workspace;
+}
+
+async function workspaceSignature(workspace) {
+  const status = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all', '-z'], {
+    cwd: workspace,
+    encoding: 'buffer',
+    windowsHide: true,
+    shell: false,
+  });
+  if (status.error || status.status !== 0) throw new ProviderError('workspace_check_failed', 'No se pudo verificar el estado Git del checkout.');
+  const diff = spawnSync('git', ['diff', '--binary', 'HEAD'], {
+    cwd: workspace,
+    encoding: 'buffer',
+    windowsHide: true,
+    shell: false,
+  });
+  if (diff.error || diff.status !== 0) throw new ProviderError('workspace_check_failed', 'No se pudo comprobar la diferencia del checkout.');
+  const hash = createHash('sha256').update(status.stdout).update(diff.stdout);
+  for (const entry of status.stdout.toString().split('\0')) {
+    if (!entry || entry.length < 4 || entry.slice(0, 2) !== '??') continue;
+    const file = path.resolve(workspace, entry.slice(3));
+    const relative = path.relative(workspace, file);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new ProviderError('unsafe_workspace', 'Git informó un archivo fuera del checkout.');
+    hash.update(relative).update(await fs.readFile(file));
+  }
+  return hash.digest('hex');
 }
 
 function childEnv(env) {
@@ -97,9 +125,11 @@ function runProcess(exe, args, { cwd, env, input = '', signal, ctx }) {
 
 export async function runCodex(job, ctx, { env = process.env, executable = CODEX_EXE } = {}) {
   let cwd;
+  let beforeSignature;
   if (job.kind === 'code') {
     try { cwd = await validateWorkspace(job, ctx.root); }
     catch (error) { if (error instanceof ProviderError) throw error; throw new ProviderError('unsafe_workspace', 'No se pudo verificar el checkout aislado y sus metadatos propios.'); }
+    beforeSignature = await workspaceSignature(cwd);
   } else {
     cwd = path.join(ctx.root, 'analysis');
     await fs.mkdir(cwd, { recursive: true });
@@ -132,7 +162,16 @@ export async function runCodex(job, ctx, { env = process.env, executable = CODEX
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') messages.push(event.item.text || '');
   }
   if (!completed || !messages.length) throw new ProviderError('codex_incomplete', 'No se recibió una respuesta completa de Codex; revisa antes de reintentar.', { uncertain: true });
-  return { provider: 'codex-chatgpt', text: redact(messages.join('\n\n'), env), usage: 'Sujeto a límites del plan ChatGPT; no medido por el presupuesto API local.' };
+  const text = redact(messages.join('\n\n'), env);
+  if (job.kind === 'code') {
+    if (/no he podido implementar|no pude implementar|no se han modificado archivos|no he modificado archivos|no pude modificar|entorno.{0,35}solo lectura|pol[ií]tica.{0,35}bloque[oó]/i.test(text)) {
+      throw new ProviderError('code_not_implemented', 'Codex informó que no pudo implementar la tarea. Revisa el resultado y el checkout.');
+    }
+    if (await workspaceSignature(cwd) === beforeSignature) {
+      throw new ProviderError('code_no_changes', 'Codex terminó sin dejar cambios verificables en el checkout.');
+    }
+  }
+  return { provider: 'codex-chatgpt', text, usage: 'Sujeto a límites del plan ChatGPT; no medido por el presupuesto API local.' };
 }
 
 export async function runAnalysis(job, ctx, { fetchImpl = globalThis.fetch, env = process.env } = {}) {
@@ -175,6 +214,7 @@ export async function runAnalysis(job, ctx, { fetchImpl = globalThis.fetch, env 
 
 export function createWorker({ fetchImpl = globalThis.fetch, runCodexImpl = runCodex, env = process.env } = {}) {
   return async (job, ctx) => {
+    if (job.provider === 'orca') return runOrca(job, ctx);
     if (job.kind === 'code' || job.provider === 'codex' || (job.provider === 'auto' && !env.OPENAI_API_KEY)) return runCodexImpl(job, ctx, { env });
     try { return await runAnalysis(job, ctx, { fetchImpl, env }); }
     catch (error) {

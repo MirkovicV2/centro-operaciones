@@ -18,8 +18,24 @@ async function fixture(t) {
   return root;
 }
 const spec = (patch = {}) => ({
-  id: 'review-001', business: 'games', kind: 'analysis', title: 'Revisar idea',
+  id: 'review-001', business: 'games', kind: 'analysis', provider: 'auto', title: 'Revisar idea',
   prompt: 'Preparar tres observaciones sin modificar archivos.', ...patch,
+});
+
+test('games Godot display keeps developer routing in durable events and agency unchanged', async t => {
+  const root = await fixture(t);
+  for (const business of ['games', 'agency']) {
+    await addJob(root, spec({ id: `display-${business}`, kind: 'code', business, provider: 'orca', workspace: path.join(root, 'workspaces', business), isolated: true }));
+  }
+  const jobs = (await loadState(root)).jobs;
+  for (const job of jobs) {
+    assert.deepEqual(job.workflow.steps.map(step => step.key), ['ux', 'developer', 'qa', 'reviewer']);
+    assert.deepEqual(job.workflow.steps.map(step => step.profile), ['ux', 'desarrollador', 'qa', 'revisor'].map(profile => `${profile}_${job.business}`));
+    assert.equal(job.workflow.steps[1].label, job.business === 'games' ? 'Desarrollo de videojuegos (Godot)' : 'Implementación');
+  }
+  const events = (await fs.readFile(path.join(root, 'data', 'events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.at(-1).patch.jobs[0].workflow.steps, jobs[1].workflow.steps);
+  assert.equal(events[0].patch.jobs[0].workflow.steps[1].profile, 'desarrollador_games');
 });
 async function appendInterruptedStart(root) {
   const state = await loadState(root);
@@ -403,4 +419,60 @@ test('a late worker response cannot bypass timeout cleanup or become a success',
   const job = (await loadState(root)).jobs[0];
   assert.equal(job.state, 'needs_attention');
   assert.equal(job.error.code, 'timeout');
+});
+
+test('manual retry preserves an interrupted stage checkpoint and its dispatch', async t => {
+  const root = await fixture(t);
+  await addJob(root, spec({ kind: 'code', provider: 'orca', workspace: path.join(root, 'workspaces', 'game'), isolated: true }));
+  await runQueue(root, { execute: true, worker: async (_job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_ux001', summary: 'UX ready' });
+    await ctx.reportStage({ key: 'developer', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_dev01', summary: 'Code ready' });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', runId: 'run_abcdef', dispatchId: 'ctx_rev01', dispatchStatus: 'active', error: 'interrupted' });
+    throw Object.assign(new Error('runner stopped'), { code: 'interrupted', uncertain: true });
+  } });
+  const before = (await loadState(root)).jobs[0];
+  assert.equal(before.state, 'needs_attention');
+  const resumed = await retryJob(root, before.id, { confirm: true });
+  assert.equal(resumed.state, 'queued');
+  assert.equal(resumed.workflow.runId, 'run_abcdef');
+  assert.equal(resumed.workflow.steps[0].status, 'succeeded');
+  assert.equal(resumed.workflow.steps[1].status, 'succeeded');
+  assert.equal(resumed.workflow.steps[3].dispatchId, 'ctx_rev01');
+  assert.equal(resumed.workflow.steps[3].dispatchStatus, 'active');
+  assert.equal(resumed.workflowHistory.length, 1);
+});
+
+test('manual retry restarts only the confirmed failed stage and preserves completed work', async t => {
+  const root = await fixture(t);
+  await addJob(root, spec({ kind: 'code', provider: 'orca', workspace: path.join(root, 'workspaces', 'game'), isolated: true }));
+  await runQueue(root, { execute: true, worker: async (_job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_ux001', summary: 'UX ready' });
+    await ctx.reportStage({ key: 'developer', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_dev01', summary: 'Code ready' });
+    await ctx.reportStage({ key: 'qa', status: 'failed', runId: 'run_abcdef', dispatchId: 'ctx_qa001', dispatchStatus: 'failed', summary: 'QA worker failed' });
+    throw Object.assign(new Error('known worker failure'), { code: 'orca_worker_failed', uncertain: true });
+  } });
+  const failed = (await loadState(root)).jobs[0];
+  const retry = await retryJob(root, failed.id, { confirm: true });
+  assert.equal(retry.workflow.steps[0].status, 'succeeded');
+  assert.equal(retry.workflow.steps[1].status, 'succeeded');
+  assert.equal(retry.workflow.steps[2].status, 'queued');
+  assert.equal(retry.workflow.steps[2].dispatchId, undefined);
+  assert.equal(retry.workflow.steps[3].status, 'queued');
+  assert.equal(retry.workflowHistory.length, 1);
+});
+
+test('manual retry refuses to relaunch an interrupted stage without a confirmed dispatch', async t => {
+  const root = await fixture(t);
+  await addJob(root, spec({ kind: 'code', provider: 'orca', workspace: path.join(root, 'workspaces', 'game'), isolated: true }));
+  await runQueue(root, { execute: true, worker: async (_job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_ux001', summary: 'UX ready' });
+    await ctx.reportStage({ key: 'developer', status: 'blocked', runId: 'run_abcdef', dispatchStatus: 'unknown', error: 'interrupted' });
+    throw Object.assign(new Error('launch outcome unknown'), { code: 'interrupted', uncertain: true });
+  } });
+  const failed = (await loadState(root)).jobs[0];
+  await assert.rejects(retryJob(root, failed.id, { confirm: true }), error => error.code === 'dispatch_unknown');
+  const unchanged = (await loadState(root)).jobs[0];
+  assert.equal(unchanged.state, 'needs_attention');
+  assert.equal(unchanged.attempts, 1);
+  assert.equal(unchanged.workflow.steps[1].dispatchId, undefined);
 });

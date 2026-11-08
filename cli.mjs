@@ -2,7 +2,7 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addJob, loadState, runQueue, setBudget, retryJob, resolveJob, summarize, QueueError } from './queue.mjs';
+import { addJob, loadState, runQueue, setBudget, retryJob, resolveJob, routeJob, reconcileOrcaJob, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError } from './queue.mjs';
 import { createWorker } from './providers.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -10,13 +10,18 @@ const HELP = `Centro de operaciones local — videojuegos (games) y agencia (age
 
 node cli.mjs status
 node cli.mjs add --business games|agency --kind analysis|code --title "Título" --prompt-file "instruccion.txt" [--id identificador]
-  [--provider auto|api|codex] [--max-attempts 2] [--timeout-seconds 180] [--max-usd 0.10]
+  [--provider orca|auto|api|codex] [--max-attempts 2] [--timeout-seconds SEGUNDOS] [--max-usd 0.10]
+  Tiempo por defecto: análisis 180 s; código con Orca 1800 s por el flujo secuencial.
   Código: --workspace "${path.join(ROOT, 'workspaces', 'checkout-aislado')}" --isolated
 node cli.mjs run                       Simulación: no ejecuta trabajadores ni modifica estado
-node cli.mjs run --execute [--max-jobs 5]
+node cli.mjs run --execute [--max-jobs 5] [--id IDENTIFICADOR]
 node cli.mjs show --id IDENTIFICADOR
+node cli.mjs route --id IDENTIFICADOR --provider orca
+node cli.mjs reconcile --id IDENTIFICADOR --dispatch-id ctx_... --evidence-file "resultado.md" --confirm-reviewed
 node cli.mjs retry --id IDENTIFICADOR --confirm-reviewed
 node cli.mjs resolve --id IDENTIFICADOR --confirm-reviewed
+node cli.mjs retract --id IDENTIFICADOR --confirm-reviewed
+node cli.mjs complete --id IDENTIFICADOR --evidence-file "informe.md" --confirm-reviewed
 node cli.mjs budget --usd LIMITE_TOTAL --model MODELO --input-per-million TARIFA --output-per-million TARIFA
 
 No se ejecuta nada en segundo plano. El presupuesto API inicial es 0 USD.
@@ -24,7 +29,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -51,16 +56,33 @@ async function main() {
       if (!result) throw new QueueError('No se encontró el trabajo.');
       break;
     }
+    case 'route': result = await routeJob(ROOT, o.id, o.provider); break;
+    case 'reconcile': {
+      if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con el resultado revisado de Orca.');
+      const evidencePath = path.resolve(o['evidence-file']);
+      if ((await fs.stat(evidencePath)).size > 12_000) throw new QueueError('La evidencia supera los 12.000 bytes.');
+      result = await reconcileOrcaJob(ROOT, o.id, { dispatchId: o['dispatch-id'], confirm: !!o['confirm-reviewed'], evidence: await fs.readFile(evidencePath, 'utf8') });
+      break;
+    }
     case 'add': {
       if (!o['prompt-file']) throw new QueueError('Indica --prompt-file con la instrucción del trabajo.');
       const promptPath = path.resolve(o['prompt-file']);
       if ((await fs.stat(promptPath)).size > 12_000) throw new QueueError('La instrucción supera los 12.000 bytes.');
-      result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], 2), timeoutMs: numeric(o['timeout-seconds'], 180) * 1000, maxUsd: numeric(o['max-usd'], 0.1) });
+      const timeoutFallback = o.kind === 'code' && (o.provider ?? 'orca') === 'orca' ? 1800 : 180;
+      result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], 2), timeoutMs: numeric(o['timeout-seconds'], timeoutFallback) * 1000, maxUsd: numeric(o['max-usd'], 0.1) });
       break;
     }
-    case 'run': result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5) }); break;
+    case 'run': result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5), jobId: o.id }); break;
     case 'retry': result = await retryJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'resolve': result = await resolveJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'retract': result = await retractFalseSuccess(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'complete': {
+      if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con el informe de entrega revisada.');
+      const evidencePath = path.resolve(o['evidence-file']);
+      if ((await fs.stat(evidencePath)).size > 12_000) throw new QueueError('El informe supera los 12.000 bytes.');
+      result = await completeReviewedCodeJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'], evidence: await fs.readFile(evidencePath, 'utf8') });
+      break;
+    }
     case 'budget': result = await setBudget(ROOT, { limitUsd: numeric(o.usd, NaN), model: o.model, inputPerMillion: numeric(o['input-per-million'], NaN), outputPerMillion: numeric(o['output-per-million'], NaN) }); break;
     default: throw new QueueError('Comando desconocido. Usa node cli.mjs help.');
   }
