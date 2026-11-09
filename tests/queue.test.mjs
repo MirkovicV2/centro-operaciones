@@ -4,9 +4,10 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  addJob, loadState, runQueue, retryJob, acquireLock, releaseLock, setBudget,
+  addJob, increaseJobAttemptLimit, executionTimeoutMs, executionTimeExhausted, loadState, runQueue, retryJob, acquireLock, releaseLock, setBudget, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript,
 } from '../queue.mjs';
 import { createWorker, isCreditExhausted, withTimeout, validateWorkspace } from '../providers.mjs';
+import { reconcileCodeSummary } from '../cli.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 async function fixture(t) {
@@ -18,8 +19,420 @@ async function fixture(t) {
   return root;
 }
 const spec = (patch = {}) => ({
-  id: 'review-001', business: 'games', kind: 'analysis', title: 'Revisar idea',
+  id: 'review-001', business: 'games', kind: 'analysis', provider: 'auto', title: 'Revisar idea',
   prompt: 'Preparar tres observaciones sin modificar archivos.', ...patch,
+});
+
+test('Orca defaults to five attempts and explicit lower limits still apply', async t => {
+  const root = await fixture(t);
+  assert.equal((await addJob(root, spec({ provider: 'orca' }))).maxAttempts, 5);
+  assert.equal((await addJob(root, spec({ id: 'limited', provider: 'orca', maxAttempts: 2 }))).maxAttempts, 2);
+  assert.equal((await addJob(root, spec({ id: 'manual-provider' }))).maxAttempts, 2);
+  await assert.rejects(addJob(root, spec({ id: 'too-many', provider: 'orca', maxAttempts: 6 })), /entre 1 y 5/);
+});
+
+test('raising the cap of a running Orca job preserves its exact active attempt', async t => {
+  const root = await fixture(t);
+  const job = await addJob(root, spec({ provider: 'orca', maxAttempts: 2 }));
+  let release, announce;
+  const paused = new Promise(resolve => { release = resolve; });
+  const reported = new Promise(resolve => { announce = resolve; });
+  const run = runQueue(root, { execute: true, business: job.business, worker: async (_job, ctx) => {
+    await ctx.reportStage({ key: 'planner', status: 'running', dispatchId: 'ctx_attempt_fixture' });
+    announce();
+    await paused;
+    await ctx.reportStage({ key: 'planner', status: 'succeeded' });
+    return { text: 'Plan verificado.' };
+  } });
+  try {
+    await Promise.race([reported, run.then(() => assert.fail('The worker should still be active'))]);
+    const before = (await loadState(root)).jobs[0];
+    const changed = await increaseJobAttemptLimit(root, job.id, 5);
+    assert.deepEqual(changed, { ...before, maxAttempts: 5 });
+    await assert.rejects(increaseJobAttemptLimit(root, job.id, 4), /solo amplía/);
+  } finally {
+    release();
+    await run;
+  }
+  const finished = (await loadState(root)).jobs[0];
+  assert.equal(finished.attempts, 1);
+  assert.equal(finished.maxAttempts, 5);
+  assert.equal(finished.state, 'succeeded');
+});
+
+test('Orca has no default execution deadline for new or legacy jobs', async t => {
+  const root = await fixture(t);
+  const newJob = await addJob(root, spec({ provider: 'orca' }));
+  assert.equal(newJob.timeoutMs, null);
+  assert.equal(executionTimeoutMs(newJob), null);
+  assert.equal(executionTimeExhausted(newJob, 10_800_000), false);
+  assert.equal(executionTimeoutMs({ ...newJob, timeoutMs: 180_000 }), null);
+  assert.equal(executionTimeExhausted({ provider: 'orca', kind: 'code', timeoutMs: 1_800_000 }, 1_800_000), false);
+  const explicit = await addJob(root, spec({ id: 'explicit', provider: 'orca', timeoutMs: 180_000 }));
+  assert.equal(executionTimeExhausted(explicit, 180_000), true);
+  assert.equal(executionTimeExhausted({ provider: 'codex', kind: 'code', timeoutMs: 1_800_000 }, 1_800_000), true);
+  const result = await runQueue(root, { execute: true, jobId: newJob.id, worker: async () => ({ text: 'Informe.' }) });
+  assert.equal(result.jobs.length, 1);
+  assert.equal((await loadState(root)).jobs.find(job => job.id === newJob.id).state, 'succeeded');
+});
+
+test('reconcile-code CLI summary allowlists useful identifiers and omits prompt/evidence', () => {
+  const summary = reconcileCodeSummary({
+    id: 'godot-reconcile', state: 'succeeded', prompt: 'PROMPT_CANARY_DO_NOT_PRINT',
+    workflow: { status: 'delivery_wip', currentStage: 'integration' },
+    branch: 'codex/godot-full-migration', destination: { branch: 'codex/godot-full-migration', sha: '400caa1' },
+    deliveryStatus: 'wip', reconciliationDecisionId: 'coord-reconcile-001',
+    coordinatorDecision: {
+      evidence: 'EVIDENCE_CANARY_DO_NOT_PRINT',
+      dispatches: [{ dispatchId: 'ctx_82429134517e' }, { dispatchId: 'ctx_93353fb64043' }],
+    },
+  });
+  const output = JSON.stringify(summary);
+  assert.equal(output.includes('PROMPT_CANARY_DO_NOT_PRINT'), false);
+  assert.equal(output.includes('EVIDENCE_CANARY_DO_NOT_PRINT'), false);
+  assert.deepEqual(summary, {
+    id: 'godot-reconcile', state: 'succeeded', workflow: { status: 'delivery_wip', currentStage: 'integration' },
+    branch: 'codex/godot-full-migration', destination: { branch: 'codex/godot-full-migration', sha: '400caa1' },
+    deliveryStatus: 'wip', decisionId: 'coord-reconcile-001', dispatchIds: ['ctx_82429134517e', 'ctx_93353fb64043'],
+  });
+});
+
+test('games Godot display keeps developer routing in durable events and agency unchanged', async t => {
+  const root = await fixture(t);
+  for (const business of ['games', 'agency']) {
+    await addJob(root, spec({ id: `display-${business}`, kind: 'code', business, provider: 'orca', workspace: path.join(root, 'workspaces', business), isolated: true }));
+  }
+  const jobs = (await loadState(root)).jobs;
+  for (const job of jobs) {
+    assert.deepEqual(job.workflow.steps.map(step => step.key), ['ux', 'developer', 'qa', 'reviewer']);
+    assert.deepEqual(job.workflow.steps.map(step => step.profile), ['ux', 'desarrollador', 'qa', 'revisor'].map(profile => `${profile}_${job.business}`));
+    assert.equal(job.workflow.steps[1].label, job.business === 'games' ? 'Desarrollo de videojuegos (Godot)' : 'Implementación');
+  }
+  const events = (await fs.readFile(path.join(root, 'data', 'events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events.at(-1).patch.jobs[0].workflow.steps, jobs[1].workflow.steps);
+  assert.equal(events[0].patch.jobs[0].workflow.steps[1].profile, 'desarrollador_games');
+});
+
+async function reconciliationFixture(t) {
+  const root = await fixture(t);
+  const workspace = path.join(root, 'workspaces', 'flecha-trampa-github');
+  await addJob(root, spec({ id: 'godot-reconcile', kind: 'code', business: 'games', provider: 'orca', workspace, isolated: true, autoIntent: { eligible: true },
+    branch: 'develop', destination: { checkout: 'workspaces/flecha-trampa-github', workspace, branch: 'develop', sha: '1c14cf2' } }));
+  const state = await loadState(root);
+  const previous = state.jobs[0];
+  const workflow = {
+    ...previous.workflow, runId: 'run_63efad10fb71', status: 'needs_attention', currentStage: 'developer',
+    steps: previous.workflow.steps.map(step => step.key === 'ux'
+      ? { ...step, status: 'succeeded', dispatchId: 'ctx_5ea29c6ce824', taskId: 'task_34bb1d80f152', attempt: 2 }
+      : step.key === 'developer'
+        ? { ...step, status: 'blocked', dispatchStatus: 'unknown', dispatchId: 'ctx_82429134517e', taskId: 'task_64e6e50b9c31', attempt: 2 }
+        : step),
+  };
+  const job = { ...previous, state: 'needs_attention', attempts: 2, branch: 'develop', workflow,
+    error: { code: 'orca_dispatch_status_unknown', message: 'unknown' } };
+  const event = { schema: 1, revision: state.revision + 1, at: new Date().toISOString(), type: 'fixture_external_dispatch_failure', patch: { jobs: [job] } };
+  await fs.appendFile(path.join(root, 'data', 'events.jsonl'), JSON.stringify(event) + '\n');
+  const decision = {
+    schema: 1,
+    decisionId: 'coord-reconcile-001',
+    dispatches: [
+      { stage: 'ux', dispatchId: 'ctx_5ea29c6ce824', taskId: 'task_34bb1d80f152', runId: 'run_63efad10fb71', state: 'succeeded', sequence: 1, jobAttempt: 2, parentTaskId: null, retryOfDispatchId: null, approvalEvidence: null },
+      { stage: 'developer', dispatchId: 'ctx_82429134517e', taskId: 'task_64e6e50b9c31', runId: 'run_63efad10fb71', state: 'failed', sequence: 1, jobAttempt: 2, parentTaskId: null, retryOfDispatchId: null, approvalEvidence: null },
+      { stage: 'developer', dispatchId: 'ctx_93353fb64043', taskId: 'task_64e6e50b9c31', runId: 'run_63efad10fb71', state: 'succeeded', sequence: 2, jobAttempt: 2, parentTaskId: null, retryOfDispatchId: 'ctx_82429134517e', approvalEvidence: null },
+      { stage: 'qa', dispatchId: 'ctx_0b91884aac31', taskId: 'task_e3b1c33a4468', runId: 'run_63efad10fb71', state: 'succeeded', sequence: 1, jobAttempt: 2, parentTaskId: 'task_64e6e50b9c31', retryOfDispatchId: null, approvalEvidence: 'RESULTADO: APROBADO' },
+      { stage: 'reviewer', dispatchId: 'ctx_3146e226e909', taskId: 'task_a6ebc23b3f46', runId: 'run_63efad10fb71', state: 'succeeded', sequence: 1, jobAttempt: 2, parentTaskId: 'task_e3b1c33a4468', retryOfDispatchId: null, approvalEvidence: 'RESULTADO: APROBADO' },
+    ],
+    destination: { checkout: 'workspaces/flecha-trampa-github', branch: 'codex/godot-full-migration', sha: '400caa1', verified: true },
+    evidence: 'El retry de Desarrollo, QA y Revisión finalizaron; el destino codex/godot-full-migration se verificó en 400caa1. La migración sigue WIP.',
+  };
+  return { root, job, decision };
+}
+
+const mockTerminalFor = dispatchId => `term_fixture_${({
+  ctx_5ea29c6ce824: 1, ctx_82429134517e: 2, ctx_93353fb64043: 3,
+  ctx_0b91884aac31: 4, ctx_3146e226e909: 5,
+})[dispatchId]}`;
+
+function mockWorkerShow(evidence, overrides = {}) {
+  return {
+    dispatch: {
+      id: evidence.dispatchId, taskId: evidence.taskId, runId: evidence.runId,
+      status: evidence.state === 'failed' ? 'failed' : 'completed', retryOfDispatchId: evidence.retryOfDispatchId,
+      assigneeHandle: mockTerminalFor(evidence.dispatchId),
+      ...overrides.dispatch,
+    },
+    worker: { dispatchId: evidence.dispatchId, state: evidence.state, agentTerminalHandle: mockTerminalFor(evidence.dispatchId), ...overrides.worker },
+    projection: {
+      dispatchId: evidence.dispatchId, taskId: evidence.taskId, runId: evidence.runId,
+      outcome: evidence.state, parent: evidence.parentTaskId ? { taskId: evidence.parentTaskId } : null,
+      ...overrides.projection,
+    },
+  };
+}
+
+function mockRunRecords(decision) {
+  const messages = [];
+  const tasksById = new Map();
+  for (let index = 0; index < decision.dispatches.length; index++) {
+    const evidence = decision.dispatches[index];
+    const from = mockTerminalFor(evidence.dispatchId);
+    const body = ['qa', 'reviewer'].includes(evidence.stage)
+      ? `Reporte terminal de ${evidence.stage}.\nRESULTADO: APROBADO`
+      : `Reporte ${evidence.stage}: ${evidence.state}.`;
+    const message = {
+      id: `msg_fixture_${index + 1}`, run_id: evidence.runId, to_handle: `run:${evidence.runId}`,
+      from_handle: from, type: 'worker_done', body,
+      payload: JSON.stringify({ taskId: evidence.taskId, dispatchId: evidence.dispatchId, outcome: evidence.state }),
+    };
+    messages.push(message);
+    if (!tasksById.has(evidence.taskId)) tasksById.set(evidence.taskId, {
+      id: evidence.taskId, run_id: evidence.runId, parent_id: evidence.parentTaskId, status: 'completed',
+    });
+    if (evidence.state === 'succeeded') {
+      tasksById.get(evidence.taskId).result = JSON.stringify({
+        outcome: 'succeeded', messageId: message.id, reportedBy: from, body: message.body,
+      });
+    }
+  }
+  const tasks = [...tasksById.values()];
+  return {
+    inbox: { count: messages.length, messages },
+    taskList: { runId: decision.dispatches[0].runId, legacyReadOnly: false, count: tasks.length, tasks },
+  };
+}
+
+const mockDispatchVerifier = (decision, overrides = {}) => {
+  const records = mockRunRecords(decision);
+  return async (evidence, { relatedDispatches } = {}) => {
+    const observed = mockWorkerShow(evidence, overrides[evidence.dispatchId]);
+    return {
+      ...verifyOrcaWorkerRecord(evidence, observed),
+      ...verifyOrcaRunRecords(evidence, { ...records, terminalHandle: mockTerminalFor(evidence.dispatchId), relatedDispatches }),
+    };
+  };
+};
+
+function replaceRunReceiptBody(records, dispatchId, body) {
+  const message = records.inbox.messages.find(item => JSON.parse(item.payload).dispatchId === dispatchId);
+  message.body = body;
+  const task = records.taskList.tasks.find(item => item.id === JSON.parse(message.payload).taskId);
+  const result = JSON.parse(task.result);
+  result.body = body;
+  task.result = JSON.stringify(result);
+}
+
+const mockDestinationVerifier = async (_root, job) => ({
+  checkout: 'workspaces/flecha-trampa-github', workspace: job.workspace,
+  branch: 'codex/godot-full-migration', sha: '400caa1'.padEnd(40, '0'),
+});
+
+test('coordinator reconciliation preserves dispatch timeline, marks stages and leaves migration WIP', async t => {
+  const { root, decision } = await reconciliationFixture(t);
+  let verified = 0;
+  const baseVerifier = mockDispatchVerifier(decision);
+  const verifier = async (evidence, context) => { verified++; return baseVerifier(evidence, context); };
+  const job = await reconcileCodeJob(root, 'godot-reconcile', { confirm: true, decision, verifyDispatch: verifier, verifyDestination: mockDestinationVerifier });
+  assert.equal(verified, 5);
+  assert.equal(job.state, 'needs_attention');
+  assert.equal(job.error.code, 'delivery_wip');
+  assert.equal(job.deliveryStatus, 'wip');
+  assert.equal(job.workflow.status, 'delivery_wip');
+  assert.equal(job.workflow.currentStage, 'integration');
+  assert.deepEqual(job.workflow.steps.slice(0, 4).map(step => step.status), ['succeeded', 'succeeded', 'succeeded', 'succeeded']);
+  assert.equal(job.workflow.steps[1].dispatchHistory[0].dispatchId, 'ctx_82429134517e');
+  assert.equal(job.workflow.steps[1].dispatchHistory[0].taskId, 'task_64e6e50b9c31');
+  assert.equal(job.workflow.steps[1].dispatchHistory[1].dispatchId, 'ctx_93353fb64043');
+  assert.equal(job.workflow.steps[2].dispatchId, 'ctx_0b91884aac31');
+  assert.equal(job.workflow.steps[3].dispatchId, 'ctx_3146e226e909');
+  assert.equal(job.branch, 'codex/godot-full-migration');
+  assert.equal(job.destination.sha, '400caa1'.padEnd(40, '0'));
+  assert.equal(job.workflow.steps[4].status, 'blocked');
+  assert.equal(job.workflow.steps[4].error, 'delivery_wip');
+  const recovered = await loadState(root);
+  const snapshot = JSON.parse(await fs.readFile(path.join(root, 'data', 'state.json'), 'utf8'));
+  assert.deepEqual(snapshot, recovered);
+  await assert.rejects(fs.access(path.join(root, 'data', 'runner.lock')), error => error.code === 'ENOENT');
+  const before = await fs.readFile(path.join(root, 'data', 'events.jsonl'), 'utf8');
+  const repeated = await reconcileCodeJob(root, 'godot-reconcile', { confirm: true, decision, verifyDispatch: verifier, verifyDestination: mockDestinationVerifier });
+  assert.equal(repeated.idempotent, true);
+  assert.equal(await fs.readFile(path.join(root, 'data', 'events.jsonl'), 'utf8'), before);
+  const reusedId = structuredClone(decision);
+  reusedId.evidence = 'Metadata diferente para el mismo decisionId.';
+  await assert.rejects(reconcileCodeJob(root, 'godot-reconcile', { confirm: true, decision: reusedId, verifyDispatch: verifier, verifyDestination: mockDestinationVerifier }), error => error.code === 'reconciliation_duplicate');
+});
+
+test('coordinator reconciliation rejects discordant IDs/destination, duplicate retries and invalid metadata', async t => {
+  const mismatchCases = [
+    d => { d.dispatches[0].dispatchId = 'ctx_wrong000001'; },
+    d => { d.dispatches[1].taskId = 'task_wrong000001'; },
+    d => { d.dispatches[2].retryOfDispatchId = null; },
+    d => { d.dispatches[3].parentTaskId = 'task_wrong000001'; },
+    d => { d.dispatches[4].approvalEvidence = ''; },
+    d => { d.dispatches[3].approvalEvidence = 'RESULTADO: APROBADO\nQA bloqueada'; },
+    d => { d.dispatches[0].runId = 'run_wrong0001'; },
+    d => { d.dispatches[4].jobAttempt = 1; },
+    d => { d.destination.branch = 'develop'; },
+    d => { d.destination.checkout = 'otro-checkout'; },
+    d => { d.destination.sha = 'not-a-commit'; },
+    d => { d.dispatches[2].dispatchId = d.dispatches[1].dispatchId; },
+    d => { d.dispatches[2].sequence = 1; },
+    d => { d.unexpected = true; },
+  ];
+  for (const mutateDecision of mismatchCases) {
+    const { root, decision } = await reconciliationFixture(t);
+    mutateDecision(decision);
+    await assert.rejects(reconcileCodeJob(root, 'godot-reconcile', { confirm: true, decision, verifyDispatch: mockDispatchVerifier(decision), verifyDestination: mockDestinationVerifier }));
+    assert.equal((await loadState(root)).jobs[0].state, 'needs_attention');
+  }
+});
+
+test('code reconciliation requires injected Orca verification and rejects uncorrelated outcomes or QA transcripts', async t => {
+  for (const overrides of [
+    { ctx_93353fb64043: { worker: { state: 'failed' } } },
+    { ctx_0b91884aac31: { projection: { parent: { taskId: 'task_wrong000001' } } } },
+  ]) {
+    const { root, decision } = await reconciliationFixture(t);
+    await assert.rejects(reconcileCodeJob(root, 'godot-reconcile', { confirm: true, decision, verifyDispatch: mockDispatchVerifier(decision, overrides), verifyDestination: mockDestinationVerifier }), error => error.code === 'reconciliation_dispatch_mismatch');
+    assert.equal((await loadState(root)).jobs[0].state, 'needs_attention');
+  }
+  const { root, decision } = await reconciliationFixture(t);
+  await assert.rejects(reconcileCodeJob(root, 'godot-reconcile', { confirm: true, decision }), error => error.code === 'reconciliation_verifier_required');
+  assert.equal((await loadState(root)).jobs[0].state, 'needs_attention');
+});
+
+test('worker-show and full Run inbox/task-list records correlate terminal reports and exact QA approvals', async t => {
+  const { root, decision } = await reconciliationFixture(t);
+  const records = mockRunRecords(decision);
+  for (const evidence of decision.dispatches) {
+    const actual = verifyOrcaWorkerRecord(evidence, mockWorkerShow(evidence));
+    assert.equal(actual.dispatchId, evidence.dispatchId);
+    const receipt = verifyOrcaRunRecords(evidence, { ...records, terminalHandle: mockTerminalFor(evidence.dispatchId), relatedDispatches: decision.dispatches });
+    assert.equal(receipt.approvalVerified, ['qa', 'reviewer'].includes(evidence.stage));
+  }
+
+  const completeMention = structuredClone(records);
+  replaceRunReceiptBody(completeMention, 'ctx_0b91884aac31', 'Se comprobó que un informe truncated o clipped se rechaza.\nRESULTADO: APROBADO');
+  assert.equal(verifyOrcaRunRecords(decision.dispatches[3], { ...completeMention, terminalHandle: mockTerminalFor(decision.dispatches[3].dispatchId) }).approvalVerified, true);
+  const invalidRecords = [
+    value => { value.inbox.messages.push(structuredClone(value.inbox.messages[3])); value.inbox.count++; },
+    value => { value.inbox.messages.find(item => item.id === 'msg_fixture_4').id = ''; },
+    value => { value.inbox.messages.find(item => item.id === 'msg_fixture_1').id = 'msg_fixture_4'; },
+    value => { const receipt = value.inbox.messages.find(item => item.id === 'msg_fixture_4'); receipt.payload = JSON.stringify({ taskId: 'task_wrong000001', dispatchId: 'ctx_0b91884aac31', outcome: 'succeeded' }); },
+    value => { const receipt = value.inbox.messages.find(item => item.id === 'msg_fixture_4'); receipt.payload = JSON.stringify({ taskId: 'task_e3b1c33a4468', dispatchId: 'ctx_0b91884aac31', outcome: 'failed' }); },
+    value => { value.inbox.messages = value.inbox.messages.filter(item => item.id !== 'msg_fixture_4'); value.inbox.count--; },
+    value => { value.inbox.count = 500; },
+    value => { value.taskList.legacyReadOnly = true; },
+    value => { value.taskList.tasks.find(task => task.id === 'task_e3b1c33a4468').parent_id = null; },
+    value => { value.taskList.tasks.find(task => task.id === 'task_e3b1c33a4468').status = 'running'; },
+    value => { value.taskList.tasks.find(task => task.id === 'task_e3b1c33a4468').run_id = 'run_wrong0001'; },
+    value => { const task = value.taskList.tasks.find(item => item.id === 'task_e3b1c33a4468'); const result = JSON.parse(task.result); result.messageId = 'msg_wrong0001'; task.result = JSON.stringify(result); },
+    value => { const task = value.taskList.tasks.find(item => item.id === 'task_e3b1c33a4468'); const result = JSON.parse(task.result); delete result.messageId; task.result = JSON.stringify(result); },
+    value => { replaceRunReceiptBody(value, 'ctx_0b91884aac31', 'RESULTADO: APROBADO\nQA bloqueada'); },
+    value => { replaceRunReceiptBody(value, 'ctx_0b91884aac31', 'El texto menciona RESULTADO: APROBADO sin aprobar.'); },
+    value => { replaceRunReceiptBody(value, 'ctx_0b91884aac31', 'RESULTADO: APROBADO CON RESERVAS'); },
+    value => { value.inbox.messages.find(item => item.id === 'msg_fixture_4').from_handle = 'term_forged'; },
+    value => { value.taskList.count = 500; },
+  ];
+  for (const mutateRecords of invalidRecords) {
+    const broken = structuredClone(records);
+    mutateRecords(broken);
+    assert.throws(() => verifyOrcaRunRecords(decision.dispatches[3], { ...broken, terminalHandle: mockTerminalFor(decision.dispatches[3].dispatchId) }), error => error.code?.startsWith('reconciliation_'));
+  }
+  const failedDeveloper = decision.dispatches[1];
+  const failedReceiptWithoutId = structuredClone(records);
+  delete failedReceiptWithoutId.inbox.messages.find(item => item.id === 'msg_fixture_2').id;
+  assert.throws(() => verifyOrcaRunRecords(failedDeveloper, {
+    ...failedReceiptWithoutId, terminalHandle: mockTerminalFor(failedDeveloper.dispatchId), relatedDispatches: decision.dispatches,
+  }), error => error.code === 'reconciliation_receipt_mismatch');
+  const retryReceiptWithoutId = structuredClone(records);
+  delete retryReceiptWithoutId.inbox.messages.find(item => item.id === 'msg_fixture_3').id;
+  assert.throws(() => verifyOrcaRunRecords(failedDeveloper, {
+    ...retryReceiptWithoutId, terminalHandle: mockTerminalFor(failedDeveloper.dispatchId), relatedDispatches: decision.dispatches,
+  }), error => error.code === 'reconciliation_receipt_mismatch');
+  const failedTaskResultWithoutMessageId = structuredClone(records);
+  const failedTask = failedTaskResultWithoutMessageId.taskList.tasks.find(item => item.id === failedDeveloper.taskId);
+  const failedResult = JSON.parse(failedTask.result);
+  delete failedResult.messageId;
+  failedTask.result = JSON.stringify(failedResult);
+  assert.throws(() => verifyOrcaRunRecords(failedDeveloper, {
+    ...failedTaskResultWithoutMessageId, terminalHandle: mockTerminalFor(failedDeveloper.dispatchId), relatedDispatches: decision.dispatches,
+  }), error => error.code === 'reconciliation_task_mismatch');
+  for (const mutateResult of [
+    result => { result.outcome = 'failed'; },
+    result => { result.messageId = 'msg_wrong0001'; },
+    result => { result.reportedBy = 'term_forged'; },
+    result => { result.body = 'Informe distinto del retry.'; },
+  ]) {
+    const broken = structuredClone(records);
+    const task = broken.taskList.tasks.find(item => item.id === failedDeveloper.taskId);
+    const result = JSON.parse(task.result);
+    mutateResult(result);
+    task.result = JSON.stringify(result);
+    assert.throws(() => verifyOrcaRunRecords(failedDeveloper, {
+      ...broken, terminalHandle: mockTerminalFor(failedDeveloper.dispatchId), relatedDispatches: decision.dispatches,
+    }), error => error.code === 'reconciliation_task_mismatch');
+  }
+  const clippedFailure = structuredClone(records);
+  clippedFailure.inbox.messages.find(item => item.id === 'msg_fixture_2').body += '\n[truncated]';
+  assert.throws(() => verifyOrcaRunRecords(failedDeveloper, {
+    ...clippedFailure, terminalHandle: mockTerminalFor(failedDeveloper.dispatchId), relatedDispatches: decision.dispatches,
+  }), error => error.code === 'reconciliation_receipt_mismatch');
+  for (const override of [
+    { dispatch: { taskId: 'task_wrong000001' } },
+    { dispatch: { runId: 'run_wrong0001' } },
+    { worker: { state: 'failed' } },
+    { worker: { agentTerminalHandle: 'term_forged' } },
+    { projection: { parent: { taskId: 'task_wrong000001' } } },
+    { dispatch: { retryOfDispatchId: 'ctx_wrong000001' } },
+  ]) {
+    assert.throws(() => verifyOrcaWorkerRecord(decision.dispatches[2], mockWorkerShow(decision.dispatches[2], override)), error => error.code === 'reconciliation_dispatch_mismatch', JSON.stringify(override));
+  }
+  assert.throws(() => verifyOrcaRunRecords(decision.dispatches[3], { ...records, terminalHandle: mockTerminalFor(decision.dispatches[3].dispatchId), limit: 5 }), error => error.code === 'reconciliation_records_invalid');
+});
+
+function transcriptPage({ dispatchId = 'ctx_0b91884aac31', sourceIdentity = 'transcript-v1', text = '', limited = false,
+  nextCursor = null, contentComplete = !limited, warnings = [], clipping } = {}) {
+  return {
+    dispatchId, source: 'transcript', sourceExact: true, archived: true, sourceIdentity,
+    status: { worker: 'succeeded' }, projection: { outcome: 'succeeded' },
+    transcript: { messages: [{ role: 'assistant', blocks: [{ type: 'text', text }] }] },
+    limited, nextCursor, contentComplete, warnings, ...(clipping === undefined ? {} : { clipping }),
+  };
+}
+
+test('Orca transcript verification paginates to stable complete source and requires exact terminal approval marker', async () => {
+  const pages = new Map([
+    [undefined, transcriptPage({ text: 'QA evidencia parcial', limited: true, nextCursor: 'cursor-one' })],
+    ['cursor-one', transcriptPage({ text: 'Informe QA completo.\nRESULTADO: APROBADO' })],
+  ]);
+  const seen = [];
+  assert.equal(await verifyOrcaApprovalTranscript('ctx_0b91884aac31', 'succeeded', async ({ cursor }) => {
+    seen.push(cursor); return pages.get(cursor);
+  }), true);
+  assert.deepEqual(seen, [undefined, 'cursor-one']);
+
+  const invalidPageSets = [
+    [
+      transcriptPage({ text: 'parte', limited: true, nextCursor: 'repeat' }),
+      transcriptPage({ text: 'RESULTADO: APROBADO', limited: true, nextCursor: 'repeat' }),
+    ],
+    [
+      transcriptPage({ text: 'parte', limited: true, nextCursor: 'next' }),
+      transcriptPage({ text: 'RESULTADO: APROBADO', sourceIdentity: 'changed' }),
+    ],
+    [transcriptPage({ text: 'RESULTADO: APROBADO', warnings: ['Oversized transcript text was clipped.'] })],
+    [transcriptPage({ text: 'RESULTADO: APROBADO', clipping: ['transcript_payload'] })],
+    [transcriptPage({ text: 'RESULTADO: APROBADO', contentComplete: false })],
+    [transcriptPage({ text: 'RESULTADO: APROBADO', limited: true, nextCursor: 'next' })],
+    [transcriptPage({ text: 'RESULTADO: APROBADO\nSe detectó una negación al final.' })],
+    [transcriptPage({ text: 'RESULTADO: APROBADO, con reservas' })],
+    [transcriptPage({ text: 'El marcador RESULTADO: APROBADO no acredita QA.' })],
+  ];
+  for (const invalidPages of invalidPageSets) {
+    await assert.rejects(verifyOrcaApprovalTranscript('ctx_0b91884aac31', 'succeeded', async ({ cursor }) => {
+      return invalidPages[cursor ? 1 : 0];
+    }, { maxPages: invalidPages.length === 1 && invalidPages[0].limited ? 1 : 100 }), error => error.code === 'reconciliation_approval_unverified');
+  }
 });
 async function appendInterruptedStart(root) {
   const state = await loadState(root);
@@ -327,6 +740,31 @@ test('uncertain failures always require operator review even when marked retryab
   assert.equal((await loadState(root)).jobs[0].attempts, 1);
 });
 
+test('parallel company executors share the same durable budget cap', async t => {
+  const root = await fixture(t);
+  await setBudget(root, { limitUsd: 0.1, model: 'fixture', inputPerMillion: 0, outputPerMillion: 0 });
+  for (const business of ['agency', 'games']) await addJob(root, spec({ id: business, business }));
+  let arrived = 0, checked = 0, release, reserved;
+  const together = new Promise(resolve => { release = resolve; });
+  const bothChecked = new Promise(resolve => { reserved = resolve; });
+  const worker = async (_job, ctx) => {
+    if (++arrived === 2) release();
+    await together;
+    try { await ctx.reserve(0.08); }
+    finally { if (++checked === 2) reserved(); }
+    await bothChecked;
+    await ctx.settle(0.08);
+    return { text: 'Reservado' };
+  };
+  const results = await Promise.all(['agency', 'games'].map(business => runQueue(root, { execute: true, worker, business })));
+  assert.equal(arrived, 2);
+  assert.deepEqual(results.flatMap(result => result.jobs.map(job => job.state)).sort(), ['needs_attention', 'succeeded']);
+  const { budget, jobs } = await loadState(root);
+  assert.equal(budget.reservedUsd, 0);
+  assert.equal(budget.estimatedSpentUsd, 0.08);
+  assert.equal(jobs.find(job => job.state === 'needs_attention').error.code, 'budget_limit');
+});
+
 test('budget reservations block concurrent overspend and ledger preserves estimates', async t => {
   const root = await fixture(t);
   await addJob(root, spec({ maxUsd: 0.1 }));
@@ -403,4 +841,60 @@ test('a late worker response cannot bypass timeout cleanup or become a success',
   const job = (await loadState(root)).jobs[0];
   assert.equal(job.state, 'needs_attention');
   assert.equal(job.error.code, 'timeout');
+});
+
+test('manual retry preserves an interrupted stage checkpoint and its dispatch', async t => {
+  const root = await fixture(t);
+  await addJob(root, spec({ kind: 'code', provider: 'orca', workspace: path.join(root, 'workspaces', 'game'), isolated: true }));
+  await runQueue(root, { execute: true, worker: async (_job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_ux001', summary: 'UX ready' });
+    await ctx.reportStage({ key: 'developer', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_dev01', summary: 'Code ready' });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', runId: 'run_abcdef', dispatchId: 'ctx_rev01', dispatchStatus: 'active', error: 'interrupted' });
+    throw Object.assign(new Error('runner stopped'), { code: 'interrupted', uncertain: true });
+  } });
+  const before = (await loadState(root)).jobs[0];
+  assert.equal(before.state, 'needs_attention');
+  const resumed = await retryJob(root, before.id, { confirm: true });
+  assert.equal(resumed.state, 'queued');
+  assert.equal(resumed.workflow.runId, 'run_abcdef');
+  assert.equal(resumed.workflow.steps[0].status, 'succeeded');
+  assert.equal(resumed.workflow.steps[1].status, 'succeeded');
+  assert.equal(resumed.workflow.steps[3].dispatchId, 'ctx_rev01');
+  assert.equal(resumed.workflow.steps[3].dispatchStatus, 'active');
+  assert.equal(resumed.workflowHistory.length, 1);
+});
+
+test('manual retry restarts only the confirmed failed stage and preserves completed work', async t => {
+  const root = await fixture(t);
+  await addJob(root, spec({ kind: 'code', provider: 'orca', workspace: path.join(root, 'workspaces', 'game'), isolated: true }));
+  await runQueue(root, { execute: true, worker: async (_job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_ux001', summary: 'UX ready' });
+    await ctx.reportStage({ key: 'developer', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_dev01', summary: 'Code ready' });
+    await ctx.reportStage({ key: 'qa', status: 'failed', runId: 'run_abcdef', dispatchId: 'ctx_qa001', dispatchStatus: 'failed', summary: 'QA worker failed' });
+    throw Object.assign(new Error('known worker failure'), { code: 'orca_worker_failed', uncertain: true });
+  } });
+  const failed = (await loadState(root)).jobs[0];
+  const retry = await retryJob(root, failed.id, { confirm: true });
+  assert.equal(retry.workflow.steps[0].status, 'succeeded');
+  assert.equal(retry.workflow.steps[1].status, 'succeeded');
+  assert.equal(retry.workflow.steps[2].status, 'queued');
+  assert.equal(retry.workflow.steps[2].dispatchId, undefined);
+  assert.equal(retry.workflow.steps[3].status, 'queued');
+  assert.equal(retry.workflowHistory.length, 1);
+});
+
+test('manual retry refuses to relaunch an interrupted stage without a confirmed dispatch', async t => {
+  const root = await fixture(t);
+  await addJob(root, spec({ kind: 'code', provider: 'orca', workspace: path.join(root, 'workspaces', 'game'), isolated: true }));
+  await runQueue(root, { execute: true, worker: async (_job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', runId: 'run_abcdef', dispatchId: 'ctx_ux001', summary: 'UX ready' });
+    await ctx.reportStage({ key: 'developer', status: 'blocked', runId: 'run_abcdef', dispatchStatus: 'unknown', error: 'interrupted' });
+    throw Object.assign(new Error('launch outcome unknown'), { code: 'interrupted', uncertain: true });
+  } });
+  const failed = (await loadState(root)).jobs[0];
+  await assert.rejects(retryJob(root, failed.id, { confirm: true }), error => error.code === 'dispatch_unknown');
+  const unchanged = (await loadState(root)).jobs[0];
+  assert.equal(unchanged.state, 'needs_attention');
+  assert.equal(unchanged.attempts, 1);
+  assert.equal(unchanged.workflow.steps[1].dispatchId, undefined);
 });

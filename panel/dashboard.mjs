@@ -1,0 +1,425 @@
+#!/usr/bin/env node
+import http from 'node:http';
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { projectMemory } from './project-memory.mjs';
+import { resolveOperationsRoot } from './operations-root.mjs';
+import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
+import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
+import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt } from '../auto-run.mjs';
+import { createWorker } from '../providers.mjs';
+import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
+import { submitTaskToCoordinator, routeTaskFromCoordinator, checkCoordinatorRequestNotice } from './agency-assistant/coordinator-inbox.mjs';
+import { reportCoordinatorQuestions, answerCoordinatorQuestion, readCoordinatorRequest, withdrawCoordinatorRequest, respondToCoordinatorRequest } from './agency-assistant/coordinator-dialogue.mjs';
+import { buildRequestTraces, createPreparationObserver, readRequestTrace } from './request-trace.mjs';
+import { queryRequestContext, queryJobContext, readContextConsultations } from './knowledge-access.mjs';
+import { createCoordinatorHealth } from './coordinator-health.mjs';
+import { authorizeWorkerHandoff, verifyWorkerQuestion, questionsForEscalation } from './worker-decisions.mjs';
+import { resumeCoordinatedDispatch, retryCoordinatedCheckout } from './dispatch-recovery.mjs';
+import { loadState as loadAssistantState } from './agency-assistant/store.mjs';
+import { runBot } from './agency-assistant/bot.mjs';
+import {
+  buildKnowledgeGraph,
+  readDashboardConfig,
+  saveDashboardConfig,
+  safeMarkdownText,
+  writeJobNote,
+  writeProjectMemoryNote,
+} from './agency-assistant/knowledge.mjs';
+import {
+  answerQuestion,
+  captureJobQuestions,
+  jobQuestions,
+  reconcileContinuations,
+  retrySavedContinuation,
+  markMessageHandled,
+  createProject,
+  updateProject,
+  createIdea,
+  mutateIdea,
+  loadDashboardState,
+  changeDashboardState,
+  markExported,
+} from './agency-assistant/dashboard-state.mjs';
+
+const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const QUEUE_ROOT = resolveOperationsRoot(APP_ROOT);
+const coordinatorHealth = createCoordinatorHealth(QUEUE_ROOT);
+const PORT = Number(process.env.CENTRO_OPERATIONS_PORT || 4187);
+const tailscaleAccess = await fs.readFile(path.join(APP_ROOT, 'data', 'tailscale-access.json'), 'utf8')
+  .then(content => {
+    const { hostname, login } = JSON.parse(content);
+    if (!/^(?:[a-z0-9-]+\.){2,}ts\.net$/.test(hostname) || typeof login !== 'string' || !login.trim()) {
+      throw new Error('Configuración de acceso Tailscale inválida.');
+    }
+    return { hostname, login };
+  })
+  .catch(error => {
+    if (error.code !== 'ENOENT') console.warn('Acceso Tailscale desactivado: revisa la configuración local.');
+    return null;
+  });
+const runtime = Object.freeze({
+  pid: process.pid,
+  startupAt: new Date().toISOString(),
+  entry: fileURLToPath(import.meta.url),
+  fingerprints: Object.fromEntries(await Promise.all(['dashboard.mjs', '../queue.mjs', '../providers.mjs', '../orca-provider.mjs', 'coordinator-bridge.mjs', 'coordinator-routing.mjs', '../coordination.mjs', 'worker-decisions.mjs', 'quality-handoff.mjs', 'project-memory.mjs', 'agency-assistant/coordinator-dialogue.mjs', 'request-trace.mjs', 'knowledge-access.mjs', 'dashboard/requests-view.js'].map(async relative => {
+    const file = fileURLToPath(new URL(relative, import.meta.url));
+    return [file, createHash('sha256').update(await fs.readFile(file)).digest('hex')];
+  }))),
+});
+let shutdownRequested = false;
+const observePreparation = createPreparationObserver();
+const autoRunner = createAutoRunner(QUEUE_ROOT, { worker: createWorker(), parallelBusinesses: true });
+
+function send(response, status, body, contentType = 'application/json; charset=utf-8') {
+  response.writeHead(status, {
+    'content-type': contentType,
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  });
+  response.end(contentType.startsWith('application/json') ? JSON.stringify(body) : body);
+}
+
+function assertLocalRequest(request, tailscale = null) {
+  const authority = String(request.headers.host || '').toLowerCase();
+  const host = authority.split(':')[0];
+  const { origin } = request.headers;
+  const forwardedHost = request.headers['x-forwarded-host'];
+  if (forwardedHost !== undefined || request.headers['tailscale-user-login'] !== undefined || request.headers['tailscale-funnel-request'] !== undefined) {
+    if (!tailscale || request.socket?.remoteAddress !== '127.0.0.1'
+      || (authority !== tailscale.hostname && authority !== `${tailscale.hostname}:443`)
+      || String(forwardedHost).toLowerCase() !== authority
+      || request.headers['x-forwarded-proto'] !== 'https'
+      || request.headers['tailscale-funnel-request'] !== undefined
+      || request.headers['tailscale-user-login'] !== tailscale.login) {
+      throw Object.assign(new Error('Acceso restringido a la cuenta autorizada en Tailscale.'), { status: 403 });
+    }
+    if ((request.method !== 'GET' || origin !== undefined) && origin !== `https://${tailscale.hostname}`) {
+      throw Object.assign(new Error('Origen de petición no permitido.'), { status: 403 });
+    }
+    return;
+  }
+  if (!['127.0.0.1', 'localhost'].includes(host)) throw new Error('El panel solo acepta conexiones locales.');
+  if (origin) {
+    const originUrl = new URL(origin);
+    if (!['127.0.0.1', 'localhost'].includes(originUrl.hostname.toLowerCase()) || Number(originUrl.port || 80) !== PORT) {
+      throw new Error('Origen de petición no permitido.');
+    }
+  }
+}
+
+async function readJson(request, maxBytes = 32_000) {
+  let body = '';
+  for await (const chunk of request) {
+    body += chunk;
+    if (Buffer.byteLength(body, 'utf8') > maxBytes) throw new Error('La petición es demasiado grande.');
+  }
+  try { return JSON.parse(body || '{}'); }
+  catch { throw new Error('El contenido JSON no es válido.'); }
+}
+
+async function botRunning() {
+  const file = path.join(APP_ROOT, 'data', 'agency-assistant.json.lock');
+  try {
+    const lock = JSON.parse(await fs.readFile(file, 'utf8'));
+    try { process.kill(lock.pid, 0); return true; }
+    catch (error) { return error.code !== 'ESRCH'; }
+  } catch (error) { return error.code !== 'ENOENT'; }
+}
+
+async function dashboardData() {
+  const byBusiness = Object.fromEntries(await Promise.all(QUEUE_BUSINESSES.map(async business =>
+    [business, await recoverDashboardQueue(QUEUE_ROOT, { business })])));
+  const available = Object.values(byBusiness).some(executor => executor.available);
+  const executor = { available, ...(available ? {} : { reason: byBusiness.agency.reason }), byBusiness };
+  const [queue, assistant, inbox, config, isBotRunning] = await Promise.all([
+    loadQueue(QUEUE_ROOT),
+    loadAssistantState(),
+    loadDashboardState(QUEUE_ROOT),
+    readDashboardConfig(QUEUE_ROOT),
+    botRunning(),
+  ]);
+  const queueSummary = summarize(queue);
+  const automation = await readAutoRun(QUEUE_ROOT);
+  const knowledge = await readContextConsultations(QUEUE_ROOT, { requestIds: inbox.coordinatorRequests.map(item => item.id), jobIds: queue.jobs.map(item => item.id) });
+  const requestTraces = await buildRequestTraces(QUEUE_ROOT, { requests: inbox.coordinatorRequests.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))), jobs: queue.jobs, questions: inbox.questions, automation, knowledge, observePreparation });
+  return {
+    executor,
+    checkouts: await checkoutChoices(QUEUE_ROOT),
+    queue: queueSummary,
+    jobs: queue.jobs.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(job => ({
+      ...job,
+      prompt: safeMarkdownText(job.prompt || '').slice(0, 6000),
+      result: job.result ? { ...job.result, text: safeMarkdownText(job.result.text || '').slice(0, 12000) } : job.result,
+    })),
+    domains: assistant.domains.filter(item => item.status === 'active').sort((a, b) => a.renewalDate.localeCompare(b.renewalDate)),
+    tasks: assistant.tasks.filter(item => item.status === 'pending').sort((a, b) => String(a.dueAt || '9999').localeCompare(String(b.dueAt || '9999'))),
+    projects: inbox.projects.slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).map(project => {
+      const related = queue.jobs.filter(job => job.projectId === project.id && job.business === project.business).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      return {
+        ...project,
+        jobCount: related.length,
+        openJobCount: related.filter(job => ['queued', 'running', 'retry_wait', 'needs_attention'].includes(job.state)).length,
+        recentJobs: related.slice(0, 3).map(job => ({ id: job.id, title: job.title, state: job.state, createdAt: job.createdAt })),
+      };
+    }),
+    questions: inbox.questions.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+    continuations: inbox.continuations,
+    ideas: inbox.ideas,
+    coordinatorRequests: inbox.coordinatorRequests.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+    requestTraces,
+    coordination: await coordinatorHealth(),
+    messages: inbox.messages.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+    exportedCount: Object.keys(inbox.exportedJobs).length,
+    automation,
+    settings: { vaultPath: config.vaultPath, queueRoot: QUEUE_ROOT, autoRun: false, telegram: isBotRunning, runtime },
+  };
+}
+
+let coordinatorRecoveryRunning = false;
+async function resumeCoordinatorRoutes() {
+  if (coordinatorRecoveryRunning) return;
+  coordinatorRecoveryRunning = true;
+  try {
+  const inbox = await loadDashboardState(QUEUE_ROOT);
+  for (const request of inbox.coordinatorRequests.filter(item => !['withdrawn', 'answered'].includes(item.status)
+    && (item.notification?.status === 'pending' || item.answerNotices?.some(notice => notice.notification?.status === 'pending'))).slice(0, 3)) {
+    try { await checkCoordinatorRequestNotice(QUEUE_ROOT, request.id); } catch { /* Durable intent remains pending. */ }
+  }
+  for (const request of inbox.coordinatorRequests.filter(item => item.status === 'routing' && item.route?.kind)) {
+    try {
+      if (request.kind === 'idea') await routeCoordinatorIdea(QUEUE_ROOT, request.id, request.route.kind, request.route.confirmation || {});
+      else await routeTaskFromCoordinator(QUEUE_ROOT, request.id, request.route.kind, { reason: request.route.reason || '', confirmation: request.route.confirmation });
+    } catch (error) {
+      await changeDashboardState(QUEUE_ROOT, state => {
+        const current = state.coordinatorRequests.find(item => item.id === request.id);
+        if (current?.status === 'routing') {
+          current.route = { ...current.route, lastAttemptAt: new Date().toISOString(), lastError: String(error.message || 'No se pudo reanudar la ruta.').slice(0, 1000) };
+          current.updatedAt = new Date().toISOString();
+        }
+      });
+    }
+  }
+  } finally { coordinatorRecoveryRunning = false; }
+}
+
+async function syncFinishedJobs() {
+  const config = await readDashboardConfig(QUEUE_ROOT);
+  const queue = await loadQueue(QUEUE_ROOT);
+  const inbox = await loadDashboardState(QUEUE_ROOT);
+  for (const job of queue.jobs) {
+    if (['succeeded', 'needs_attention', 'running'].includes(job.state)) {
+      const questions = jobQuestions(job);
+      if (questions.length && !(job.state === 'running' && job.coordination)) {
+        await captureJobQuestions(QUEUE_ROOT, job, questions);
+      }
+    }
+    if (!['succeeded', 'needs_attention', 'cancelled'].includes(job.state)) continue;
+    if (!config.vaultPath) continue;
+    const saved = await writeJobNote(QUEUE_ROOT, job, { revision: queue.revision });
+    const visiblePath = saved.currentPath || saved.path;
+    if (saved.current !== false && visiblePath && (inbox.exportedJobs[job.id]?.notePath !== visiblePath || saved.created)) {
+      await markExported(QUEUE_ROOT, job.id, visiblePath);
+    }
+  }
+  await reconcileContinuations(QUEUE_ROOT);
+}
+
+async function syncProjectMemory() {
+  const [config, queue, inbox] = await Promise.all([readDashboardConfig(QUEUE_ROOT), loadQueue(QUEUE_ROOT), loadDashboardState(QUEUE_ROOT)]);
+  if (!config.vaultPath) return;
+  for (const project of inbox.projects) {
+    const memory = projectMemory({ business: project.business, projectId: project.id }, queue.jobs);
+    try { await writeProjectMemoryNote(config.vaultPath, project, memory, queue.revision); }
+    catch (error) { console.warn(`No se pudo actualizar la memoria de ${project.id}: ${error.code || error.message}`); }
+  }
+}
+
+let qualitySyncRunning = false;
+async function syncQuality() {
+  if (qualitySyncRunning) return;
+  qualitySyncRunning = true;
+  try { await syncQualityHandoffs(QUEUE_ROOT); }
+  catch { console.warn('La sincronización de calidad se reintentará.'); }
+  finally { qualitySyncRunning = false; }
+}
+
+async function handleApi(request, response, url, tailscale = null) {
+  if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, await dashboardData());
+  if (request.method === 'GET' && url.pathname === '/api/coordinators') return send(response, 200, await coordinatorHealth());
+  const coordinatorRead = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)$/);
+  if (request.method === 'GET' && coordinatorRead) return send(response, 200, await readCoordinatorRequest(QUEUE_ROOT, coordinatorRead[1]));
+  const traceRead = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/trace$/);
+  if (request.method === 'GET' && traceRead) return send(response, 200, await readRequestTrace(QUEUE_ROOT, traceRead[1], { observePreparation }));
+  if (request.method === 'GET' && url.pathname === '/api/graph') return send(response, 200, await buildKnowledgeGraph(QUEUE_ROOT, url.searchParams.get('business')));
+  if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));
+  if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
+  assertLocalRequest(request, tailscale);
+  const body = await readJson(request);
+  const contextRequest = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/context$/);
+  if (contextRequest) return send(response, 200, await queryRequestContext(QUEUE_ROOT, contextRequest[1], body));
+  const contextJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/context$/);
+  if (contextJob) return send(response, 200, await queryJobContext(QUEUE_ROOT, contextJob[1], body));
+  const coordinatorResponse = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/response$/);
+  if (coordinatorResponse) return send(response, 200, await respondToCoordinatorRequest(QUEUE_ROOT, coordinatorResponse[1], body));
+
+  if (url.pathname === '/api/auto-run') return send(response, 200, await setAutoRun(QUEUE_ROOT, body.business, body.enabled, { confirm: body.confirm === true }));
+  const checkoutRetry = url.pathname.match(/^\/api\/auto-run\/([a-zA-Z0-9_-]+)\/retry-checkout$/);
+  if (checkoutRetry) return send(response, 200, await retryCoordinatedCheckout(QUEUE_ROOT, checkoutRetry[1], { confirm: body.confirm === true }));
+  const receiptReview = url.pathname.match(/^\/api\/auto-run\/([a-zA-Z0-9_-]+)\/review$/);
+  if (receiptReview) return send(response, 200, await reviewAutoReceipt(QUEUE_ROOT, receiptReview[1], { confirm: body.confirm === true }));
+
+  if (url.pathname === '/api/config') {
+    const config = await saveDashboardConfig(QUEUE_ROOT, { vaultPath: body.vaultPath, autoRun: false });
+    return send(response, 200, config);
+  }
+  if (url.pathname === '/api/projects') {
+    return send(response, 201, await createProject(QUEUE_ROOT, body.name, body.business));
+  }
+  const projectUpdateMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9_-]+)\/update$/);
+  if (projectUpdateMatch) return send(response, 200, await updateProject(QUEUE_ROOT, projectUpdateMatch[1], body));
+  if (url.pathname === '/api/ideas') {
+    const idea = await createIdea(QUEUE_ROOT, body.business, body.text, body.projectId, body.operationId, { focus: body.focus, tags: body.tags });
+    return send(response, 201, idea);
+  }
+  const ideaMutation = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/(update|trash|archive|restore)$/);
+  if (ideaMutation) return send(response, 200, await mutateIdea(QUEUE_ROOT, ideaMutation[1], ideaMutation[2], body));
+  const coordinatorRequest = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/coordinator$/);
+  if (coordinatorRequest) return send(response, 200, await sendIdeaToCoordinator(QUEUE_ROOT, coordinatorRequest[1]));
+  const coordinatorRoute = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/route$/);
+  if (coordinatorRoute) {
+    const request = (await loadDashboardState(QUEUE_ROOT)).coordinatorRequests.find(item => item.id === coordinatorRoute[1]);
+    const result = request?.kind === 'idea'
+      ? await routeCoordinatorIdea(QUEUE_ROOT, coordinatorRoute[1], body.kind, { ...(body.confirmation || {}), reason: body.reason })
+      : await routeTaskFromCoordinator(QUEUE_ROOT, coordinatorRoute[1], body.kind, { reason: body.reason, confirmation: body.confirmation });
+    return send(response, 200, result);
+  }
+  const coordinatorNotice = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/notify$/);
+  if (coordinatorNotice) return send(response, 200, await checkCoordinatorRequestNotice(QUEUE_ROOT, coordinatorNotice[1]));
+  const workerHandoff = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/handoffs$/);
+  if (workerHandoff) return send(response, 200, await authorizeWorkerHandoff(QUEUE_ROOT, workerHandoff[1], body));
+  const qualityPlan = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/quality-plan$/);
+  if (qualityPlan) {
+    const item = await readCoordinatorRequest(QUEUE_ROOT, qualityPlan[1]);
+    return send(response, 200, await recordQualityPlan(QUEUE_ROOT, item, body));
+  }
+  const coordinatorQuestions = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/questions$/);
+  if (coordinatorQuestions) {
+    const item = await readCoordinatorRequest(QUEUE_ROOT, coordinatorQuestions[1]);
+    if (body.origin?.kind === 'quality-block') {
+      const origin = await verifyQualityQuestion(QUEUE_ROOT, item, body.origin);
+      return send(response, 200, await reportCoordinatorQuestions(QUEUE_ROOT, coordinatorQuestions[1], { ...body, origin }));
+    }
+    if (body.origin) {
+      const { job, step } = await verifyWorkerQuestion(QUEUE_ROOT, item, body.origin);
+      const questions = await captureJobQuestions(QUEUE_ROOT, job, questionsForEscalation(job, step, body.questions));
+      return send(response, 200, { requestId: item.id, jobId: job.id, mode: 'job-decisions', questions });
+    }
+    return send(response, 200, await reportCoordinatorQuestions(QUEUE_ROOT, coordinatorQuestions[1], body));
+  }
+  const coordinatorWithdraw = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/withdraw$/);
+  if (coordinatorWithdraw) return send(response, 200, await withdrawCoordinatorRequest(QUEUE_ROOT, coordinatorWithdraw[1]));
+  const ideaSend = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/send$/);
+  if (ideaSend) return send(response, 409, { error: 'El panel ya no inicia agentes directamente desde Ideas. Envía la idea al coordinador para que decida la ruta.' });
+  const resumeDispatch = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/resume$/);
+  if (resumeDispatch) return send(response, 200, await resumeCoordinatedDispatch(QUEUE_ROOT, resumeDispatch[1], { confirm: body.confirmReviewed === true }));
+  const reviewedJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/(retry|resolve)$/);
+  if (reviewedJob) {
+    let job;
+    if (reviewedJob[2] === 'retry') {
+      const current = (await loadQueue(QUEUE_ROOT)).jobs.find(item => item.id === reviewedJob[1]);
+      const receipt = current?.autoIntent?.eligible ? (await readAutoRun(QUEUE_ROOT)).receipts.find(item => item.jobId === current.id) : null;
+      const confirm = body.confirmReviewed === true;
+      if (receipt?.status === 'needs_attention' && (stoppedDeveloperCheckpoint(current) || settledQaRevalidation(current))) {
+        job = await resumeCoordinatedDispatch(QUEUE_ROOT, current.id, { confirm });
+      } else {
+        job = receipt?.status === 'needs_attention'
+          ? await retryAutoReceipt(QUEUE_ROOT, reviewedJob[1], { confirm, noDispatchConfirmed: body.noDispatchConfirmed === true })
+          : await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm });
+      }
+    } else {
+      job = await resolveJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
+    }
+    return send(response, 200, job);
+  }
+  if (url.pathname === '/api/jobs') {
+    const result = await submitTaskToCoordinator(QUEUE_ROOT, body);
+    return send(response, 202, result);
+  }
+  if (url.pathname === '/api/run') return send(response, 409, { error: 'No se drena la cola desde el panel. Solo se admiten recibos nuevos elegibles por su ID; la cola manual requiere run --execute con --id.' });
+  const messageMatch = url.pathname.match(/^\/api\/messages\/([a-zA-Z0-9_-]+)\/handled$/);
+  if (messageMatch) return send(response, 200, await markMessageHandled(QUEUE_ROOT, messageMatch[1]));
+  const retryContinuation = url.pathname.match(/^\/api\/continuations\/([a-zA-Z0-9_-]+)\/retry$/);
+  if (retryContinuation) return send(response, 200, await retrySavedContinuation(QUEUE_ROOT, retryContinuation[1]));
+  const answerMatch = url.pathname.match(/^\/api\/questions\/([a-zA-Z0-9_-]+)\/answer$/);
+  if (answerMatch) {
+    const question = (await loadDashboardState(QUEUE_ROOT)).questions.find(item => item.id === answerMatch[1]);
+    const answered = question?.coordinatorRequestId
+      ? await answerCoordinatorQuestion(QUEUE_ROOT, answerMatch[1], body.answer)
+      : await answerQuestion(QUEUE_ROOT, answerMatch[1], body.answer);
+    if (question?.origin?.kind === 'quality-block') void syncQuality();
+    return send(response, 200, answered);
+  }
+  return send(response, 404, { error: 'No se encontró esta ruta.' });
+}
+
+const server = http.createServer(async (request, response) => {
+  try {
+    assertLocalRequest(request, tailscaleAccess);
+    const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
+    if (url.pathname.startsWith('/api/')) return await handleApi(request, response, url, tailscaleAccess);
+    if (request.method !== 'GET') return send(response, 405, 'Método no permitido.', 'text/plain; charset=utf-8');
+    const relative = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\//, '');
+    const contentTypes = {
+      'index.html': 'text/html; charset=utf-8',
+      'app.js': 'text/javascript; charset=utf-8',
+      'ideas-view.js': 'text/javascript; charset=utf-8',
+      'requests-view.js': 'text/javascript; charset=utf-8',
+      'style.css': 'text/css; charset=utf-8',
+      'panel.webmanifest': 'application/manifest+json; charset=utf-8',
+      'panel-icon-192.png': 'image/png',
+      'panel-icon-512.png': 'image/png',
+    };
+    if (!Object.hasOwn(contentTypes, relative)) return send(response, 404, 'No encontrado.', 'text/plain; charset=utf-8');
+    return send(response, 200, await fs.readFile(path.join(APP_ROOT, 'dashboard', relative)), contentTypes[relative]);
+  } catch (error) {
+    return send(response, [403, 409].includes(error.status) ? error.status : 400, { error: error.message || 'No se pudo completar la operación.', ...(error.code ? { code: error.code } : {}) });
+  }
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  autoRunner.start();
+  void resumeCoordinatorRoutes();
+  void syncQuality();
+  void syncProjectMemory().catch(() => {});
+  console.log(`Panel local del Centro de Operaciones: http://127.0.0.1:${PORT}`);
+  void syncFinishedJobs().catch(() => console.warn('La sincronización de Obsidian se reintentará.'));
+});
+
+setInterval(() => { void syncFinishedJobs().catch(() => console.warn('La sincronización de Obsidian se reintentará.')); }, 10_000).unref();
+setInterval(() => { void resumeCoordinatorRoutes().catch(() => {}); }, 10_000).unref();
+setInterval(() => { void syncQuality(); }, 10_000).unref();
+setInterval(() => { void syncProjectMemory().catch(() => {}); }, 10_000).unref();
+
+
+async function keepBotRunning() {
+  while (!shutdownRequested) {
+    try { await runBot(); }
+    catch (error) { if (!shutdownRequested) console.warn(error.message); }
+    if (!shutdownRequested) await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+}
+if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_ALLOWED_CHAT_ID) void keepBotRunning();
+
+function stop() {
+  autoRunner.stop();
+  shutdownRequested = true;
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+process.once('SIGINT', stop);
+process.once('SIGTERM', stop);

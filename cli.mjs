@@ -1,22 +1,33 @@
 #!/usr/bin/env node
 import * as fs from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addJob, loadState, runQueue, setBudget, retryJob, resolveJob, summarize, QueueError } from './queue.mjs';
+import { addJob, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError } from './queue.mjs';
 import { createWorker } from './providers.mjs';
+import { ORCA_EXE } from './local-tools.mjs';
+import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HELP = `Centro de operaciones local — videojuegos (games) y agencia (agency)
 
 node cli.mjs status
 node cli.mjs add --business games|agency --kind analysis|code --title "Título" --prompt-file "instruccion.txt" [--id identificador]
-  [--provider auto|api|codex] [--max-attempts 2] [--timeout-seconds 180] [--max-usd 0.10]
+  [--provider orca|auto|api|codex] [--max-attempts 1-5] [--timeout-seconds SEGUNDOS] [--max-usd 0.10]
+  Intentos por defecto: Orca 5; otros proveedores 2. Orca no tiene límite de duración por defecto.
   Código: --workspace "${path.join(ROOT, 'workspaces', 'checkout-aislado')}" --isolated
 node cli.mjs run                       Simulación: no ejecuta trabajadores ni modifica estado
-node cli.mjs run --execute [--max-jobs 5]
+node cli.mjs run --execute [--max-jobs 5] [--id IDENTIFICADOR]
 node cli.mjs show --id IDENTIFICADOR
+node cli.mjs route --id IDENTIFICADOR --provider orca
+node cli.mjs reconcile --id IDENTIFICADOR --dispatch-id ctx_... --evidence-file "resultado.md" --confirm-reviewed
+node cli.mjs reconcile-code --id IDENTIFICADOR --decision-file "decision.json" --confirm-reviewed
+  Verifica cada dispatch y las aprobaciones QA/Revisión en Orca antes de registrar la decisión.
 node cli.mjs retry --id IDENTIFICADOR --confirm-reviewed
+node cli.mjs attempt-limit --id IDENTIFICADOR --max-attempts 5
 node cli.mjs resolve --id IDENTIFICADOR --confirm-reviewed
+node cli.mjs retract --id IDENTIFICADOR --confirm-reviewed
+node cli.mjs complete --id IDENTIFICADOR --evidence-file "informe.md" --confirm-reviewed
 node cli.mjs budget --usd LIMITE_TOTAL --model MODELO --input-per-million TARIFA --output-per-million TARIFA
 
 No se ejecuta nada en segundo plano. El presupuesto API inicial es 0 USD.
@@ -24,7 +35,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -39,6 +50,56 @@ function parse(args) {
   return { command, options };
 }
 const numeric = (value, fallback) => value === undefined ? fallback : Number(value);
+const runRecordsCache = new Map();
+
+export function reconcileCodeSummary(job) {
+  return {
+    id: job.id,
+    state: job.state,
+    workflow: { status: job.workflow?.status ?? null, currentStage: job.workflow?.currentStage ?? null },
+    branch: job.branch ?? null,
+    destination: { branch: job.destination?.branch ?? null, sha: job.destination?.sha ?? null },
+    deliveryStatus: job.deliveryStatus ?? null,
+    decisionId: job.reconciliationDecisionId ?? null,
+    dispatchIds: (job.coordinatorDecision?.dispatches ?? []).map(item => item.dispatchId),
+  };
+}
+
+function orcaJsonResult(args) {
+  const executable = ORCA_EXE;
+  const result = spawnSync(executable, ['orchestration', ...args, '--json'], {
+    encoding: 'utf8', windowsHide: true, shell: false, timeout: 30_000, maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) throw new QueueError('No se pudo verificar la evidencia de Orca; no se modificó el ledger.', 'reconciliation_orca_unavailable');
+  let response;
+  try { response = JSON.parse(result.stdout); }
+  catch { throw new QueueError('Orca devolvió evidencia ilegible; no se modificó el ledger.', 'reconciliation_orca_unavailable'); }
+  if (response.ok !== true || !response.result) throw new QueueError('Orca no pudo confirmar la evidencia del dispatch; no se modificó el ledger.', 'reconciliation_orca_unavailable');
+  return response.result;
+}
+
+function getOrcaRunRecords(runId) {
+  if (!runRecordsCache.has(runId)) {
+    const inbox = orcaJsonResult(['inbox', '--terminal', `run:${runId}`, '--limit', '500', '--full']);
+    const taskList = orcaJsonResult(['task-list', '--run', runId, '--full']);
+    runRecordsCache.set(runId, { inbox, taskList });
+  }
+  return runRecordsCache.get(runId);
+}
+
+async function verifyOrcaDispatch(evidence, { relatedDispatches } = {}) {
+  const observed = orcaJsonResult(['worker-show', '--dispatch', evidence.dispatchId, '--full']);
+  const workerRecord = verifyOrcaWorkerRecord(evidence, observed);
+  const approvalRequired = evidence.state === 'succeeded' && ['qa', 'reviewer'].includes(evidence.stage);
+  const transcriptApproval = approvalRequired && await verifyOrcaApprovalTranscript(evidence.dispatchId, evidence.state,
+    async ({ dispatchId, cursor }) => orcaJsonResult(['worker-read', '--dispatch', dispatchId, '--source', 'transcript', '--limit', '100', ...(cursor ? ['--cursor', cursor] : [])]),
+    { evidence, includeDelivery: true });
+  const runRecord = verifyOrcaRunRecords(evidence, { ...getOrcaRunRecords(evidence.runId), terminalHandle: workerRecord.terminalHandle, relatedDispatches, approvalTranscriptVerified: transcriptApproval?.approved === true });
+  if (runRecord.delivery && transcriptApproval?.delivery && JSON.stringify(runRecord.delivery) !== JSON.stringify(transcriptApproval.delivery)) {
+    throw new QueueError('El recibo estructurado contradice al transcript final.', 'reconciliation_approval_unverified');
+  }
+  return { ...workerRecord, ...runRecord, ...(transcriptApproval?.delivery ? { delivery: transcriptApproval.delivery } : {}) };
+}
 
 async function main() {
   const { command, options: o } = parse(process.argv.slice(2));
@@ -51,23 +112,57 @@ async function main() {
       if (!result) throw new QueueError('No se encontró el trabajo.');
       break;
     }
+    case 'route': result = await routeJob(ROOT, o.id, o.provider); break;
+    case 'reconcile': {
+      if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con el resultado revisado de Orca.');
+      const evidencePath = path.resolve(o['evidence-file']);
+      if ((await fs.stat(evidencePath)).size > 12_000) throw new QueueError('La evidencia supera los 12.000 bytes.');
+      result = await reconcileOrcaJob(ROOT, o.id, { dispatchId: o['dispatch-id'], confirm: !!o['confirm-reviewed'], evidence: await fs.readFile(evidencePath, 'utf8') });
+      break;
+    }
+    case 'reconcile-code': {
+      if (!o['decision-file']) throw new QueueError('Indica --decision-file con la decisión explícita del coordinador.');
+      const decisionPath = path.resolve(o['decision-file']);
+      const decisionStat = await fs.stat(decisionPath);
+      if (decisionStat.size > 24_000) throw new QueueError('El manifiesto de decisión supera los 24.000 bytes.');
+      let decision;
+      try { decision = JSON.parse(await fs.readFile(decisionPath, 'utf8')); }
+      catch { throw new QueueError('El manifiesto de decisión no contiene JSON válido.', 'reconciliation_invalid'); }
+      result = await reconcileCodeJob(ROOT, o.id, { decision, confirm: !!o['confirm-reviewed'], verifyDispatch: verifyOrcaDispatch, verifyDestination: verifyReconciliationDestination });
+      break;
+    }
     case 'add': {
       if (!o['prompt-file']) throw new QueueError('Indica --prompt-file con la instrucción del trabajo.');
       const promptPath = path.resolve(o['prompt-file']);
       if ((await fs.stat(promptPath)).size > 12_000) throw new QueueError('La instrucción supera los 12.000 bytes.');
-      result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], 2), timeoutMs: numeric(o['timeout-seconds'], 180) * 1000, maxUsd: numeric(o['max-usd'], 0.1) });
+      const timeoutSeconds = o['timeout-seconds'] === undefined && (o.provider ?? 'orca') === 'orca'
+        ? null : numeric(o['timeout-seconds'], 180);
+      result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], undefined), timeoutMs: timeoutSeconds === null ? undefined : timeoutSeconds * 1000, maxUsd: numeric(o['max-usd'], 0.1) });
       break;
     }
-    case 'run': result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5) }); break;
+    case 'run': result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5), jobId: o.id }); break;
     case 'retry': result = await retryJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'attempt-limit': {
+      const job = await increaseJobAttemptLimit(ROOT, o.id, numeric(o['max-attempts'], NaN));
+      result = { id: job.id, state: job.state, attempts: job.attempts, maxAttempts: job.maxAttempts };
+      break;
+    }
     case 'resolve': result = await resolveJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'retract': result = await retractFalseSuccess(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'complete': {
+      if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con el informe de entrega revisada.');
+      const evidencePath = path.resolve(o['evidence-file']);
+      if ((await fs.stat(evidencePath)).size > 12_000) throw new QueueError('El informe supera los 12.000 bytes.');
+      result = await completeReviewedCodeJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'], evidence: await fs.readFile(evidencePath, 'utf8') });
+      break;
+    }
     case 'budget': result = await setBudget(ROOT, { limitUsd: numeric(o.usd, NaN), model: o.model, inputPerMillion: numeric(o['input-per-million'], NaN), outputPerMillion: numeric(o['output-per-million'], NaN) }); break;
     default: throw new QueueError('Comando desconocido. Usa node cli.mjs help.');
   }
-  console.log(JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(command === 'reconcile-code' ? reconcileCodeSummary(result) : result, null, 2));
   if (command === 'run' && o.execute && (result.blockedNeedsAttention?.length || result.jobs?.some(job => job.state === 'needs_attention'))) process.exitCode = 2;
 }
-main().catch(error => {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {
   // Do not print raw provider bodies, process stderr, environment, or credentials.
   console.error(JSON.stringify({ error: error.code || 'operation_failed', message: error instanceof QueueError ? error.message : 'No se pudo completar la operación local. Comprueba archivos, permisos y opciones.' }));
   process.exitCode = 1;

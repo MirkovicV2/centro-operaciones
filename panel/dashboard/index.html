@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0f1011">
+  <title>Centro de Operaciones · Daniel</title>
+  <link rel="manifest" href="/panel.webmanifest">
+  <link rel="apple-touch-icon" href="/panel-icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#inicio" aria-label="Centro de Operaciones">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="24" cy="24" r="11"/><circle cx="24" cy="24" r="4"/><path d="M24 13V7m0 28v6M13 24H7m28 0h6M16 16l-5-5m21 21 5 5m-5-21 5-5M16 32l-5 5"/><circle cx="24" cy="4" r="3"/><circle cx="24" cy="44" r="3"/><circle cx="4" cy="24" r="3"/><circle cx="44" cy="24" r="3"/><path d="M8 8h3v3H8zm29 29h3v3h-3zm0-29h3v3h-3zM8 37h3v3H8z" fill="currentColor" stroke="none"/></svg></span>
+        <span><b>Centro</b><small>de operaciones</small></span>
+      </a>
+      <label class="business-selector">Negocio<select id="business-context"><option value="agency">Agencia digital</option><option value="games">Videojuegos</option></select></label>
+      <nav class="nav" aria-label="Navegación principal">
+        <div class="nav-caption" aria-hidden="true">Seguimiento</div>
+        <a class="nav-link active" href="#inicio"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="7" height="7" rx="1"/><rect x="13.5" y="4" width="7" height="7" rx="1"/><rect x="3.5" y="14" width="7" height="6" rx="1"/><rect x="13.5" y="14" width="7" height="6" rx="1"/></svg></span> Resumen</a>
+        <a class="nav-link" href="#peticiones"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 5H4v12h4v3l4-3h8zM8 9h8m-8 4h5"/></svg></span> Peticiones <i id="request-count">0</i></a>
+        <a class="nav-link" href="#trabajos"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.1M4 12h.1M4 18h.1"/></svg></span> Trabajos</a>
+        <div class="nav-caption" aria-hidden="true">Operaciones</div>
+        <a class="nav-link" href="#proyectos"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7V5h7l2 3h9v11H3z"/></svg></span> Proyectos <i id="project-count">0</i></a>
+        <a class="nav-link" href="#ideas"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 18h6m-5 3h4m-5-6a6 6 0 1 1 6 0v3H9z"/></svg></span> Ideas y preguntas <i id="question-count">0</i></a>
+        <div class="nav-caption" aria-hidden="true">Recursos</div>
+        <a class="nav-link" href="#conocimiento"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 6c-2-2-5-2-9-2v15c4 0 7 0 9 2 2-2 5-2 9-2V4c-4 0-7 0-9 2zm0 0v15"/></svg></span> Conocimiento</a>
+        <a class="nav-link" href="#dominios"><span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18m-9-9c-4 4-4 14 0 18 4-4 4-14 0-18z"/></svg></span> Dominios IONOS</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="connection-dot"><span id="panel-dot"></span><span id="panel-state">Panel local</span></div>
+        <div class="sidebar-note">Centro de Operaciones<br>Acceso privado</div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumb"><b id="page-name">Resumen</b><span aria-hidden="true">/</span><strong id="business-name">Agencia digital</strong></div>
+        <div class="topbar-right"><span id="updated-at">Actualizando…</span><button class="icon-button" id="refresh" title="Actualizar panel" aria-label="Actualizar">↻</button></div>
+      </header>
+
+      <aside id="global-blockers" aria-label="Bloqueos de la cola compartida"></aside>
+      <section class="page-section" id="inicio">
+        <div class="overview-intro">
+          <div><h1 id="context-title">Agencia digital</h1><p class="section-copy">Actividad del equipo y estado de los encargos</p></div>
+          <a class="button primary" href="#ideas">＋ Nueva idea</a>
+        </div>
+        <div id="overview-metrics" class="overview-metrics" aria-label="Resumen de actividad"></div>
+        <div id="action-summary" class="workspace-layout overview-board">
+          <section class="workspace-panel overview-chart" aria-labelledby="overview-activity-title">
+            <header class="workspace-panel-heading"><h2 id="overview-activity-title">Actividad por etapa</h2><a class="text-button" href="#trabajos">Ver trabajos →</a></header>
+            <p class="overview-panel-copy">Etapas registradas en las peticiones de este negocio</p>
+            <div id="overview-activity"></div>
+          </section>
+          <section class="workspace-panel overview-chart" aria-labelledby="overview-status-title">
+            <header class="workspace-panel-heading"><h2 id="overview-status-title">Estado de peticiones</h2></header>
+            <div id="overview-status"></div>
+          </section>
+          <div class="workspace-main">
+            <section class="workspace-panel" aria-labelledby="overview-recent-title">
+              <header class="workspace-panel-heading"><h2 id="overview-recent-title">Peticiones recientes</h2><a class="text-button" href="#peticiones">Ver todas →</a></header>
+              <div id="overview-recent" class="overview-recent"></div>
+            </section>
+            <div id="overview-running"></div>
+          </div>
+          <div class="workspace-rail">
+            <div id="overview-attention"></div><div id="overview-next"></div>
+          </div>
+        </div>
+        <div class="status-grid">
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon purple">▤</span><span id="queue-badge" class="badge neutral">Leyendo</span></div>
+            <div class="metric" id="metric-active">—</div><div class="metric-label">trabajos activos en la cola</div>
+            <div class="metric-foot"><span id="metric-needs">—</span> necesitan revisión</div>
+          </article>
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon green">✳</span><span id="obsidian-badge" class="badge neutral">Sin conectar</span></div>
+            <div class="metric" id="metric-notes">—</div><div class="metric-label">resultados guardados en Obsidian</div>
+            <div class="metric-foot" id="obsidian-foot">Configura la bóveda una vez</div>
+          </article>
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon amber">?</span><span class="badge neutral">Bandeja</span></div>
+            <div class="metric" id="metric-questions">—</div><div class="metric-label">preguntas que esperan tu criterio</div>
+            <div class="metric-foot">Puedes responder aquí o por Telegram</div>
+          </article>
+          <article class="status-card">
+            <div class="card-top"><span class="status-icon blue">◉</span><span id="telegram-badge" class="badge neutral">Desconectado</span></div>
+            <div class="metric" id="metric-domains">—</div><div class="metric-label">dominios activos en inventario</div>
+            <div class="metric-foot" id="telegram-foot">Telegram se configura localmente</div>
+          </article>
+        </div>
+
+      </section>
+
+      <section class="page-section" id="peticiones">
+        <div class="section-heading section-heading-spaced"><div><div class="eyebrow">DEL MENSAJE AL RESULTADO</div><h2>Peticiones al equipo</h2><p class="section-copy">Consulta sin elegir un proyecto y sigue cada encargo, sus decisiones y su resultado.</p></div></div>
+        <div class="workspace-layout request-workspace">
+          <div class="workspace-main request-feed">
+            <div class="workspace-panel request-controls">
+              <div class="workspace-panel-heading"><h3>Seguimiento</h3><p id="request-results" class="microcopy" role="status"></p></div>
+              <div class="request-toolbar"><label>Buscar petición<input id="request-search" type="search" placeholder="Título o responsable"></label><label>Estado<select id="request-filter"><option value="all">Todas</option><option value="active">En curso</option><option value="attention">Necesitan atención</option><option value="done">Terminadas</option></select></label><label>Proyecto<select id="request-project-filter"><option value="all">Todos</option><option value="none">Sin proyecto</option></select></label></div>
+            </div>
+            <div id="request-list" class="request-list"></div>
+          </div>
+          <div class="workspace-rail request-composer">
+          <form id="consultation-form" class="form-card consultation-form">
+          <div class="workspace-panel-heading"><div><div class="eyebrow">COORDINACIÓN</div><h3>Nueva consulta</h3></div></div>
+          <label for="consultation-text">¿Qué necesitas saber?<textarea id="consultation-text" name="prompt" rows="3" maxlength="10000" required placeholder="Por ejemplo: ¿qué está pendiente en la agencia y qué conviene hacer después?"></textarea></label>
+          <div class="consultation-footer"><label for="consultation-project">Contexto opcional<select id="consultation-project" name="projectId"><option value="">Consulta general · sin proyecto</option></select></label><button type="submit" class="button primary">Preguntar al coordinador</button></div>
+          <p class="microcopy">Recibirás la respuesta en Seguimiento. Para encargar cambios, usa <a href="#ideas">Ideas y preguntas</a>.</p>
+          <p id="consultation-status" role="status" aria-live="polite"></p>
+          </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="page-section" id="proyectos">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">SEGUIMIENTO POR APLICACIÓN</div><h2>Proyectos</h2><p class="section-copy">Cada juego, web o producto tiene su propia etapa, siguiente acción e historial de trabajos.</p></div>
+        </div>
+        <div class="workspace-layout project-workspace">
+        <div class="workspace-main">
+        <div class="project-toolbar workspace-panel">
+          <input id="project-search" type="search" placeholder="Buscar proyecto">
+          <select id="project-business-filter"><option value="all">Todas las líneas</option><option value="games">Videojuegos</option><option value="agency">Agencia</option></select>
+          <select id="project-status-filter" aria-label="Filtrar proyectos por estado"><option value="active">Activos</option><option value="all">Todos los estados</option><option value="paused">Pausados</option><option value="completed">Completados</option></select>
+        </div>
+        <div id="projects-grid" class="projects-grid"></div>
+        </div>
+        <div class="workspace-rail">
+        <form class="form-card project-create-form" id="project-create-form">
+          <div class="workspace-panel-heading"><div><div class="eyebrow">CARTERA</div><h3>Nuevo proyecto</h3></div></div>
+          <label>Nombre del proyecto<input name="name" maxlength="100" required placeholder="Ej.: nombre del juego o aplicación"></label>
+          <label>Línea de negocio<select name="business" required><option value="games">Videojuegos</option><option value="agency">Agencia</option></select></label>
+          <button class="button primary" type="submit">Crear proyecto</button>
+        </form>
+        </div>
+        </div>
+      </section>
+
+      <section class="page-section" id="trabajos">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">EJECUCIÓN</div><h2>Trabajos de los agentes</h2><p class="section-copy">Los resultados terminados se guardan automáticamente en Obsidian cuando conectas la bóveda.</p></div>
+          <div class="button-row"><button class="button secondary" id="run-next" hidden disabled>Despacho manual por CLI</button><button class="button primary" id="show-new-job">＋ Nuevo trabajo</button></div>
+        </div>
+        <div class="workspace-layout jobs-workspace">
+        <div class="workspace-main">
+        <div class="run-status" id="run-status" hidden></div>
+        <form class="form-card job-form" id="job-form" hidden>
+          <div class="form-title"><div><div class="eyebrow">AÑADIR A LA COLA</div><h3>Nuevo trabajo</h3></div><button type="button" class="icon-button" id="hide-new-job" aria-label="Cerrar">×</button></div>
+          <div class="form-grid">
+            <label>Empresa<select name="business" id="job-business" required><option value="agency">Agencia</option><option value="games">Videojuegos</option></select></label>
+            <label>Proyecto<select name="projectId" id="job-project" required></select></label>
+            <label>Orientación para el coordinador (no fija la ruta)<select name="kind" id="job-kind" required><option value="analysis">Sin preferencia</option><option value="code">Podría requerir código</option></select></label>
+            <label class="wide">Título<input name="title" maxlength="160" required placeholder="Resultado concreto que quieres obtener"></label>
+            <label class="wide">Objetivo e instrucciones<textarea name="prompt" maxlength="10000" rows="4" required placeholder="Qué resultado necesitas y el contexto relevante"></textarea></label>
+            <label class="wide">Criterio de éxito<textarea name="successCriteria" maxlength="1800" rows="2" required placeholder="Qué podremos comprobar para darlo por terminado"></textarea></label>
+          </div>
+          <div class="form-footer"><span>Esta orientación no elige agente. El coordinador confirma la ruta; hasta entonces no hay job ni dispatch.</span><button class="button primary" type="submit">Enviar al coordinador</button></div>
+        </form>
+        <div class="filters" role="group" aria-label="Filtrar trabajos">
+          <button class="filter active" data-filter="all">Todos <span id="filter-all">0</span></button><button class="filter" data-filter="active">Activos <span id="filter-active">0</span></button><button class="filter" data-filter="needs_attention">Necesitan revisión <span id="filter-attention">0</span></button><button class="filter" data-filter="succeeded">Completados <span id="filter-done">0</span></button>
+        </div>
+        <section class="coordinator-inbox" id="coordinator-inbox" hidden aria-labelledby="coordinator-inbox-title"><h3 id="coordinator-inbox-title">Solicitudes pendientes del coordinador</h3><div id="coordinator-requests-list"></div></section>
+        <div id="jobs-list" class="jobs-list"></div>
+        <details id="history" class="history-panel"><summary>Historial <span id="history-count">0</span></summary>
+          <div class="history-filters"><label>Buscar título o ID<input id="history-search" type="search"></label><label>Proyecto<select id="history-project"><option value="">Todos</option></select></label><label>Estado<select id="history-state"><option value="">Todos</option><option value="succeeded">Completado</option><option value="cancelled">Cancelado</option></select></label><label>Etapa<select id="history-stage"><option value="">Todas</option><option value="ux">UX</option><option value="developer">Desarrollo</option><option value="qa">QA</option><option value="reviewer">Revisión</option><option value="planner">Planificador</option></select></label><label>Desde<input id="history-date" type="date"></label></div><div id="history-list" class="jobs-list"></div></details>
+        </div>
+        <div class="workspace-rail jobs-operations">
+          <aside class="queue-guide" aria-label="Autoejecución por empresa"><h3>Autoejecución local por empresa</h3><p>Solo una solicitud que el coordinador haya enrutado puede iniciar su trabajo. Pausar conserva el trabajador activo.</p><div id="automation-controls"></div></aside>
+          <aside class="queue-guide" aria-label="Conexión con coordinadores"><h3>Coordinación por proyecto</h3><div id="coordinator-connections" aria-live="polite"></div></aside>
+          <aside class="queue-guide" aria-labelledby="queue-guide-title">
+            <h3 id="queue-guide-title">Cómo pasan los encargos por los agentes</h3>
+            <ul>
+              <li><strong>Primero:</strong> el coordinador recibe la solicitud y decide la ruta.</li>
+              <li><strong>Análisis:</strong> Planificador, sin modificar código.</li>
+              <li><strong>Código:</strong> <span aria-hidden="true">UX → Desarrollo → QA → Revisión</span><span class="queue-guide-sequence">Primero UX, después Desarrollo, después QA y finalmente Revisión.</span></li>
+            </ul>
+            <p>El panel no crea un trabajo hasta que el coordinador confirma la ruta.</p>
+          </aside>
+        </div>
+        </div>
+      </section>
+
+      <section class="page-section" id="ideas">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">DECISIONES Y DIRECCIÓN</div><h2>Ideas y preguntas</h2><p class="section-copy">Las respuestas se reúnen con las decisiones del encargo y se guardan en Obsidian cuando está conectado.</p></div>
+        </div>
+        <div class="idea-layout">
+          <form class="form-card idea-form" id="idea-form">
+            <div class="eyebrow">CAPTURA RÁPIDA</div><h3>Una idea para el equipo</h3>
+            <div class="idea-context-fields">
+            <label>Empresa<select name="business" id="idea-business"><option value="agency">Agencia</option><option value="games">Videojuegos</option></select></label>
+            <label>Proyecto<select name="projectId" id="idea-project"></select></label>
+            </div>
+            <p class="microcopy"><span id="idea-checkout">Sin checkout válido</span> · <a href="#proyectos">Configurar checkout</a></p>
+            <fieldset class="idea-focus"><legend>Foco del trabajo</legend><label><input type="radio" name="focus" value="" checked> Sin clasificar</label><label><input type="radio" name="focus" value="ux"> Diseño UX: Interfaz, interacción y experiencia</label><label><input type="radio" name="focus" value="code"> Código: Lógica, integración y comportamiento técnico</label><label><input type="radio" name="focus" value="mixed"> Mixto: Experiencia y comportamiento técnico</label></fieldset><label>Etiquetas temáticas (separadas por comas)<input name="tags" maxlength="124" placeholder="Hasta cinco, 24 caracteres cada una"></label><p>El foco orienta el brief; desarrollo conserva UX → Desarrollo → QA → Revisión.</p>
+            <label>Idea o indicación<textarea name="text" rows="5" maxlength="6000" required placeholder="Escribe una idea, preferencia o dirección para el siguiente trabajo…"></textarea></label>
+            <div class="idea-actions">
+            <button class="button primary full" type="submit">Guardar y enviar al coordinador</button>
+            <button class="button secondary full" type="button" id="save-idea-only">Solo guardar la idea</button>
+            </div>
+            <p class="microcopy">El coordinador elegirá Planificador o UX → Desarrollo → QA → Revisión. Hasta esa decisión no se crea un trabajo ni se inicia un agente.</p>
+            <p id="idea-send-status" role="status" aria-live="polite"></p>
+          </form>
+          <div class="idea-workspace-rail">
+          <div class="questions-panel"><div class="panel-heading"><div><div class="eyebrow">BANDEJA PERSONAL</div><h3>El equipo necesita tu criterio</h3></div><span class="count-pill" id="pending-pill">0</span></div><div id="questions-list" class="questions-list"></div></div>
+        <div class="vault-recent"><div class="panel-heading"><div><div class="eyebrow">CAPTURAS AUTOMÁTICAS</div><h3>Ideas guardadas</h3></div></div><div id="idea-filters" class="history-filters"><label>Proyecto<select id="ideas-project"></select></label><label>Foco<select id="ideas-focus"><option value="">Todos</option><option value="ux">Diseño UX</option><option value="code">Código</option><option value="mixed">Mixto</option><option value="none">Sin clasificar</option></select></label><label>Etiqueta<select id="ideas-tag"></select></label><label>Estado<select id="ideas-status"><option value="active">Activas</option><option value="archived">Archivadas</option><option value="trash">Papelera</option></select></label><label>Ordenar<select id="ideas-order"><option value="recent">Más recientes</option><option value="old">Más antiguas</option><option value="title">Título A–Z</option><option value="project">Proyecto A–Z</option><option value="focus">Foco</option></select></label><button type="button" id="ideas-reset" class="button secondary">Restablecer filtros</button></div><p id="ideas-count" role="status" aria-live="polite" tabindex="-1"></p><div id="ideas-load-error" hidden><p id="ideas-load-message" role="alert"></p><button type="button" id="ideas-retry" class="button secondary">Reintentar</button></div><div id="ideas-list" class="recent-ideas" aria-busy="true"></div></div>
+          </div>
+        </div>
+        <div class="telegram-inbox">
+          <div class="panel-heading"><div><div class="eyebrow">SECRETARIA · TELEGRAM</div><h3>Mensajes recibidos</h3></div><span class="count-pill" id="telegram-message-count">0</span></div>
+          <p class="section-copy">Los mensajes libres enviados al bot aparecen aquí y se guardan como nota local en Obsidian. Usa /anotar o /recordar para crear tareas directamente.</p>
+          <div id="telegram-messages" class="telegram-messages"></div>
+        </div>
+      </section>
+
+      <section class="page-section" id="conocimiento">
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">OBSIDIAN · MAPA DE NOTAS</div><h2>Conocimiento conectado</h2><p class="section-copy">Los agentes pueden consultar notas relevantes de su empresa y proyecto. En Peticiones puedes ver qué fuentes recibieron y cuáles citaron. El mapa muestra los enlaces [[wikilink]] entre notas.</p></div>
+          <button class="button secondary" id="refresh-graph">↻ Actualizar mapa</button>
+        </div>
+        <div class="knowledge-layout">
+          <div class="graph-card"><div class="graph-toolbar"><div><b id="graph-title">Bóveda sin conectar</b><span id="graph-subtitle">Los enlaces entre notas aparecerán aquí</span></div><span class="legend"><i class="legend-idea"></i>Idea <i class="legend-job"></i>Trabajo</span></div><div id="graph" class="graph-view"><div class="empty-graph"><span>⌘</span><b>Tu mapa de conocimiento aparecerá aquí</b><small>Conecta Obsidian y enlaza notas con [[wikilinks]].</small></div></div></div>
+          <aside class="settings-card"><div class="eyebrow">CONEXIÓN LOCAL</div><h3>Obsidian</h3><p>Elige la carpeta raíz de tu bóveda. El panel guarda resultados e ideas y entrega extractos relevantes a los agentes cuando consultan contexto.</p>
+            <form id="settings-form"><label>Ruta de la bóveda<input name="vaultPath" placeholder="C:\\Users\\...\\Obsidian\\Mi bóveda" required></label><div class="path-hint" id="vault-path-hint">Aún no hay una bóveda configurada.</div><p class="microcopy">Autoejecución: consulta los controles por empresa en Trabajos.</p><p class="microcopy warning-copy">Respeta el presupuesto y pausa al encontrar un trabajo que requiere revisión. Los cambios de código siguen en checkouts aislados y requieren revisión humana.</p><button class="button primary full" type="submit">Guardar conexión</button></form>
+            <a class="external-link" href="https://docs.getgraphify.com/docs/faq" target="_blank" rel="noreferrer">Sobre Graphify y Obsidian ↗</a>
+          </aside>
+        </div>
+
+      </section>
+
+      <section class="page-section" id="dominios">
+        <div class="section-heading section-heading-spaced"><div><div class="eyebrow">AGENCIA DIGITAL</div><h2>Dominios IONOS</h2><p class="section-copy">Inventario manual. Los avisos de renovación salen por Telegram mientras el bot esté activo.</p></div><a id="open-obsidian" class="button secondary" href="obsidian://open">Abrir Obsidian</a></div>
+        <div id="domains-list" class="domains-list"></div>
+        <div class="tasks-panel"><div class="panel-heading"><div><div class="eyebrow">SECRETARIA</div><h3>Pendientes y recordatorios</h3></div></div><div id="assistant-tasks" class="assistant-tasks"></div></div>
+      </section>
+
+      <footer class="footer"><span>Centro de Operaciones · local</span><span>Contextos separados por empresa · checkouts aislados · activación explícita por empresa</span></footer>
+    </main>
+  </div>
+  <dialog id="destination-dialog"><form id="destination-form"><h2>Confirmar destino de desarrollo</h2><p id="destination-context"></p><label>Objetivo<textarea name="objective" minlength="4" maxlength="1800" required rows="3"></textarea></label><label>Criterio de éxito<textarea name="successCriteria" minlength="4" maxlength="1800" required rows="3"></textarea></label><p>Esto confirma el destino para el coordinador. Todavia no crea un job ni inicia agentes; GitHub, rama y SHA se volveran a comprobar si el coordinador elige codigo.</p><div class="button-row"><button type="button" id="cancel-destination" class="button secondary">Cancelar</button><button type="submit" class="button primary">Confirmar destino y enviar solicitud</button></div></form></dialog>
+  <dialog id="idea-dialog" aria-labelledby="idea-dialog-title"><form id="idea-dialog-form"><h2 id="idea-dialog-title"></h2><div id="idea-dialog-content"></div><p id="idea-dialog-error" role="alert"></p><div class="button-row"><button type="button" id="idea-dialog-cancel" class="button secondary" autofocus>Cancelar</button><button type="submit" id="idea-dialog-submit" class="button primary">Confirmar</button></div></form></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/ideas-view.js"></script>
+  <script src="/requests-view.js"></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

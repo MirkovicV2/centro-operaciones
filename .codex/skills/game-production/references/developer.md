@@ -1,0 +1,9 @@
+# Implementación Godot
+
+- Para una escena pequeña, mantén reglas y puntuación verificables por separado de transiciones y efectos. Usa señales y estados explícitos para que la interfaz represente el resultado de las reglas.
+- Lleva teclado y tacto a una sola acción de juego. Define cuándo se acepta el evento y cuándo termina la ventana de entrada. Controla repetición, doble pulsación y callbacks pendientes tras pausa, fin o reinicio.
+- Anima el estado que ya ha confirmado el juego. Cancela o reemplaza efectos que ya no corresponden al estado actual al reiniciar. Mantén la información crítica disponible durante la transición.
+- Para pulido de un juego existente, aplica las vueltas jugables de Diseño en el checkout confirmado. Conserva capturas, vídeo o medición comparable por vuelta cuando se pidan. Separa cambios de temporización visual del reloj de audio y del juicio. Prueba que arrastrar y soltar sobre un nodo no lo active y que repetir una animación de premio no duplique su estado ni su recompensa.
+- Incorpora solo archivos con procedencia y licencia comprobadas dentro de la autorización de assets. Conserva avisos y créditos. Para cambios de audio, registra pista, BPM, offset y relación con la carta rítmica. Evita cargar efectos o audio de forma que provoquen pausas al primer toque.
+- Si el encargo incluye Android, deja preparado un preset Android de depuración del proyecto y sus opciones de importación de texturas. Registra el comando de exportación, versión del motor y nombre del paquete para que QA pueda generar y verificar la APK exacta sin editar el checkout.
+- Verifica la versión con el ejecutable local. En este equipo las herramientas portátiles están en `%LOCALAPPDATA%/CentroOperacionesTools`. Haz importación y pruebas acotadas en Godot. Mantén cachés, binarios y guardados de prueba fuera del diff. Si se pide CI, usa la misma versión acreditada y una ejecución con resultado comprobable.

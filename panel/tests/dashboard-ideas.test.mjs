@@ -1,0 +1,46 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import net from 'node:net';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { acquireLock, releaseLock, loadState } from '../queue.mjs';
+
+test('HTTP panel blocks legacy direct idea sends before creating jobs', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'panel-ideas-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'workspaces', 'isolated', '.git'), { recursive: true });
+  await fs.mkdir(path.join(root, 'workspaces', 'isolated', '.git', 'objects'));
+  await fs.writeFile(path.join(root, 'workspaces', 'isolated', '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  await fs.writeFile(path.join(root, 'workspaces', 'isolated', '.git', 'config'), '[core]\nrepositoryformatversion = 0\n');
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: path.join(root, 'workspaces', 'isolated'), windowsHide: true });
+  const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
+  const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
+  const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dashboard.mjs');
+  const child = spawn(process.execPath, [app], { windowsHide: true, env: { ...process.env, CENTRO_OPERACIONES_ROOT: root, CENTRO_OPERATIONS_PORT: String(port), TELEGRAM_BOT_TOKEN: '', TELEGRAM_ALLOWED_CHAT_ID: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(async () => { if (child.exitCode === null) { child.kill(); await once(child, 'close'); } });
+  await Promise.race([once(child.stdout, 'data'), once(child, 'exit').then(() => { throw new Error('Panel exited before listening'); }), new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Panel startup timed out')), 5000); timer.unref(); })]);
+  const api = async (route, body) => {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {});
+    return { status: response.status, value: await response.json() };
+  };
+  const project = (await api('/api/projects', { name: 'Proyecto HTTP', business: 'agency' })).value;
+  const idea = (await api('/api/ideas', { business: 'agency', projectId: project.id, text: 'Idea HTTP para desarrollar', focus: 'mixed', operationId: 'capture-http-1234' })).value;
+  const legacy = await api(`/api/ideas/${idea.id}/send`, { kind: 'code' });
+  assert.equal(legacy.status, 409);
+  assert.match(legacy.value.error, /coordinador/);
+  const state = (await api('/api/state')).value;
+  assert.equal(state.jobs.length, 0, 'legacy direct-send route must not create a job');
+  assert.equal(state.coordinatorRequests.length, 0, 'no coordinator request is created by the rejected legacy route');
+  assert.equal(state.settings.runtime.pid, child.pid);
+  assert.equal(state.settings.runtime.entry, app);
+  for (const name of ['dashboard.mjs', 'request-trace.mjs', 'knowledge-access.mjs', 'requests-view.js']) assert.ok(Object.keys(state.settings.runtime.fingerprints).some(file => path.basename(file) === name));
+  assert.ok(Object.values(state.settings.runtime.fingerprints).every(hash => /^[a-f0-9]{64}$/.test(hash)));
+  const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+  for (const id of ['idea-checkout', 'idea-send-status', 'save-idea-only', 'run-next', 'coordinator-requests-list']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /Guardar y enviar al coordinador/);
+  assert.doesNotMatch(html, /Guardar y enviar a desarrollo|Guardar y enviar al planificador/);
+});
