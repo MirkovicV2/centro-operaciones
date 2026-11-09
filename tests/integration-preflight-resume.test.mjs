@@ -208,3 +208,28 @@ test('inspectEffectFreeIntegration confirms unchanged remote refs, unchanged HEA
   const directProof = await inspectEffectFreeIntegration(root, direct, { ...record, sourceBranch: 'main' }, { git, gh: async () => assert.fail('no PR listing for same-branch integration') });
   assert.equal(directProof.openPullRequests, 0);
 });
+
+test('retry-checkout accepts a lock written by this process for a job that is now cancelled and reviewed (F12)', async t => {
+  const f = await fixture(t);
+  await resolveJob(f.root, f.jobId, { confirm: true });
+  await patchAuto(f.root, state => { state.receipts[0].status = 'reviewed'; });
+  await fs.writeFile(f.lockPath, JSON.stringify({ jobId: f.jobId, receiptId: f.receiptId, attempt: 1, pid: process.pid }));
+  const next = await confirmSubmission(f.root, 'receipt-next', { id: 'next-job', business: 'agency', kind: 'code', provider: 'orca', title: 'Siguiente encargo',
+    prompt: 'Complete the fixture acceptance.', contract: { acceptance: ['Complete the fixture acceptance.'] }, workspace: f.workspace, isolated: true, branch: 'feature', destination: f.destination, maxAttempts: 2 });
+  await createAutoRunner(f.root, { verify: f.verify, worker: async () => assert.fail('the locked checkout must not admit') }).tick();
+  assert.equal((await readAutoRun(f.root)).receipts.at(-1).blockCode, 'checkout_locked');
+  const inspectWorker = async () => {};
+  const effects = async (_root, job, record) => effectFree(job, record);
+  // Still cancelled but not yet reviewed by the operator: the lock stays even though the pid is ours.
+  await patchJob(f.root, job => { delete job.reviewedAt; });
+  await assert.rejects(retryCheckoutAdmission(f.root, next.receipt.id, { confirm: true, inspectWorker, inspectIntegrationEffects: effects }), /cancelado y revisado/);
+  await patchJob(f.root, job => { job.reviewedAt = new Date().toISOString(); });
+  // A still-running stage of the previous job keeps the lock as well.
+  await patchJob(f.root, job => { job.workflow.steps.find(step => step.key === 'reviewer').status = 'running'; });
+  await assert.rejects(retryCheckoutAdmission(f.root, next.receipt.id, { confirm: true, inspectWorker, inspectIntegrationEffects: effects }), /aún activas/);
+  await patchJob(f.root, job => { job.workflow.steps.find(step => step.key === 'reviewer').status = 'succeeded'; });
+  await fs.access(f.lockPath);
+  const reopened = await retryCheckoutAdmission(f.root, next.receipt.id, { confirm: true, inspectWorker, inspectIntegrationEffects: effects });
+  assert.equal(reopened.status, 'pending');
+  await assert.rejects(fs.access(f.lockPath), { code: 'ENOENT' });
+});

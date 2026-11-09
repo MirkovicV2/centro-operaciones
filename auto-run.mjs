@@ -423,7 +423,10 @@ export async function retryCheckoutAdmission(root, id, { confirm = false, inspec
           || previous.autoIntent?.receiptId !== oldReceipt?.id || oldReceipt?.jobId !== previous.id || oldReceipt.status !== 'reviewed'
           || (owner.attempt != null && owner.attempt !== previous.attempts) || (oldIntegration && !effectFreeIntegrationRecord(oldIntegration, state.history, previous.id))
           || !Number.isInteger(owner.pid) || owner.pid <= 0) throw new Error('El bloqueo no pertenece a un encargo cancelado y revisado de este checkout.');
+        // 24 (F12): this process wrote the lock while running the previous job. That job
+        // is now cancelled and reviewed, so no executor of this process can still own it.
         const assertPidExited = () => {
+          if (owner.pid === process.pid) return;
           try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') return; throw error; }
           throw new Error('El proceso que reservó el checkout sigue activo.');
         };

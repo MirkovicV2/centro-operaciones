@@ -474,7 +474,8 @@ test('a reviewed checkout collision reopens the original zero-attempt job after 
   await alterAuto(root, current => { current.receipts[0].status = 'reviewed'; });
   const next = await confirmSubmission(root, 'receipt-next', code('next'));
   const file = path.join(workspace, '.git', 'centro-executor.lock');
-  const lock = { jobId: old.job.id, receiptId: old.receipt.id, pid: process.pid };
+  // Another live process (the parent) still owns the lock: it must not be displaced.
+  const lock = { jobId: old.job.id, receiptId: old.receipt.id, pid: process.ppid };
   await fs.writeFile(file, JSON.stringify(lock));
   const starts = [];
   const runner = createAutoRunner(root, { verify: async () => destination, worker: async (job, ctx) => {
@@ -493,6 +494,13 @@ test('a reviewed checkout collision reopens the original zero-attempt job after 
   };
   const command = async args => { assert.ok(args.includes(identity.dispatchId)); return shown; };
   await assert.rejects(retryCoordinatedCheckout(root, next.receipt.id, { confirm: true, command }), /sigue activo/);
+  // 24 (F12): a lock written by this very process for the closed job is stale by construction,
+  // but the previous worker still needs its exact native exit.
+  await fs.writeFile(file, JSON.stringify({ ...lock, pid: process.pid }));
+  await assert.rejects(retryCoordinatedCheckout(root, next.receipt.id, {
+    confirm: true, command: async () => ({ ...shown, observation: { status: 'unknown' } }),
+  }), /no acredita/);
+  await fs.access(file);
   // The legacy file omitted the attempt. A dead PID alone is insufficient.
   await fs.writeFile(file, JSON.stringify({ ...lock, pid: 2147483647 }));
   await assert.rejects(retryCoordinatedCheckout(root, next.receipt.id, {
