@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { confirmSubmission, createAutoRunner, readAutoRun, recoverKnownDispatchReceipt, setAutoRun } from '../auto-run.mjs';
-import { loadState, runQueue } from '../queue.mjs';
+import { loadState, runQueue, settledOrcaObservation } from '../queue.mjs';
 import { syncQualityHandoffs } from '../panel/quality-handoff.mjs';
 
 async function patchJob(root, change) {
@@ -236,4 +236,131 @@ test('rearmed preflight still requires new exact exit proof and unchanged destin
   }
   await assert.rejects(f.recover({ verify: async () => ({ ...(await f.verify()), remoteSha: 'c'.repeat(40) }) }), /diverge/);
   assert.equal((await loadState(f.root)).jobs[0].livenessResume.phase, 'consumed');
+});
+
+async function interruptDeveloper(f) {
+  await patchJob(f.root, job => {
+    job.error = { code: 'interrupted', message: 'Ejecución interrumpida: comprueba el dispatch guardado antes de reanudar.' };
+    Object.assign(job.workflow.steps.find(step => step.key === 'developer'), { status: 'blocked', dispatchStatus: 'active', error: 'interrupted' });
+  });
+}
+
+test('an interrupted developer resumes its exact exited dispatch in the same attempt only after an operator resume', async t => {
+  const f = await fixture(t);
+  await interruptDeveloper(f);
+  let automatic = 0;
+  await syncQualityHandoffs(f.root, { resume: async () => { automatic++; } });
+  assert.equal(automatic, 0);
+  assert.equal((await loadState(f.root)).jobs[0].state, 'needs_attention');
+  for (const observed of [
+    { ...f.dev, state: 'running', liveness: 'live' }, { ...f.dev, state: 'succeeded', liveness: 'unverifiable' },
+    { ...f.dev, state: 'succeeded', liveness: 'exited', dispatchId: 'ctx_foreign01' },
+  ]) await assert.rejects(f.recover({ inspectDispatch: async () => observed }), /Orca no acredita/);
+  await f.recover();
+  const queued = (await loadState(f.root)).jobs[0];
+  assert.equal(queued.state, 'queued');
+  assert.equal(queued.attempts, 2);
+  assert.equal(queued.livenessResume.mode, 'same_attempt_liveness');
+  assert.equal(queued.livenessResume.error, 'interrupted');
+  assert.equal(queued.livenessResume.dispatchId, f.dev.dispatchId);
+  await createAutoRunner(f.root, { verify: f.verify, worker: async job => {
+    assert.equal(job.attempts, 2);
+    assert.equal(job.livenessResume.phase, 'consumed');
+    assert.equal(job.workflow.steps.find(step => step.key === 'developer').dispatchId, f.dev.dispatchId);
+    return { text: 'Entrega recuperada.' };
+  } }).tick();
+  assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded');
+});
+
+test('only a blocked interrupted developer of the current attempt is a settled observation', async t => {
+  const f = await fixture(t);
+  await interruptDeveloper(f);
+  const job = (await loadState(f.root)).jobs[0];
+  assert.equal(settledOrcaObservation(job)?.dispatchId, f.dev.dispatchId);
+  const variant = change => { const copy = structuredClone(job); change(copy, copy.workflow.steps.find(step => step.key === 'developer')); return settledOrcaObservation(copy); };
+  assert.equal(variant(copy => { copy.workflow.currentStage = 'ux'; copy.workflow.steps[0].error = 'interrupted'; copy.workflow.steps[0].status = 'blocked'; }), null);
+  assert.equal(variant((_copy, step) => { step.attempt = 1; }), null);
+  assert.equal(variant((_copy, step) => { step.status = 'running'; }), null);
+  assert.equal(variant((_copy, step) => { step.error = 'orca_worker_failed'; }), null);
+  assert.equal(variant((_copy, step) => { step.artifact = { sha256: 'f'.repeat(64) }; }), null);
+  assert.equal(variant((_copy, step) => { delete step.dispatchId; }), null);
+});
+
+async function snapshotFiles(files) {
+  return Promise.all(files.map(async file => [file, await fs.readFile(file).catch(error => { if (error.code === 'ENOENT') return null; throw error; })]));
+}
+async function restoreFiles(snapshot) {
+  for (const [file, content] of snapshot) {
+    if (content === null) await fs.rm(file, { force: true });
+    else await fs.writeFile(file, content);
+  }
+}
+
+test('a developer interrupted while really running records its segment and resumes in the same attempt', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'liveness-interrupted-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspaces', 'fixture'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const destination = { workspace, checkout: 'workspaces/fixture', repository: 'fixture/repo', branch: 'feature', baseBranch: 'main', sha: 'a'.repeat(40), remoteSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), verified: true };
+  const ux = { runId: 'run_fixture01', taskId: 'task_fixture01', dispatchId: 'ctx_fixture01' };
+  const dev = { runId: ux.runId, taskId: 'task_develop01', dispatchId: 'ctx_develop01' };
+  const verify = async () => structuredClone(destination);
+  await setAutoRun(root, 'agency', true, { confirm: true });
+  const sent = await confirmSubmission(root, 'receipt-interrupted', { id: 'interrupted-job', business: 'agency', kind: 'code', provider: 'orca',
+    title: 'Interrumpir Desarrollo', prompt: 'Implementar y validar.', workspace, isolated: true, branch: 'feature', destination, maxAttempts: 2 });
+  const data = path.join(root, 'data');
+  let crash;
+  await createAutoRunner(root, { verify, worker: async (job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'running', ...ux, attempt: job.attempts });
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', summary: 'UX completed' });
+    await ctx.reportStage({ key: 'developer', status: 'running', dispatchStatus: 'active', ...dev, attempt: job.attempts, taskInputAttempt: 1 });
+    // The executor dies here: keep the files exactly as persisted while Development is active.
+    const names = (await fs.readdir(data)).filter(name => !name.endsWith('.lock'));
+    crash = await snapshotFiles([...names.map(name => path.join(data, name)), path.join(workspace, '.git', 'centro-executor.lock')]);
+    throw new Error('process killed');
+  } }).tick();
+  await restoreFiles(crash);
+  const running = (await loadState(root)).jobs[0];
+  assert.equal(running.state, 'running');
+  assert.equal(running.attemptHistory?.length ?? 0, 0);
+
+  let calls = 0;
+  await createAutoRunner(root, { verify, worker: async () => { calls++; } }).tick();
+  const interrupted = (await loadState(root)).jobs[0];
+  assert.equal(calls, 0);
+  assert.equal(interrupted.state, 'needs_attention');
+  assert.equal(interrupted.error.code, 'interrupted');
+  const segment = interrupted.attemptHistory.at(-1);
+  assert.equal(segment.attempt, 1);
+  assert.equal(segment.error, 'interrupted');
+  assert.ok(Number.isFinite(segment.elapsedMs) && segment.elapsedMs >= 0);
+  assert.equal(segment.startedAt, running.startedAt);
+
+  await recoverKnownDispatchReceipt(root, sent.job.id, { confirm: true, verify, inspectDispatch: async () => ({ ...dev, state: 'succeeded', liveness: 'exited' }) });
+  const queued = (await loadState(root)).jobs[0];
+  assert.equal(queued.state, 'queued');
+  assert.equal(queued.attempts, 1);
+  assert.equal(queued.livenessResume.error, 'interrupted');
+  assert.equal(queued.livenessResume.elapsedMs, segment.elapsedMs);
+  await createAutoRunner(root, { verify, worker: async job => {
+    assert.equal(job.attempts, 1);
+    assert.equal(job.workflow.steps.find(step => step.key === 'developer').dispatchId, dev.dispatchId);
+    return { text: 'Entrega recuperada.' };
+  } }).tick();
+  const done = (await loadState(root)).jobs[0];
+  assert.equal(done.state, 'succeeded');
+  assert.deepEqual(done.attemptHistory.map(item => item.attempt), [1, 1]);
+});
+
+test('an interrupted segment without a usable start time keeps the elapsed-time refusal', async t => {
+  const f = await fixture(t);
+  await patchJob(f.root, job => {
+    job.state = 'running'; job.startedAt = 'not-a-date';
+    job.attemptHistory = job.attemptHistory.filter(item => item.attempt !== job.attempts);
+    Object.assign(job.workflow.steps.find(step => step.key === 'developer'), { status: 'running', dispatchStatus: 'active', error: null });
+  });
+  await createAutoRunner(f.root, { verify: f.verify, worker: async () => assert.fail('No worker may start.') }).tick();
+  const job = (await loadState(f.root)).jobs[0];
+  assert.equal(job.state, 'needs_attention');
+  assert.equal(job.attemptHistory.filter(item => item.attempt === job.attempts).length, 0);
+  await assert.rejects(f.recover(), /tiempo consumido/);
 });

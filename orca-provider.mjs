@@ -607,7 +607,7 @@ export async function runOrca(job, ctx, {
       && recovery.jobId === job.id && recovery.receiptId === job.autoIntent?.receiptId && recovery.attempt === job.attempts
       && recovery.stage === 'developer' && job.workflow?.currentStage === 'developer'
       && recovery.observedState === 'succeeded' && recovery.liveness === 'exited'
-      && developer?.status === 'blocked' && developer.error === 'orca_liveness_unconfirmed'
+      && developer?.status === 'blocked' && developer.error === (recovery.error === 'interrupted' ? 'interrupted' : 'orca_liveness_unconfirmed')
       && developer.runId === recovery.runId && developer.taskId === recovery.taskId && developer.dispatchId === recovery.dispatchId
       && job.workflow.runId === recovery.runId && createHash('sha256').update(JSON.stringify(developer)).digest('hex') === recovery.checkpointHash;
     if (job.livenessResume?.mode === 'same_attempt_integration_reconcile') {

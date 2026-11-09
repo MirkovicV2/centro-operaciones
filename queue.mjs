@@ -1023,6 +1023,8 @@ export function settledOrcaObservation(job, code = job?.error?.code) {
   if (code === 'delivery_invalid' && ['qa', 'reviewer'].includes(step.key) && step.status === 'blocked' && step.error === code
     && step.dispatchSettled === true && step.dispatchStatus === 'completed' && step.artifact && !step.delivery) return step;
   if (step.artifact) return null;
+  // An executor interruption leaves the exact developer dispatch blocked; recovery observes that same dispatch.
+  if (code === 'interrupted' && step.key === 'developer' && step.status === 'blocked' && step.error === code) return step;
   if (code === 'orca_response_too_large' && step.dispatchStatus === 'awaiting_exit'
     && (step.status === 'running' && !step.error || step.status === 'blocked' && step.error === code)) return step;
   if (code === 'orca_dispatch_status_unknown' && step.status === 'blocked' && step.dispatchStatus === 'unknown'
@@ -1396,10 +1398,25 @@ export async function completeReviewedCodeJob(root, id, { confirm = false, evide
   });
 }
 
+// Records the interrupted segment so a same-attempt recovery can bound the time
+// it already consumed. elapsedMs runs until detection, so it includes the time the
+// executor was down: with an explicit timeoutMs a long outage can exhaust the
+// budget. Future improvement: end the segment at the job's last persisted event.
+function interruptedSegment(job, finishedAt) {
+  const resumed = job.livenessResume?.phase === 'consumed' && job.livenessResume.attempt === job.attempts;
+  const startedAt = resumed ? job.livenessResume.consumedAt : job.startedAt;
+  const elapsedMs = Date.parse(finishedAt) - Date.parse(startedAt);
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return [];
+  return [{ attempt: job.attempts, startedAt, finishedAt, elapsedMs, outcome: 'needs_attention', error: 'interrupted',
+    ...(resumed ? { recoveryId: job.livenessResume.id } : {}) }];
+}
+
 export async function recoverRunning(root, state, business) {
+  const finishedAt = stamp();
   const jobs = state.jobs.filter(j => j.state === 'running' && (!business || j.business === business)).map(j => ({
     ...j,
     state: 'needs_attention',
+    attemptHistory: [...(j.attemptHistory ?? []), ...interruptedSegment(j, finishedAt)],
     ...(j.workflow ? {
       workflow: {
         ...j.workflow,
@@ -1412,7 +1429,7 @@ export async function recoverRunning(root, state, business) {
     } : {}),
     orphanRisk: true,
     error: { code: 'interrupted', message: 'Ejecución interrumpida: comprueba el dispatch guardado antes de reanudar.' },
-    finishedAt: stamp(),
+    finishedAt,
   }));
   if (jobs.length) await commit(root, state, 'interrupted_jobs_recovered', { jobs });
 }

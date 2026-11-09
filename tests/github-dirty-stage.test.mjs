@@ -200,3 +200,33 @@ test('a recorded commit without its approved manifest blocks before integration 
   await assert.rejects(runOrca(f.job, f.ctx, f.dependencies), { code: 'github_manifest_missing' });
   assert.deepEqual(f.state.starts, []);
 });
+
+test('an interrupted developer obtains the dirty-checkout exemption only through its exact same-attempt marker', async t => {
+  const f = await fixture(t, { completed: ['ux', 'developer'] });
+  const step = f.job.workflow.steps[1];
+  Object.assign(step, { status: 'blocked', error: 'interrupted', dispatchStatus: 'active', runId: 'run_abcdef', attempt: 1 });
+  f.job.workflow.currentStage = 'developer';
+  const marker = { mode: 'same_attempt_liveness', phase: 'consumed', error: 'interrupted', jobId: f.job.id, receiptId: f.job.autoIntent.receiptId, attempt: 1,
+    stage: 'developer', runId: step.runId, taskId: step.taskId, dispatchId: step.dispatchId, observedState: 'succeeded', liveness: 'exited',
+    checkpointHash: createHash('sha256').update(JSON.stringify(step)).digest('hex') };
+  f.job.livenessResume = marker;
+  const original = f.dependencies.command; let developerRead = false;
+  f.dependencies.command = async args => {
+    if (args[1] === 'worker-start' && f.ctx.updates.at(-1)?.key === 'developer') assert.fail('No new developer worker may start.');
+    if (args[1] === 'worker-show' && args[3] === step.dispatchId) { developerRead = true; return { state: 'succeeded', liveness: 'exited', runId: step.runId, taskId: step.taskId, dispatchId: step.dispatchId }; }
+    if (args[1] === 'inbox' && developerRead) { developerRead = false; return { messages: [{ type: 'worker_done', body: 'Developer completed.\nRESULTADO: APROBADO', payload: { dispatchId: step.dispatchId } }] }; }
+    return original(args);
+  };
+  await runOrca(f.job, f.ctx, f.dependencies);
+  assert.deepEqual(f.state.starts, ['qa', 'reviewer']);
+  assert.ok(f.state.checks.every(check => !check.requireClean && check.dirty));
+  for (const patch of [{ error: 'orca_liveness_unconfirmed' }, { error: undefined }, { phase: 'ready' }, { dispatchId: 'ctx_foreign01' },
+    { observedState: 'failed' }, { checkpointHash: 'changed' }]) {
+    f.job.livenessResume = { ...marker, ...patch };
+    await assert.rejects(runOrca(f.job, f.ctx, f.dependencies), /no estaba limpio/);
+  }
+  // An interruption marker cannot exempt a developer blocked for another reason.
+  step.error = 'orca_liveness_unconfirmed';
+  f.job.livenessResume = { ...marker, checkpointHash: createHash('sha256').update(JSON.stringify(step)).digest('hex') };
+  await assert.rejects(runOrca(f.job, f.ctx, f.dependencies), /no estaba limpio/);
+});
