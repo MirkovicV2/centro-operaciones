@@ -28,7 +28,7 @@ try {
     if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false } });
     if (url.pathname === '/api/config') return route.fulfill({ json: data.settings });
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-    if (!['index.html', 'app.js', 'ideas-view.js', 'style.css'].includes(name)) {
+    if (!['index.html', 'app.js', 'ideas-view.js', 'requests-view.js', 'style.css'].includes(name)) {
       unexpected.push(request.url()); return route.abort();
     }
     return route.fulfill({ body: await fs.readFile(new URL(`../dashboard/${name}`, import.meta.url)), contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });

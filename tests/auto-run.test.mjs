@@ -6,8 +6,9 @@ import path from 'node:path';
 import { confirmSubmission, createAutoRunner, readAutoRun, retryAutoReceipt, setAutoRun, reviewAutoReceipt } from '../auto-run.mjs';
 import { addJob, loadState, acquireLock, releaseLock, runQueue } from '../queue.mjs';
 import { verifyGitHubDestination, githubRepository } from '../project-destination.mjs';
-import { createProject, createIdea, loadDashboardState, mutateIdea } from '../workspaces/agency-assistant/agency-assistant/dashboard-state.mjs';
-import { sendIdeaToQueue, reconcileIdeaRequests } from '../workspaces/agency-assistant/agency-assistant/idea-workflow.mjs';
+import { createProject, createIdea, loadDashboardState, mutateIdea } from '../panel/agency-assistant/dashboard-state.mjs';
+import { sendIdeaToQueue, reconcileIdeaRequests } from '../panel/agency-assistant/idea-workflow.mjs';
+import { retryCoordinatedCheckout } from '../panel/dispatch-recovery.mjs';
 
 const spec = (id, business = 'agency', extra = {}) => ({ id, business, kind: 'analysis', title: id, prompt: 'Objetivo: analizar. Criterio: plan verificable sin editar código.', provider: 'orca', ...extra });
 async function fixture(t) {
@@ -33,6 +34,98 @@ test('false defaults and legacy migration; reads never persist or activate setti
   await enable(root);
   assert.deepEqual((await readAutoRun(root)).businesses, { agency: true, games: false });
   assert.equal((await readAutoRun(root)).history.at(-1).type, 'setting_changed');
+});
+
+test('panel executors overlap by company while preserving same-company order and shared history', async t => {
+  const root = await fixture(t);
+  for (const company of ['games', 'agency']) await enable(root, company);
+  for (const [id, company] of [['game-first', 'games'], ['game-next', 'games'], ['agency-first', 'agency']]) {
+    await confirmSubmission(root, 'receipt-' + id, spec(id, company));
+  }
+  let finishGames, startedGames;
+  const waiting = new Promise(resolve => { finishGames = resolve; });
+  const gamesStarted = new Promise(resolve => { startedGames = resolve; });
+  const seen = [];
+  const runner = createAutoRunner(root, { parallelBusinesses: true, worker: async (job, ctx) => {
+    seen.push(job.id);
+    await ctx.reportStage({ key: 'planner', status: 'running' });
+    if (job.id === 'game-first') { startedGames(); await waiting; }
+    if (job.id === 'agency-first') await gamesStarted;
+    await ctx.reportStage({ key: 'planner', status: 'succeeded' });
+    return worker();
+  } });
+  const active = runner.tick();
+  try {
+    const deadline = Date.now() + 5000;
+    let jobs;
+    do {
+      jobs = (await loadState(root)).jobs;
+      if (jobs[2].state === 'succeeded') break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    assert.deepEqual(jobs.map(job => job.state), ['running', 'queued', 'succeeded']);
+    await assert.rejects(runQueue(root, { execute: true, worker }), { code: 'locked' });
+    assert.equal((await loadState(root)).jobs[0].state, 'running');
+  } finally {
+    finishGames();
+    await active;
+  }
+  await runner.tick();
+  assert.deepEqual((await loadState(root)).jobs.map(job => job.state), ['succeeded', 'succeeded', 'succeeded']);
+  assert.equal(seen.length, 3);
+});
+
+test('attention in one company leaves the other company eligible', async t => {
+  const root = await fixture(t);
+  await enable(root, 'games'); await enable(root, 'agency');
+  await confirmSubmission(root, 'receipt-game-fail', spec('game-fail', 'games'));
+  const seen = [];
+  const runner = createAutoRunner(root, { parallelBusinesses: true, worker: async job => {
+    seen.push(job.id);
+    if (job.business === 'games') throw new Error('Needs review');
+    return worker();
+  } });
+  await runner.tick();
+  await confirmSubmission(root, 'receipt-game-wait', spec('game-wait', 'games'));
+  await confirmSubmission(root, 'receipt-agency-go', spec('agency-go'));
+  await runner.tick();
+  assert.deepEqual(seen, ['game-fail', 'agency-go']);
+  assert.deepEqual((await loadState(root)).jobs.map(job => job.state), ['needs_attention', 'queued', 'succeeded']);
+});
+
+test('parallel companies cannot both use the same checkout', async t => {
+  const root = await fixture(t);
+  await enable(root, 'games'); await enable(root, 'agency');
+  const workspace = path.join(root, 'workspaces', 'shared');
+  await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const destination = { checkout: 'workspaces/shared', workspace, branch: 'feature', repository: 'owner/repo', baseBranch: 'main',
+    sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), verified: true };
+  for (const company of ['agency', 'games']) {
+    await confirmSubmission(root, 'receipt-shared-' + company, spec('shared-' + company, company,
+      { kind: 'code', workspace, isolated: true, branch: 'feature', destination }));
+  }
+  let release, starts = 0;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const runner = createAutoRunner(root, { parallelBusinesses: true, verify: async () => destination, worker: async () => {
+    starts++;
+    await waiting;
+    return worker();
+  } });
+  const active = runner.tick();
+  try {
+    const deadline = Date.now() + 5000;
+    let receipts;
+    do {
+      receipts = (await readAutoRun(root)).receipts;
+      if (receipts.some(receipt => receipt.blockCode === 'checkout_locked')) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    assert.deepEqual(receipts.map(receipt => receipt.status).sort(), ['blocked', 'claimed']);
+    assert.equal(starts, 1);
+  } finally {
+    release();
+    await active;
+  }
 });
 
 test('activation never drains historical jobs or manual receipts; exact automatic ID and sequential phases', async t => {
@@ -86,8 +179,10 @@ test('confirmed backend enqueue wakes the background executor and returns while 
   runner.stop(); release();
   // tick is still busy: observe completion without keeping the test fixture
   // alive past the active executor, using its durable receipt as the boundary.
-  for (let i = 0; i < 100 && (await readAutoRun(root)).receipts[0].status !== 'completed'; i++) await new Promise(resolve => setTimeout(resolve, 10));
-  assert.equal((await readAutoRun(root)).receipts[0].status, 'completed');
+  const receiptDeadline = Date.now() + 5000;
+  while (Date.now() < receiptDeadline && (await readAutoRun(root)).receipts[0].status === 'claimed') await new Promise(resolve => setTimeout(resolve, 10));
+  const completedReceipt = (await readAutoRun(root)).receipts[0];
+  assert.equal(completedReceipt.status, 'completed', JSON.stringify({ receipt: completedReceipt, job: (await loadState(root)).jobs[0] }));
 });
 
 test('restart recovers a running job with a confirmed dispatch as needs_attention without a second worker', async t => {
@@ -203,9 +298,14 @@ test('ideas backend captures auto intent and immutable brief; edit/archive/resto
   await runner.tick();
   const archived = await mutateIdea(root, idea.id, 'archive', { version: 1 });
   await mutateIdea(root, idea.id, 'restore', { version: archived.version });
-  await sendIdeaToQueue(root, idea.id, 'analysis'); await runner.tick();
+  await runner.tick();
   assert.deepEqual(starts, [result.job.id]);
-  assert.equal((await loadDashboardState(root)).ideas[0].requests.analysis.snapshot, result.job.prompt);
+  const revised = await sendIdeaToQueue(root, idea.id, 'analysis');
+  await sendIdeaToQueue(root, idea.id, 'analysis'); await runner.tick();
+  assert.notEqual(revised.job.id, result.job.id);
+  assert.deepEqual(starts, [result.job.id, revised.job.id]);
+  assert.equal((await loadDashboardState(root)).ideas[0].requests.analysis.snapshot, revised.job.prompt);
+  assert.equal((await loadState(root)).jobs.find(job => job.id === result.job.id).prompt, result.job.prompt);
 });
 
 test('legacy inbox pending intent is never promoted on activation', async t => {
@@ -355,4 +455,56 @@ for (const kind of ['invalid', 'checkout-lock']) test(`destination ${kind} block
   await runner.tick(); await runner.tick(); assert.equal(starts, 0);
   assert.equal((await loadState(root)).jobs[0].attempts, 0);
   assert.equal((await readAutoRun(root)).receipts[0].status, 'blocked');
+});
+
+test('a reviewed checkout collision reopens the original zero-attempt job after exact native exit', async t => {
+  const root = await fs.realpath(await fixture(t)); await enable(root, 'games');
+  const workspace = path.join(root, 'workspaces', 'checkout');
+  await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const destination = { checkout: 'workspaces/checkout', workspace, branch: 'develop', baseBranch: 'main', repository: 'owner/repo' };
+  const code = id => spec(id, 'games', { kind: 'code', workspace, isolated: true, branch: 'develop', destination });
+  const old = await confirmSubmission(root, 'receipt-previous', code('previous'));
+  const state = await loadState(root);
+  const identity = { runId: 'run_prior', taskId: 'task_prior', dispatchId: 'ctx_prior' };
+  const previous = { ...old.job, attempts: 1, state: 'cancelled', reviewedAt: new Date().toISOString(),
+    workflow: { ...old.job.workflow, steps: old.job.workflow.steps.map(step => step.key === 'ux' ? { ...step, ...identity, status: 'blocked' } : step) } };
+  await fs.appendFile(path.join(root, 'data', 'events.jsonl'), JSON.stringify({
+    schema: 1, revision: state.revision + 1, at: new Date().toISOString(), type: 'operator_closed', patch: { jobs: [previous] },
+  }) + '\n');
+  await alterAuto(root, current => { current.receipts[0].status = 'reviewed'; });
+  const next = await confirmSubmission(root, 'receipt-next', code('next'));
+  const file = path.join(workspace, '.git', 'centro-executor.lock');
+  const lock = { jobId: old.job.id, receiptId: old.receipt.id, pid: process.pid };
+  await fs.writeFile(file, JSON.stringify(lock));
+  const starts = [];
+  const runner = createAutoRunner(root, { verify: async () => destination, worker: async (job, ctx) => {
+    starts.push(job.id);
+    for (const step of job.workflow.steps) await ctx.reportStage({ key: step.key, status: 'succeeded' });
+    return worker();
+  } });
+  await runner.tick();
+  assert.equal((await readAutoRun(root)).receipts.at(-1).blockCode, 'checkout_locked');
+  const shown = {
+    dispatch: { id: identity.dispatchId, runId: identity.runId, taskId: identity.taskId },
+    worker: { state: 'failed', agentTerminalHandle: 'term_prior' },
+    observation: { status: 'exited', exactWorker: true },
+    terminal: { handle: 'term_prior', connected: false, writable: false, worktreePath: workspace },
+    terminalResource: { ownershipState: 'released', ownerDispatchId: identity.dispatchId },
+  };
+  const command = async args => { assert.ok(args.includes(identity.dispatchId)); return shown; };
+  await assert.rejects(retryCoordinatedCheckout(root, next.receipt.id, { confirm: true, command }), /sigue activo/);
+  // The legacy file omitted the attempt. A dead PID alone is insufficient.
+  await fs.writeFile(file, JSON.stringify({ ...lock, pid: 2147483647 }));
+  await assert.rejects(retryCoordinatedCheckout(root, next.receipt.id, {
+    confirm: true, command: async () => ({ ...shown, observation: { status: 'unknown' } }),
+  }), /no acredita/);
+  await fs.access(file);
+  assert.equal((await loadState(root)).jobs.at(-1).attempts, 0);
+  assert.equal((await retryCoordinatedCheckout(root, next.receipt.id, { confirm: true, command })).status, 'pending');
+  await assert.rejects(fs.access(file), { code: 'ENOENT' });
+  await runner.tick(); await runner.tick();
+  assert.deepEqual(starts, [next.job.id]);
+  assert.deepEqual((await loadState(root)).jobs.map(job => [job.id, job.state, job.attempts]), [
+    [old.job.id, 'cancelled', 1], [next.job.id, 'succeeded', 1],
+  ]);
 });

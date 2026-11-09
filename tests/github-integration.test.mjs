@@ -35,12 +35,16 @@ async function fixture({ source = 'main', ghUser = 'owner', dirty = ' M src/app.
   const gh = async args => {
     state.commands.push(['gh', ...args]);
     if (args[0] === 'api') return ghUser;
-    if (args[0] === 'pr' && args[1] === 'list') return JSON.stringify(state.pr ? [state.pr] : []);
+    const prIdentity = { isCrossRepository: false, headRepository: { name: 'repo' }, headRepositoryOwner: { login: owner }, headRefName: source, baseRefName: 'main', state: 'OPEN' };
+    if (args[0] === 'pr' && args[1] === 'list') {
+      assert.equal(args[args.indexOf('--head') + 1], source, 'gh pr list accepts a branch, not owner:branch');
+      return JSON.stringify(state.pr ? [{ ...prIdentity, ...state.pr }] : []);
+    }
     if (args[0] === 'pr' && args[1] === 'create') { state.createCount++; state.pr = { number: 4, url: 'https://github.com/owner/repo/pull/4', headRefOid: state.head, baseRefOid: base }; if (state.createAmbiguous) throw Error('response lost'); return ''; }
     if (args[0] === 'pr' && args[1] === 'view') {
-      if (state.merged) return JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-08T12:00:00Z', mergeCommit: { oid: merge } });
+      if (state.merged) return JSON.stringify({ ...prIdentity, ...state.pr, number: state.pr?.number, headRefOid: state.head, state: 'MERGED', mergedAt: '2026-11-08T12:00:00Z', mergeCommit: { oid: merge } });
       state.viewCount++;
-      return JSON.stringify({ state: 'OPEN', mergeable: state.mergeable, statusCheckRollup: state.checks, headRefOid: state.head, baseRefOid: base });
+      return JSON.stringify({ ...prIdentity, ...state.pr, number: state.pr?.number, state: 'OPEN', mergeable: state.mergeable, statusCheckRollup: state.checks, headRefOid: state.head, baseRefOid: base });
     }
     if (args[0] === 'pr' && args[1] === 'merge') { state.mergeCount++; state.merged = true; return ''; }
     throw Error(`unexpected gh ${args.join(' ')}`);
@@ -70,6 +74,42 @@ test('existing PR is reused and merged only after checks pass', async t => {
   assert.equal(result.phase, 'complete'); assert.equal(f.state.createCount, 0); assert.equal(f.state.mergeCount, 1); assert.equal(result.mergeSha, merge);
 });
 
+test('branch-only PR listing selects the original repository rather than a foreign fork of the same branch', async t => {
+  const f = await fixture({ source: 'develop', remoteSource: base, pr: { number: 8, url: 'https://github.com/owner/repo/pull/8', headRefOid: head, baseRefOid: base } });
+  t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  const gh = async args => {
+    const value = await f.gh(args);
+    if (args[0] !== 'pr' || args[1] !== 'list') return value;
+    assert.equal(args[args.indexOf('--limit') + 1], '100');
+    const own = JSON.parse(value)[0];
+    return JSON.stringify([{ ...own, number: 99, url: 'https://github.com/owner/repo/pull/99', isCrossRepository: true, headRepositoryOwner: { login: 'foreign' } }, own]);
+  };
+  const result = await integrateGitHub(f.job, f.ctx, { git: f.git, gh });
+  assert.equal(result.prNumber, 8);
+  assert.equal(f.state.createCount, 0);
+});
+
+test('a foreign fork cannot satisfy an ambiguous create receipt or trigger a duplicate creation', async t => {
+  const f = await fixture({ source: 'develop', dirty: '', pr: { number: 99, url: 'https://github.com/owner/repo/pull/99', headRefOid: head, baseRefOid: base,
+    isCrossRepository: true, headRepositoryOwner: { login: 'foreign' } } });
+  t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  const previous = { jobId: f.job.id, receiptId: f.job.autoIntent.receiptId, repository: 'owner/repo', sourceBranch: 'develop', baseBranch: 'main',
+    phase: 'pr_intent', status: 'needs_attention', commitSha: head, manifest: f.job.integrationSnapshot };
+  await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, previous }), /Creación de PR ambigua/);
+  assert.equal(f.state.createCount, 0); assert.equal(f.state.pushCount, 0); assert.equal(f.state.mergeCount, 0);
+});
+
+test('a potentially truncated PR listing fails closed before mutations', async t => {
+  const f = await fixture({ source: 'develop', remoteSource: base, pr: { number: 8, url: 'https://github.com/owner/repo/pull/8', headRefOid: head, baseRefOid: base } });
+  t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  const gh = async args => {
+    const value = await f.gh(args);
+    return args[0] === 'pr' && args[1] === 'list' ? JSON.stringify(Array(100).fill(JSON.parse(value)[0])) : value;
+  };
+  await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh }), /no acreditó/);
+  assert.ok(!f.state.commands.some(call => call[0] === 'git' && ['add', 'commit', 'push'].includes(call[1])));
+});
+
 test('ambiguous direct push reconciles remote before retry and never duplicates push', async t => {
   const f = await fixture(); t.after(() => fs.rm(f.root, { recursive: true, force: true }));
   f.state.pushAmbiguous = true;
@@ -87,9 +127,13 @@ test('ambiguous PR creation reuses the remotely observed PR without repeating cr
   let previous;
   try { await integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, persist: async value => { previous = value; } }); } catch {}
   assert.equal(previous.phase, 'pr_intent'); assert.equal(f.state.createCount, 1); assert.equal(f.state.pushCount, 1);
+  previous = { ...previous, status: 'needs_attention', needsAttention: true, error: 'PR no confirmada tras crearla; necesita revisión.' };
+  const original = previous;
   f.state.createAmbiguous = false;
   const result = await integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, previous, persist: async value => { previous = value; } });
   assert.equal(result.phase, 'complete'); assert.equal(f.state.createCount, 1); assert.equal(f.state.pushCount, 1);
+  assert.equal(result.error, null); assert.equal(previous.error, null); assert.equal(result.needsAttention, false);
+  assert.match(original.error, /PR no confirmada/);
 });
 
 test('conflicting or failing required PR checks stop before merge', async t => {
@@ -109,10 +153,13 @@ test('empty, unknown, pending, cancelled and mixed check rollups preserve the PR
     f.job.destination.remoteSha = base;
     t.after(() => fs.rm(f.root, { recursive: true, force: true }));
     const records = [];
-    await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, persist: async record => records.push(record) }), /PR pendiente/);
+    await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, checksTimeoutMs: 0, persist: async record => records.push(record) }), /PR pendiente/);
     assert.equal(f.state.createCount, 0); assert.equal(f.state.mergeCount, 0);
     assert.equal(records.at(-1).phase, 'checks_pending');
     assert.equal(records.at(-1).status, 'checks_pending');
+    if (Array.isArray(checks) && checks.some(check => check.conclusion && !['SUCCESS', 'PENDING'].includes(check.conclusion))) {
+      assert.equal(records.at(-1).error, 'Un check terminó sin aprobación.');
+    }
     assert.ok(records.at(-1).prNumber === 8);
   }
 });
@@ -127,8 +174,92 @@ test('a check that becomes pending before merge is rechecked and stops the mutat
     return f.gh(args);
   };
   const records = [];
-  await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh, persist: async record => records.push(record) }), /PR pendiente/);
+  await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh, checksTimeoutMs: 0, persist: async record => records.push(record) }), /PR pendiente/);
   assert.equal(f.state.mergeCount, 0); assert.equal(records.at(-1).phase, 'checks_pending');
+});
+
+test('empty and running CI checks are awaited on the same PR and merge once after success', async t => {
+  const f = await fixture({ source: 'develop', checks: [] }); t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  let elapsed = 0, waits = 0;
+  const records = [];
+  const result = await integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, clock: () => elapsed,
+    checksTimeoutMs: 100, checksIntervalMs: 10, wait: async ms => {
+      elapsed += ms; waits++;
+      f.state.checks = waits === 1 ? [{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }] : [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+    }, persist: async record => records.push(record) });
+  assert.equal(result.phase, 'complete'); assert.equal(waits, 2);
+  assert.equal(f.state.pushCount, 1); assert.equal(f.state.createCount, 1); assert.equal(f.state.mergeCount, 1);
+  assert.equal(records.filter(record => record.phase === 'checks_pending').length, 2);
+});
+
+test('the default wait allows checks to pass after the old five-minute limit', async t => {
+  const f = await fixture({ source: 'develop', checks: [] }); t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  let elapsed = 0;
+  const result = await integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, clock: () => elapsed, wait: async ms => {
+    elapsed += ms;
+    if (elapsed > 300_000) f.state.checks = [{ name: 'Android', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+  } });
+  assert.ok(elapsed > 300_000);
+  assert.equal(result.checkState, 'passed');
+  assert.equal(f.state.mergeCount, 1);
+  assert.equal(f.state.createCount, 1);
+});
+
+test('bounded CI wait and cancellation preserve the PR without attempting merge', async t => {
+  for (const cancel of [false, true]) {
+    const f = await fixture({ source: 'develop', checks: [] }); t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+    const controller = new AbortController(); let elapsed = 0, latest;
+    await assert.rejects(integrateGitHub(f.job, { ...f.ctx, signal: controller.signal }, { git: f.git, gh: f.gh, clock: () => elapsed,
+      checksTimeoutMs: 20, checksIntervalMs: 10, wait: async (ms, signal) => {
+        elapsed += ms;
+        if (cancel) { controller.abort(new Error('fixture cancellation')); signal.throwIfAborted(); }
+      }, persist: async record => { latest = record; } }), cancel ? /fixture cancellation/ : /espera acotada/);
+    assert.equal(latest.phase, 'checks_pending'); assert.equal(f.state.mergeCount, 0);
+    assert.equal(f.state.createCount, 1); assert.equal(f.state.pushCount, 1);
+    if (!cancel) { assert.equal(elapsed, 20); assert.equal(latest.waitTimedOut, true); }
+  }
+});
+
+test('terminal CI failure or changed PR head/base stops immediately instead of waiting', async t => {
+  for (const mismatch of ['failure', 'headRefOid', 'baseRefOid']) {
+    const f = await fixture({ source: 'develop', checks: [{ conclusion: mismatch === 'failure' ? 'FAILURE' : 'SUCCESS' }] });
+    t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+    const gh = async args => {
+      const value = await f.gh(args);
+      return args[0] === 'pr' && args[1] === 'view' && mismatch !== 'failure' ? JSON.stringify({ ...JSON.parse(value), [mismatch]: 'f'.repeat(40) }) : value;
+    };
+    await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh, wait: async () => assert.fail('terminal mismatch cannot be awaited') }), /PR pendiente de revisión/);
+    assert.equal(f.state.mergeCount, 0);
+  }
+});
+
+test('an unresolved merge intent remains durable across repeated recovery and is never merged again', async t => {
+  const f = await fixture({ source: 'develop', checks: [] }); t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  let previous;
+  await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, checksTimeoutMs: 0, persist: async record => { previous = record; } }), /checks/);
+  previous = { ...previous, phase: 'merge_intent', status: 'needs_attention' };
+  f.state.checks = [{ conclusion: 'SUCCESS' }];
+  const mutations = f.state.commands.filter(call => ['push', 'commit', 'create', 'merge'].includes(call[1]) || call[1] === 'pr' && ['create', 'merge'].includes(call[2])).length;
+  for (let repeat = 0; repeat < 2; repeat++) await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, previous,
+    persist: async () => assert.fail('unresolved intent must not be overwritten') }), /Merge previo ambiguo/);
+  assert.equal(previous.phase, 'merge_intent'); assert.equal(f.state.mergeCount, 0);
+  assert.equal(f.state.commands.filter(call => ['push', 'commit', 'create', 'merge'].includes(call[1]) || call[1] === 'pr' && ['create', 'merge'].includes(call[2])).length, mutations);
+  f.state.merged = true;
+  const reconciled = await integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, previous });
+  assert.equal(reconciled.phase, 'complete'); assert.equal(reconciled.reconciled, true); assert.equal(f.state.mergeCount, 0);
+});
+
+test('recovery cannot replace the approved manifest or overwrite an unobserved PR creation intent', async t => {
+  const f = await fixture({ source: 'develop', createAmbiguous: true }); t.after(() => fs.rm(f.root, { recursive: true, force: true }));
+  let previous;
+  await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, persist: async record => { previous = record; } }), /response lost/);
+  const originalManifest = previous.manifest;
+  await assert.rejects(integrateGitHub({ ...f.job, integrationSnapshot: 'e'.repeat(64) }, f.ctx, { git: f.git, gh: f.gh, previous }), /manifest original/);
+  f.state.pr = null;
+  await assert.rejects(integrateGitHub(f.job, f.ctx, { git: f.git, gh: f.gh, previous,
+    persist: async () => assert.fail('ambiguous intent cannot be overwritten') }), /Creación de PR ambigua/);
+  assert.equal(previous.phase, 'pr_intent'); assert.equal(previous.manifest, originalManifest);
+  assert.equal(f.state.pushCount, 1); assert.equal(f.state.createCount, 1); assert.equal(f.state.mergeCount, 0);
 });
 
 test('noneligible, dirty baseline, auth mismatch, owner mismatch and divergence block without writes', async t => {

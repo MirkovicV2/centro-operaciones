@@ -40,7 +40,12 @@ test('editing versions keeps capture, business, jobs and snapshot destinations i
   assert.equal(updated.projectId, other.id); assert.equal(updated.versions[0].snapshot.text, idea.text);
   await assert.rejects(mutateIdea(root, idea.id, 'update', edit(idea)), /otra ventana/);
   assert.deepEqual((await loadState(root)).jobs, previous);
-  assert.equal((await sendIdeaToQueue(root, idea.id, 'analysis')).job.id, result.job.id);
+  const revised = await sendIdeaToQueue(root, idea.id, 'analysis');
+  assert.notEqual(revised.job.id, result.job.id);
+  assert.equal(revised.job.ideaVersion, 2);
+  assert.equal(revised.job.projectId, other.id);
+  assert.equal((await loadState(root)).jobs[0].prompt, result.job.prompt);
+  assert.equal((await sendIdeaToQueue(root, idea.id, 'analysis')).job.id, revised.job.id);
   assert.equal((await createIdea(root, 'agency', idea.text, idea.projectId, 'capture-fixture', { focus: 'ux', tags: idea.tags })).id, idea.id);
 });
 
@@ -89,7 +94,7 @@ test('retirement wins race without orphan or enqueue; uncertain requests block m
   assert.equal((await loadState(root)).jobs.length, 0);
   await mutateIdea(root, idea.id, 'restore', { version: 2 });
   await changeDashboardState(root, state => { state.ideas[0].requests = { code: { status: 'uncertain' } }; });
-  await assert.rejects(mutateIdea(root, idea.id, 'update', { ...edit(idea), version: 3 }), /incierto/);
+  await assert.rejects(mutateIdea(root, idea.id, 'update', { ...edit(idea), version: 3 }), /inciert[oa]/);
 });
 
 test('brief carries all context, checks full UTF8 bytes and preserves oversized capture', async t => {

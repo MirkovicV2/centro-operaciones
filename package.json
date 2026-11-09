@@ -3,6 +3,6 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "test": "node --test tests/queue.test.mjs" },
+  "scripts": { "test": "node tests/run-tests.mjs", "test:queue": "node --test tests/queue.test.mjs", "metrics": "node metrics.mjs" },
   "engines": { "node": ">=20" }
 }

@@ -15,6 +15,17 @@ function denied(code, message) {
   return { allowed: false, code, message };
 }
 
+function canonicalBranchRef(value) {
+  if (!isKnown(value) || value !== value.trim()) return null;
+  const name = value.startsWith('refs/heads/') ? value.slice(11) : value;
+  // Only local branches qualify; never reinterpret another namespace as a branch.
+  if (!isKnown(name) || name.startsWith('refs/') || name.startsWith('/') || name.endsWith('/') ||
+      name.endsWith('.') || name.includes('..') || name.includes('@{') || name === '@' ||
+      /[\s~^:?*\[\\\x00-\x1f\x7f]/.test(name) ||
+      name.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))) return null;
+  return `refs/heads/${name}`;
+}
+
 // Pure decision function: it only validates the confirmed values and the local observations it receives.
 export function evaluateGamesCheckoutGuard(confirmedPath, confirmedBranch, observations = {}) {
   if (typeof confirmedPath !== 'string' || confirmedPath.trim() === '') {
@@ -23,7 +34,7 @@ export function evaluateGamesCheckoutGuard(confirmedPath, confirmedBranch, obser
   if (!path.isAbsolute(confirmedPath) || path.normalize(confirmedPath) !== confirmedPath) {
     return denied('confirmed-path-invalid', 'La ruta confirmada debe ser absoluta y estar normalizada; detenerse antes de inspeccionar el checkout.');
   }
-  if (!isKnown(confirmedBranch)) {
+  if (!canonicalBranchRef(confirmedBranch)) {
     return denied('confirmed-branch-unknown', 'La rama confirmada está vacía o no es verificable; detenerse antes de inspeccionar el checkout.');
   }
   if (observations.realPathError || typeof observations.realPath !== 'string' || observations.realPath.trim() === '') {
@@ -37,10 +48,10 @@ export function evaluateGamesCheckoutGuard(confirmedPath, confirmedBranch, obser
   if (observedPath !== confirmedPath) {
     return denied('path-mismatch', `La ruta real (${observedPath}) no coincide exactamente con la ruta confirmada (${confirmedPath}).`);
   }
-  if (observations.branchError || !isKnown(observations.branchRef)) {
+  if (observations.branchError || !canonicalBranchRef(observations.branchRef)) {
     return denied('current-branch-unknown', 'No se pudo verificar la branch ref activa; detenerse antes de inspeccionar el checkout.');
   }
-  if (observations.branchRef !== confirmedBranch) {
+  if (canonicalBranchRef(observations.branchRef) !== canonicalBranchRef(confirmedBranch)) {
     return denied('branch-mismatch', `La branch ref activa (${observations.branchRef}) no coincide exactamente con la confirmada (${confirmedBranch}).`);
   }
   return { allowed: true, code: 'match', message: 'Ruta canónica y branch ref coinciden exactamente.' };
@@ -51,7 +62,7 @@ async function readBranchRef(checkoutPath) {
   for (const key of Object.keys(env)) {
     if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES)$/i.test(key)) delete env[key];
   }
-  const { stdout } = await execFile('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+  const { stdout } = await execFile('git', ['symbolic-ref', '--quiet', 'HEAD'], {
     cwd: checkoutPath,
     encoding: 'utf8',
     windowsHide: true,

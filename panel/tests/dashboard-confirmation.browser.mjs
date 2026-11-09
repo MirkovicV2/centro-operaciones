@@ -12,6 +12,7 @@ import { addJob, loadState, summarize } from '../queue.mjs';
 import { createProject, updateProject, loadDashboardState, recordJobConfirmation } from '../agency-assistant/dashboard-state.mjs';
 import { inspectDestination } from '../../project-destination.mjs';
 import { confirmSubmission } from '../../auto-run.mjs';
+import { submitTaskToCoordinator, routeTaskFromCoordinator } from '../agency-assistant/coordinator-inbox.mjs';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : '../../workspaces/portfolio-motion/node_modules/playwright/index.mjs');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'confirmed-job-'));
 let browser;
@@ -31,6 +32,8 @@ try {
   assert.ok(start >= 0 && end > start);
   const localCheck = source.slice(source.indexOf('function assertLocalRequest('), source.indexOf('\nasync function readJson('));
   const context = vm.createContext({ QUEUE_ROOT: root, PORT: 43892, URL, loadDashboardState, inspectDestination, addJob, confirmSubmission, recordJobConfirmation,
+    submitTaskToCoordinator: (queueRoot, body) => submitTaskToCoordinator(queueRoot, body, { notify: async () => ({ status: 'sent', runId: 'run_fixture01', messageId: 'msg_fixture01' }) }),
+    routeTaskFromCoordinator,
     readJson: async request => request.body,
     send: (response, status, value) => Object.assign(response, { status, value }),
   });
@@ -58,7 +61,7 @@ try {
     if (url.pathname === '/api/config') return route.fulfill({ json: { autoRun: false, vaultPath: '' } });
     if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false } });
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-    assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js'].includes(name));
+    assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js', 'requests-view.js'].includes(name));
     return route.fulfill({ body: await fs.readFile(new URL(`../dashboard/${name}`, import.meta.url)),
       contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });
     } catch (error) {
@@ -90,18 +93,30 @@ try {
   assert.equal(payload.successCriteria, 'Criterio corregido confirmado');
   assert.equal(payload.prompt, payload.confirmation.objective);
   assert.equal(payload.successCriteria, payload.confirmation.successCriteria);
-  const persisted = await loadState(root);
-  assert.equal(persisted.jobs.length, 1);
-  const [job] = persisted.jobs;
-  assert.equal(job.prompt, 'Objetivo corregido confirmado\n\nCriterio de éxito:\nCriterio corregido confirmado');
+  assert.equal((await loadState(root)).jobs.length, 0, 'panel submission must remain a coordinator request');
+  const coordinatorRequest = (await loadDashboardState(root)).coordinatorRequests[0];
+  assert.equal(coordinatorRequest.notification.status, 'sent');
+  assert.equal(coordinatorRequest.snapshot.destinationConfirmation.objective, 'Objetivo corregido confirmado');
+  assert.equal(coordinatorRequest.snapshot.destinationConfirmation.successCriteria, 'Criterio corregido confirmado');
+  const routed = {};
+  const routeUrl = new URL(`/api/coordinator/requests/${coordinatorRequest.id}/route`, 'http://127.0.0.1:43892');
+  await handleApi({ method: 'POST', body: { kind: 'code', reason: 'Implementation requested.', confirmation: { ...coordinatorRequest.snapshot.destinationConfirmation, productAcceptance: ['Se cumple el criterio corregido confirmado.'] } }, headers: { host: routeUrl.host, origin: routeUrl.origin } }, routed, routeUrl);
+  assert.equal(routed.status, 200);
+  assert.equal((await loadDashboardState(root)).coordinatorRequests[0].status, 'routed');
+  const jobs = await loadState(root);
+  assert.equal(jobs.jobs.length, 1);
+  const [job] = jobs.jobs;
+  assert.match(job.prompt, /Objetivo solicitado: Objetivo corregido confirmado/);
+  assert.match(job.prompt, /Criterio de .xito: Criterio corregido confirmado/);
   assert.equal(job.business, 'agency');
   assert.equal(job.projectId, project.id);
   assert.equal(job.workspace, path.join(root, checkout));
   assert.equal(job.branch, 'main');
   assert.equal(job.state, 'queued');
   assert.equal(job.attempts, 0);
+  assert.deepEqual(job.contract.productAcceptance, ['Se cumple el criterio corregido confirmado.']);
   assert.deepEqual(errors, []);
-  console.log('PASS: edited objective and criteria match confirmation, submitted payload and persisted job; agency/destination retained; one queued job, zero attempts, no listener or dispatch');
+  console.log('PASS: exact objective and destination persisted in coordinator request with zero jobs; after explicit coordinator route one queued job, zero attempts, no worker dispatch in test');
 } finally {
   clearTimeout(deadline);
   try { await Promise.race([browser?.close(), new Promise(resolve => setTimeout(resolve, 3000))]); }

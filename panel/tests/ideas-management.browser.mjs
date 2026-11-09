@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createIdea, createProject, mutateIdea, loadDashboardState } from '../agency-assistant/dashboard-state.mjs';
-import { sendIdeaToQueue } from '../agency-assistant/idea-workflow.mjs';
+import { sendIdeaToCoordinator } from '../agency-assistant/idea-workflow.mjs';
+import { withdrawCoordinatorRequest } from '../agency-assistant/coordinator-dialogue.mjs';
 import { loadState, summarize } from '../queue.mjs';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : '../../workspaces/portfolio-motion/node_modules/playwright/index.mjs');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ideas-browser-'));
@@ -22,9 +23,15 @@ try {
     if (route.request().method() === 'POST') {
       const body = route.request().postDataJSON();
       try {
-        const match = url.pathname.match(/^\/api\/ideas\/([^/]+)\/(update|trash|archive|restore|send)$/);
+        if (url.pathname === '/api/ideas') {
+          const captured = await createIdea(root, body.business, body.text, body.projectId, body.operationId, body);
+          return route.fulfill({ json: captured });
+        }
+        const match = url.pathname.match(/^\/api\/ideas\/([^/]+)\/(update|trash|archive|restore|coordinator)$/);
         assert.ok(match, `Unexpected mutation: ${url.pathname}`);
-        const result = match[2] === 'send' ? await sendIdeaToQueue(root, match[1], body.kind, '', body.confirmation) : await mutateIdea(root, match[1], match[2], body);
+        const result = match[2] === 'coordinator'
+          ? await sendIdeaToCoordinator(root, match[1], { notify: async () => ({ status: 'sent', runId: 'run_fixture01', messageId: 'msg_fixture01' }) })
+          : await mutateIdea(root, match[1], match[2], body);
         return route.fulfill({ json: result });
       } catch (error) { return route.fulfill({ status: 400, json: { error: error.message } }); }
     }
@@ -35,7 +42,7 @@ try {
     if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false } });
     if (url.pathname === '/api/config') return route.fulfill({ json: { autoRun: false, vaultPath: '' } });
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-    assert.ok(['index.html', 'app.js', 'ideas-view.js', 'style.css'].includes(name));
+    assert.ok(['index.html', 'app.js', 'ideas-view.js', 'requests-view.js', 'style.css'].includes(name));
     return route.fulfill({ body: await fs.readFile(new URL(`../dashboard/${name}`, import.meta.url)), contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });
   });
   await page.goto('http://127.0.0.1:43893/#ideas');
@@ -78,14 +85,37 @@ try {
   await page.reload(); await card.waitFor();
   await card.getByRole('button', { name: 'Restaurar idea', exact: true }).click(); await page.locator('#idea-dialog-submit').click(); await card.waitFor({ state: 'detached' });
   await page.locator('#ideas-status').selectOption('active'); await card.waitFor();
-  await card.getByRole('button', { name: 'Enviar al planificador', exact: true }).click();
-  await page.locator('#idea-dialog').waitFor({ state: 'visible' });
-  assert.match(await page.locator('.idea-brief').textContent(), /Foco: Diseño UX/);
-  await page.locator('#idea-dialog-submit').click(); await page.locator('#idea-dialog').waitFor({ state: 'hidden' });
-  const jobs = (await loadState(root)).jobs; assert.equal(jobs.length, 1); assert.equal(jobs[0].attempts, 0);
-  assert.ok(jobs[0].prompt.includes('Etiquetas: mobile, accesibilidad'));
+  await card.getByRole('button', { name: 'Enviar al coordinador', exact: true }).click();
+  await card.getByText(/Avisada al coordinador/).waitFor();
+  assert.equal((await loadState(root)).jobs.length, 0, 'coordinator notice must not create or start a job');
+
+  const repeatedText = 'Probar el flujo completo con un destino nuevo';
+  const form = page.locator('#idea-form');
+  async function submitSameText() {
+    await form.locator('[name=text]').fill(repeatedText);
+    await form.getByRole('button', { name: 'Guardar y enviar al coordinador' }).click();
+    await page.locator('#idea-send-status').filter({ hasText: /avis[oa]|enviada/i }).waitFor();
+    await page.waitForFunction(() => !document.querySelector('#idea-form button[type=submit]').disabled
+      && document.querySelector('#idea-form [name=text]').value === '');
+    return loadDashboardState(root);
+  }
+  const first = await submitSameText();
+  const original = first.ideas.find(item => item.text === repeatedText);
+  const originalRequest = first.coordinatorRequests.find(item => item.ideaId === original.id);
+  const retry = await submitSameText();
+  assert.equal(retry.ideas.filter(item => item.text === repeatedText).length, 1);
+  assert.equal(retry.coordinatorRequests.filter(item => item.ideaId === original.id).length, 1);
+  await withdrawCoordinatorRequest(root, originalRequest.id);
+  await mutateIdea(root, original.id, 'trash', { version: original.version });
+  await page.reload();
+  const retriedAfterTrash = await submitSameText();
+  const newIdea = retriedAfterTrash.ideas.find(item => item.text === repeatedText && item.status === 'active');
+  assert.ok(newIdea && newIdea.id !== original.id);
+  assert.equal(retriedAfterTrash.ideas.find(item => item.id === original.id).status, 'trash');
+  assert.equal(retriedAfterTrash.coordinatorRequests.filter(item => item.ideaId === newIdea.id && item.notification?.status === 'sent').length, 1);
+
   await page.locator('#business-context').selectOption('games');
   await page.goto('http://127.0.0.1:43893/#ideas'); await page.getByText('Idea de otro negocio', { exact: true }).first().waitFor();
   assert.equal(await page.locator('#ideas-status').inputValue(), 'active'); assert.deepEqual(errors, []);
-  console.log('PASS: offline 320px, cancel focus/Escape, server errors preserve draft, edit/version, trash/reload/restore, business preferences, full brief and one queued job with zero attempts');
+  console.log('PASS: offline ideas management, stable active retries, new submission after trash and reload, coordinator notices without jobs');
 } finally { await browser?.close(); await fs.rm(root, { recursive: true, force: true }); }

@@ -4,8 +4,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { QueueError } from './queue.mjs';
 import { runOrca } from './orca-provider.mjs';
+import { measuredUsage } from './workflow-contract.mjs';
 
-const CODEX_EXE = 'C:\\Users\\brank\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe';
+import { CODEX_EXE } from './local-tools.mjs';
 const CREDIT_CODES = new Set(['insufficient_quota', 'billing_hard_limit_reached', 'credits_exhausted', 'credit_balance_exhausted']);
 const LIMIT_BYTES = 256_000;
 
@@ -15,6 +16,22 @@ export class ProviderError extends Error {
   }
 }
 export function isCreditExhausted(body) { return CREDIT_CODES.has(body?.error?.code); }
+
+export function summarizeCodexUsage(turnUsages) {
+  const measured = turnUsages.map(measuredUsage);
+  const sumComplete = key => {
+    if (!measured.length || measured.some(turn => turn[key] === null)) return null;
+    const total = measured.reduce((sum, turn) => sum + turn[key], 0);
+    return Number.isSafeInteger(total) ? total : null;
+  };
+  return {
+    completedTurns: measured.length,
+    measuredTurns: measured.filter(turn => turn.inputTokens !== null && turn.outputTokens !== null).length,
+    inputTokens: sumComplete('inputTokens'),
+    cachedInputTokens: sumComplete('cachedInputTokens'),
+    outputTokens: sumComplete('outputTokens'),
+  };
+}
 function redact(value, env) {
   let text = String(value ?? '');
   for (const name of ['OPENAI_API_KEY', 'CODEX_API_KEY']) if (env[name]) text = text.split(env[name]).join('[CLAVE OCULTA]');
@@ -124,6 +141,7 @@ function runProcess(exe, args, { cwd, env, input = '', signal, ctx }) {
 }
 
 export async function runCodex(job, ctx, { env = process.env, executable = CODEX_EXE } = {}) {
+  const startedAt = Date.now();
   let cwd;
   let beforeSignature;
   if (job.kind === 'code') {
@@ -155,10 +173,11 @@ export async function runCodex(job, ctx, { env = process.env, executable = CODEX
   if (result.code !== 0) throw new ProviderError('codex_failed', 'Codex terminó con error. Puede haber cambios parciales; revisa antes de reintentar.', { uncertain: true });
   const messages = [];
   let completed = false;
+  const turnUsages = [];
   for (const line of result.stdout.split('\n')) {
     if (!line.trim()) continue;
     let event; try { event = JSON.parse(line); } catch { continue; }
-    if (event.type === 'turn.completed') completed = true;
+    if (event.type === 'turn.completed') { completed = true; turnUsages.push(event.usage ?? null); }
     if (event.type === 'item.completed' && event.item?.type === 'agent_message') messages.push(event.item.text || '');
   }
   if (!completed || !messages.length) throw new ProviderError('codex_incomplete', 'No se recibió una respuesta completa de Codex; revisa antes de reintentar.', { uncertain: true });
@@ -171,7 +190,9 @@ export async function runCodex(job, ctx, { env = process.env, executable = CODEX
       throw new ProviderError('code_no_changes', 'Codex terminó sin dejar cambios verificables en el checkout.');
     }
   }
-  return { provider: 'codex-chatgpt', text, usage: 'Sujeto a límites del plan ChatGPT; no medido por el presupuesto API local.' };
+  const usage = summarizeCodexUsage(turnUsages);
+  return { provider: 'codex-chatgpt', text, usage: 'Sujeto a límites del plan ChatGPT; no equivale a facturación API.',
+    ...usage, metrics: { elapsedMs: Date.now() - startedAt, inputChars: instruction.length, inputBytes: Buffer.byteLength(instruction), modelCalls: null, ...usage } };
 }
 
 export async function runAnalysis(job, ctx, { fetchImpl = globalThis.fetch, env = process.env } = {}) {

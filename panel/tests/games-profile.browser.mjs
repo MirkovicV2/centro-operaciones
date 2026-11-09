@@ -5,10 +5,11 @@ import { pathToFileURL } from 'node:url';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : '../../workspaces/portfolio-motion/node_modules/playwright/index.mjs');
 const jobs = [
   { id: 'games-new', business: 'games', profile: 'desarrollador_games' },
+  { id: 'games-design', business: 'games', profile: 'ux_games' },
   { id: 'games-historical', business: 'games', profile: 'desarrollador' },
   { id: 'agency-new', business: 'agency', profile: 'desarrollador_agency' },
 ].map(({ profile, ...job }) => ({ ...job, title: job.id, kind: 'code', state: 'queued', attempts: 0, maxAttempts: 2,
-  workflow: { steps: [{ key: 'developer', label: 'Implementación', profile, status: 'queued', dispatchId: `ctx_${job.id}` }] },
+  workflow: { steps: [{ key: profile === 'ux_games' ? 'ux' : 'developer', label: 'Implementación', profile, status: 'queued', dispatchId: `ctx_${job.id}` }] },
 }));
 const before = JSON.stringify(jobs);
 const browser = await chromium.launch({ headless: true });
@@ -24,7 +25,7 @@ try {
     if (url.pathname === '/api/config') return route.fulfill({ json: { autoRun: true, vaultPath: '' } });
     if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false } });
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-    assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js'].includes(name));
+    assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js', 'requests-view.js'].includes(name));
     return route.fulfill({ body: await fs.readFile(new URL(`../dashboard/${name}`, import.meta.url)), contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });
   });
   await page.goto('http://127.0.0.1:43893/#trabajos');
@@ -38,6 +39,8 @@ try {
   await card.getByText('Identificador del perfil', { exact: true }).click();
   assert.equal(await card.getByText('desarrollador_games', { exact: true }).isVisible(), true);
   assert.match(await card.textContent(), /ctx_games-new/);
+  assert.equal(await page.locator('#job-games-design .workflow-stage-label').textContent(), 'Diseño de videojuegos');
+  assert.equal(await page.locator('#job-games-design .workflow-stage-profile').textContent(), 'Perfil: Diseñador de videojuegos');
   assert.equal(await page.locator('#job-games-historical .workflow-stage-profile').textContent(), 'Perfil: desarrollador');
   assert.equal(JSON.stringify(jobs), before, 'historical IDs and profiles stay unchanged');
   assert.deepEqual(errors, []);

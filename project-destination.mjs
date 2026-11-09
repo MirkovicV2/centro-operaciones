@@ -2,13 +2,14 @@ import * as fs from 'node:fs/promises';
 import { spawnSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import { homedir } from 'node:os';
 import { validateWorkspace } from './providers.mjs';
 
 // Observation only: never creates a checkout, branch, or Git metadata.
 export async function inspectDestination(root, checkout, expectedBranch = '') {
   if (!checkout || path.isAbsolute(checkout)) throw new Error('Selecciona un checkout relativo bajo workspaces.');
   const workspace = await validateWorkspace({ workspace: path.resolve(root, checkout), isolated: true }, root);
-  const protectedGame = 'c:/users/brank/documents/proyectos/flechatrampa';
+  const protectedGame = path.join(homedir(), 'Documents', 'Proyectos', 'FlechaTrampa').replaceAll('\\', '/').toLowerCase();
   const normalizedWorkspace = workspace.replaceAll('\\', '/').toLowerCase();
   if (normalizedWorkspace === protectedGame || normalizedWorkspace.startsWith(`${protectedGame}/`)) throw new Error('El repositorio original FlechaTrampa está protegido; selecciona un checkout independiente.');
   const realRoot = await fs.realpath(root);
@@ -43,7 +44,7 @@ export function githubRepository(origin) {
 
 // Inject Git in tests. Production only observes the configured existing remote;
 // it never fetches, changes refs, creates branches, or writes to GitHub.
-export async function verifyGitHubDestination(root, job, { git, inspect = inspectDestination } = {}) {
+export async function verifyGitHubDestination(root, job, { git, inspect = inspectDestination, requireClean = true } = {}) {
   const checkout = path.relative(root, job.workspace || '').replaceAll('\\', '/');
   if (!job.branch || !job.destination?.repository) throw new Error('Configura y confirma repositorio GitHub y rama existente antes de ejecutar.');
   const observed = await inspect(root, checkout, job.branch);
@@ -67,7 +68,7 @@ export async function verifyGitHubDestination(root, job, { git, inspect = inspec
   const branch = await run(['symbolic-ref', '--quiet', '--short', 'HEAD']);
   if (branch !== job.branch) throw new Error('Rama cambiada o HEAD separado; restaura manualmente el checkout confirmado.');
   const sha = await run(['rev-parse', '--verify', 'HEAD']);
-  if (job.autoIntent?.eligible === true) {
+  if (job.autoIntent?.eligible === true && requireClean) {
     const dirty = await run(['status', '--porcelain']);
     if (dirty) throw new Error('Checkout no estaba limpio al admitir el job; se requiere revisión antes de ejecutar.');
   }

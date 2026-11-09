@@ -37,10 +37,11 @@ for (const business of ['games', 'agency']) test(`fresh ${business} code workflo
     if (args[1] === 'run-create') return { runId: 'run_abcdef' };
     if (args[1] === 'worker-start') {
       assert.equal(args.includes('--display-name'), false);
+      assert.equal(args.includes('--name'), false);
       const dispatchId = `ctx_stage${starts.length + 1}`;
       const role = args[args.indexOf('--task-title') + 1];
       starts.push({ args, dispatchId, role });
-      outputs.set(dispatchId, role.includes('Control de calidad') || role.includes('Revisión de código')
+      outputs.set(dispatchId, ['qa', 'reviewer'].includes(ctx.updates.at(-1).key)
         ? 'Validación correcta.\nRESULTADO: APROBADO'
         : `${role} completado`);
       return { dispatchId, taskId: `task_${dispatchId.slice(4)}` };
@@ -58,16 +59,67 @@ for (const business of ['games', 'agency']) test(`fresh ${business} code workflo
   assert.deepEqual([...new Set(ctx.updates.filter(update => update.profile).map(update => update.profile))], ['ux', 'desarrollador', 'qa', 'revisor'].map(profile => `${profile}_${business}`));
   const label = business === 'games' ? 'Desarrollo de videojuegos (Godot)' : 'Implementación';
   assert.ok(ctx.updates.some(update => update.key === 'developer' && update.label === label && update.profile === `desarrollador_${business}`));
-  assert.equal(starts[1].role, `Mejorar flujo — ${label}`);
-  const instructions = starts[1].args[starts[1].args.indexOf('--spec') + 1];
+  for (const [index, role] of ['UX', 'DEV', 'QA', 'REV'].entries()) {
+    const name = starts[index].role;
+    assert.match(name, new RegExp(`^${business === 'games' ? 'Videojuegos' : 'Agencia'} · ${role} · i1 · #[a-f0-9]{8} · Mejorar flujo$`));
+    assert.ok(name.length <= 80);
+    assert.equal(ctx.updates.find(update => update.dispatchId === starts[index].dispatchId).displayName, name);
+  }
+  const brief = starts[1].args[starts[1].args.indexOf('--spec') + 1];
+  const instructions = await fs.readFile(JSON.parse(brief.match(/^SPEC_FILE: (.+)$/m)[1]), 'utf8');
   assert.match(instructions, new RegExp(`PERFIL EXISTENTE: desarrollador_${business}`));
   if (business === 'games') {
     assert.match(instructions, /project\.godot/);
     assert.match(instructions, /no autorizan scaffold ni cambios de migración/);
+    assert.ok(ctx.updates.some(update => update.key === 'ux' && update.label === 'Diseño de videojuegos' && update.profile === 'ux_games'));
+  }
+  const references = ['Diseño de partida', 'Implementación Godot', 'Verificación en el motor', 'Revisión de jugabilidad y código'];
+  for (const [index, start] of starts.entries()) {
+    const stageBrief = start.args[start.args.indexOf('--spec') + 1];
+    const spec = await fs.readFile(JSON.parse(stageBrief.match(/^SPEC_FILE: (.+)$/m)[1]), 'utf8');
+    const embedded = spec.split('REFERENCIA DE TU PERFIL\n')[1];
+    if (business === 'games') {
+      assert.ok(embedded?.startsWith('# ' + references[index]));
+      assert.match(spec, /github\.com\/scenent\/gd-rhythm/);
+      assert.match(spec, /store\.godotengine\.org/);
+      if (index === 0) assert.match(embedded, /vueltas?|vuelta jugable/);
+    } else {
+      assert.equal(embedded, undefined);
+      assert.doesNotMatch(spec, /github\.com\/scenent\/gd-rhythm/);
+    }
   }
   assert.deepEqual(result.stages, Object.fromEntries(['ux', 'developer', 'qa', 'reviewer'].map((key, index) => [key, starts[index].dispatchId])));
   assert.equal(ctx.updates.filter(update => update.status === 'succeeded').length, 4);
   assert.match(result.text, /RESULTADO: APROBADO/);
+});
+
+test('long project and task labels retain stage, attempt and stable job marker within 80 characters', async t => {
+  const { root, workspace } = await fixture(t);
+  const names = [];
+  const command = async args => {
+    if (args[0] === 'repo') return { repos: [{ path: path.join(root, 'analysis') }] };
+    if (args[1] === 'run-create') return { runId: 'run_abcdef' };
+    if (args[1] === 'worker-start') {
+      names.push(args[args.indexOf('--task-title') + 1]);
+      return { dispatchId: 'ctx_planner01', taskId: 'task_planner01' };
+    }
+    if (args[1] === 'worker-show') return { state: 'succeeded', runId: 'run_abcdef', taskId: 'task_planner01' };
+    if (args[1] === 'inbox') return { messages: [{ type: 'worker_done', body: 'Plan terminado.', payload: JSON.stringify({ dispatchId: 'ctx_planner01' }) }] };
+    throw new Error(`Unexpected command: ${args.join(' ')}`);
+  };
+  const request = { ...job(root, workspace), kind: 'analysis', attempts: 2, projectName: 'Proyecto\n' + '😀'.repeat(50), title: 'Encargo\t' + 'muy largo '.repeat(50) };
+  for (const id of ['same-prefix-job-one', 'same-prefix-job-two', 'same-prefix-job-one']) {
+    const ctx = context(root);
+    await runOrca({ ...request, id }, ctx, { command });
+    const name = names.at(-1);
+    assert.ok(name.length <= 80);
+    assert.match(name, /^Proyecto /);
+    assert.match(name, / · PLAN · i2 · #[a-f0-9]{8} · Encargo /);
+    assert.doesNotMatch(name, /[\r\n\t]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+    assert.equal(ctx.updates.at(-1).displayName, name);
+  }
+  assert.equal(names[0], names[2]);
+  assert.notEqual(names[0], names[1]);
 });
 
 test('interrupted final reviewer resumes the same dispatch and does not rerun earlier stages', async t => {
@@ -202,7 +254,8 @@ test('fresh approval ignores a worker_done with matching taskId but a different 
     }
     if (args[1] === 'worker-read') {
       const dispatchId = args[args.indexOf('--dispatch') + 1];
-      return { transcript: { messages: [{ role: 'assistant', blocks: [{ type: 'text', text: `Transcript for ${dispatchId} has no approval.` }] }] } };
+      return { dispatchId, source: 'transcript', sourceExact: true, sourceIdentity: 'fixture-exact', contentComplete: true,
+        transcript: { limited: false, messages: [{ role: 'assistant', blocks: [{ type: 'text', text: `Transcript for ${dispatchId} has no approval.` }] }] } };
     }
     throw new Error(`Unexpected command: ${args.join(' ')}`);
   };

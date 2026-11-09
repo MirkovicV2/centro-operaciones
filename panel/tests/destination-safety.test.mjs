@@ -18,7 +18,7 @@ async function fixture(t) {
   const project = await createProject(root, 'Proyecto temporal', 'agency');
   await updateProject(root, project.id, { checkout, baseBranch: 'main' });
   const idea = await createIdea(root, 'agency', 'Comportamiento verificable', project.id, '', { focus: 'code' });
-  const confirmation = { projectId: project.id, checkout, branch: 'main', baseBranch: 'main', objective: 'Cambiar comportamiento definido', successCriteria: 'Comprobar el resultado del cambio' };
+  const confirmation = { projectId: project.id, checkout, branch: 'main', baseBranch: 'main', objective: 'Cambiar comportamiento definido', successCriteria: 'Comprobar el resultado del cambio', productAcceptance: ['Comprobar el resultado del cambio'] };
   return { root, checkout, project, idea, confirmation };
 }
 

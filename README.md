@@ -4,7 +4,13 @@ Cola local para videojuegos (`games`) y agencia digital (`agency`). Este reposit
 
 ## Empezar
 
-Para abrir el panel web local, ejecuta `ABRIR_PANEL.cmd` desde el Explorador o desde PowerShell. El servidor escucha solo en `127.0.0.1:4187`; la interfaz y el backend del panel están versionados en `panel/` y usan la cola de este repositorio. El inicio abre el navegador, pero no crea tareas ni inicia la cola por sí solo.
+Cada instalación usa su propia cola y configuración. Instala Node.js 20 o posterior y Git. Para ejecutar agentes, configura Orca en ese equipo y vincula sus coordinadores según la [guía de coordinación](docs/COORDINATOR_OPERATIONS.md). Si Orca está instalado en otra ruta, configura `ORCA_CLI_COMMAND` con la ruta a su ejecutable. La integración remota requiere una cuenta de GitHub con acceso al repositorio de cada proyecto.
+
+En **Conocimiento** puedes conectar tu propia bóveda de Obsidian. La cola, los checkouts de proyectos, la bóveda y las credenciales se guardan fuera del código versionado.
+
+Para abrir el panel web local, ejecuta `ABRIR_PANEL.cmd` desde el Explorador o desde PowerShell. El servidor escucha solo en `127.0.0.1:4187`; la interfaz y el backend del panel están versionados en `panel/` y usan la cola de este repositorio. El inicio no crea tareas; el ejecutor respeta la autoejecución y los recibos elegibles ya configurados. Reabrir un panel existente no recarga sus módulos.
+
+Contratos, decisiones agrupadas, correlación ORCA, métricas, pruebas y límites de activación: [PIPELINE_COORDINATION.md](PIPELINE_COORDINATION.md).
 
 En una terminal de esta carpeta:
 
@@ -14,9 +20,9 @@ En una terminal de esta carpeta:
 .\centro.cmd run
 ```
 
-`run` solo muestra una simulación. Para ejecutar expresamente la cola, usa `run --execute`. No hay tareas programadas ni ejecución al abrir la carpeta. Como máximo se procesan cinco trabajos por llamada (ajustable entre 1 y 20). Cada trabajo tiene dos intentos por defecto; el timeout es de tres minutos para análisis y treinta minutos para trabajos de código Orca, con un máximo de tres intentos y treinta minutos.
+`run` solo muestra una simulación. Para ejecutar expresamente la cola, usa `run --execute`. No hay tareas programadas ni ejecución al abrir la carpeta. Como máximo se procesan cinco trabajos por llamada (ajustable entre 1 y 20). Los encargos nuevos de Orca tienen cinco intentos por defecto y carecen de límite de duración por defecto. En otros proveedores el valor por defecto sigue siendo dos. El máximo configurable es cinco. Una pregunta respondida al trabajador que sigue activo conserva su intento.
 
-Por defecto, las tareas usan Orca y los perfiles existentes de `.codex/agents/`. Los análisis pasan por `planificador`; los trabajos de código siguen el pipeline secuencial `ux` → `desarrollador` → `qa` → `revisor`. No hay ejecuciones paralelas ni delegación entre perfiles. Los estados, resúmenes y dispatches de cada etapa quedan en `jobs[].workflow` para mostrarlos en el panel. La primera ejecución registra en Orca la carpeta de análisis o el checkout aislado.
+Por defecto, las tareas usan Orca y los perfiles existentes de `.codex/agents/`. Los análisis pasan por `planificador`; los trabajos de código siguen el pipeline secuencial `ux` → `desarrollador` → `qa` → `revisor`. Dentro de cada encargo actúa un perfil a la vez. Los estados, resúmenes y dispatches de cada etapa quedan en `jobs[].workflow` para mostrarlos en el panel. La primera ejecución registra en Orca la carpeta de análisis o el checkout aislado.
 
 ```powershell
 .\centro.cmd add --business games --kind analysis --title "Propuesta de juego" --prompt-file ".\ejemplos\videojuegos.txt" --id idea-juego
@@ -50,9 +56,9 @@ La cola no usa el repositorio de juego activo ni sus worktrees. Para código, pr
 
 ## Recuperación y revisión
 
-El registro `data\events.jsonl` es la fuente durable; `data\state.json` es una instantánea reemplazada de forma atómica. Los cambios se sincronizan a disco antes de empezar trabajo. Un único bloqueo impide ejecuciones o escrituras concurrentes. Los trabajos terminados no vuelven a ejecutarse y un `--id` repetido se rechaza.
+El registro `data\events.jsonl` es la fuente durable; `data\state.json` es una instantánea reemplazada de forma atómica. Los cambios se sincronizan a disco antes de empezar trabajo. El panel reserva un turno exclusivo por empresa y serializa las escrituras en el historial compartido. La ejecución manual de la CLI reserva ambos turnos. Los trabajos terminados no vuelven a ejecutarse y un `--id` repetido se rechaza.
 
-Al detectar una interrupción, los trabajos que estaban ejecutándose pasan a `needs_attention` y bloquean el resto de ejecuciones. Comprueba que no queda un proceso Codex activo y revisa posibles cambios/cargos. Después decide:
+Al detectar una interrupción, los trabajos afectados pasan a `needs_attention` y bloquean nuevas admisiones en su empresa. Comprueba que no queda un proceso Codex activo y revisa posibles cambios/cargos. Después decide:
 
 ```powershell
 .\centro.cmd retry --id IDENTIFICADOR --confirm-reviewed
@@ -83,8 +89,8 @@ Este proceso vive **solo en este PC**, que debe permanecer encendido y conectado
 ## Verificar sin consumo
 
 ```powershell
-node --test tests/queue.test.mjs
-node --test tests/watch.test.mjs
+npm test
+npm run metrics
 ```
 
 Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace. `centro.cmd` usa el Node 24 portable existente si está disponible y, en su defecto, `node` del sistema.
@@ -128,7 +134,7 @@ El panel incorpora controles explícitos de activar/pausar Agencia y Videojuegos
 
 Cada envío confirmado de Ideas o Nuevo trabajo conserva un recibo idempotente en `data/auto-run.json`, con brief, job ID y la elegibilidad observada al confirmar. Guardar, editar, archivar, restaurar o activar una empresa no hace elegible la cola anterior. Los recibos manuales permanecen manuales. La UI conserva identificadores de operación en el almacenamiento local del navegador para repetir un envío tras una respuesta ambigua o un refresco sin duplicarlo. Un envío idéntico conserva su recibo; para otro resultado define un encargo distinto.
 
-El ejecutor de fondo del panel procesa un solo job ID por admisión, usando el bloqueo y pipeline existentes. Pausar impide nuevas admisiones y permite terminar el job admitido, incluidas sus etapas. `data/PAUSE` sigue siendo la pausa global. Una intención pendiente se recupera al abrir el panel; un intento admitido sin cierre o con dispatch incierto requiere revisión y nunca se repite automáticamente. Un fallo, timeout o destino bloqueado detiene la cadena compartida, incluso entre empresas.
+El panel tiene un ejecutor por empresa. Cada uno admite un solo trabajo y ejecuta sus etapas en orden. Ambos pueden avanzar en checkouts distintos. El bloqueo exclusivo de cada checkout evita que dos trabajos lo usen a la vez. El historial y el presupuesto se escriben con un bloqueo breve compartido. Pausar una empresa impide nuevas admisiones en ella y deja terminar el trabajo admitido. `data/PAUSE` pausa nuevas admisiones en ambas empresas. Una intención pendiente se recupera al abrir el panel. Un intento sin cierre confirmado requiere revisión y detiene las nuevas admisiones de su empresa.
 
 En jobs elegibles de código, tras UX → Desarrollo → QA → Revisión se muestra `Integración GitHub`. Solo usa el recibo creado al confirmar con autoRun activo; los envíos manuales y anteriores no se integran. El proyecto debe tener repositorio, checkout, rama fuente y rama base configurados explícitamente; sin rama base la integración queda bloqueada para revisión. La acción terminal es commit/push confirmado para misma rama, o PR/checks/merge confirmado para ramas distintas. Cada intención queda guardada antes del efecto; los resultados ambiguos pasan a revisión y no se repiten a ciegas. No hay garantía exactly-once, ni se publican APK o workflows. Consulta el preflight, estados, pruebas simuladas y validaciones remotas pendientes en [GITHUB_INTEGRATION.md](GITHUB_INTEGRATION.md).
 

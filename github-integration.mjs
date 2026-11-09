@@ -3,11 +3,29 @@ import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import { githubRepository } from './project-destination.mjs';
 
 const sha = value => /^[a-f0-9]{40,64}$/i.test(String(value || ''));
 const branchOk = value => typeof value === 'string' && value.length > 0 && !value.includes('..') && !/[\\\x00\r\n]/.test(value) && !value.startsWith('-');
 const bytes = value => Buffer.isBuffer(value) ? value : Buffer.from(String(value ?? ''), 'utf8');
+export const pullRequestIdentityFields = 'number,url,state,headRefOid,baseRefOid,headRefName,baseRefName,isCrossRepository,headRepository,headRepositoryOwner';
+export function sameRepositoryPullRequest(pr, repository, sourceBranch, baseBranch) {
+  const [owner, name] = repository.split('/');
+  return Number.isSafeInteger(pr?.number) && pr.number > 0 && pr.isCrossRepository === false
+    && pr.headRepositoryOwner?.login?.toLowerCase() === owner.toLowerCase()
+    && pr.headRepository?.name?.toLowerCase() === name.toLowerCase()
+    && (!pr.headRepository.nameWithOwner || pr.headRepository.nameWithOwner.toLowerCase() === repository.toLowerCase())
+    && pr.headRefName === sourceBranch && pr.baseRefName === baseBranch
+    && typeof pr.url === 'string' && pr.url.toLowerCase() === `https://github.com/${repository}/pull/${pr.number}`.toLowerCase();
+}
+export function sameRepositoryPullRequests(prs, repository, sourceBranch, baseBranch) {
+  if (!Array.isArray(prs) || prs.length >= 100 || prs.some(pr => typeof pr?.isCrossRepository !== 'boolean' || !pr.headRepositoryOwner?.login
+    || !pr.headRepository?.name || typeof pr.headRefName !== 'string' || typeof pr.baseRefName !== 'string')) {
+    throw new Error('GitHub no acreditó el repositorio y las ramas de las PR consultadas.');
+  }
+  return prs.filter(pr => sameRepositoryPullRequest(pr, repository, sourceBranch, baseBranch));
+}
 function addField(hash, value) {
   const data = bytes(value);
   const length = Buffer.allocUnsafe(8);
@@ -17,7 +35,8 @@ function addField(hash, value) {
 
 // `git` and `gh` are injected command adapters. Tests use deterministic fakes;
 // production calls are only reached from the explicitly eligible auto-run path.
-export async function integrateGitHub(job, ctx, { git, gh, persist = async () => {}, previous = null, now = () => new Date().toISOString() } = {}) {
+export async function integrateGitHub(job, ctx, { git, gh, persist = async () => {}, previous = null, now = () => new Date().toISOString(),
+  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = null, checksIntervalMs = 15_000 } = {}) {
   const intent = job.autoIntent;
   if (!intent || intent.eligible !== true || !intent.receiptId || job.state === 'cancelled') return { status: 'skipped', reason: 'not_eligible' };
   const dest = job.destination || {};
@@ -26,18 +45,22 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (await fs.realpath(workspace) !== workspace || await fs.realpath(root) !== root) throw new Error('Checkout/root no canónico; integración bloqueada.');
   if (!dest.repository || !branchOk(job.branch) || !branchOk(dest.baseBranch)) throw new Error('Configura repositorio y ramas fuente/base existentes antes de integrar.');
   if (!git || !gh) throw new Error('Adaptadores de GitHub no configurados; necesita revisión.');
+  if (checksTimeoutMs !== null && (!Number.isFinite(checksTimeoutMs) || checksTimeoutMs < 0 || checksTimeoutMs > 900_000)
+    || !Number.isFinite(checksIntervalMs) || checksIntervalMs < 1 || checksIntervalMs > 30_000) throw new Error('Límites de espera de checks inválidos.');
+  if (previous && ['jobId', 'receiptId', 'repository', 'sourceBranch', 'baseBranch'].some(key => previous[key] !== ({ jobId: job.id, receiptId: intent.receiptId, repository: dest.repository, sourceBranch: job.branch, baseBranch: dest.baseBranch })[key])) throw new Error('El registro de integración pertenece a otro encargo o destino.');
+  if (previous?.commitSha && (!/^[a-f0-9]{64}$/i.test(previous.manifest || '') || previous.manifest !== job.integrationSnapshot)) throw new Error('Falta el manifest original del commit aprobado; no se sustituye por otro snapshot.');
   if (previous?.phase === 'complete') return previous;
   if (previous?.status === 'needs_attention' && !['commit_confirmed', 'push_intent', 'push_confirmed', 'pr_intent', 'pr_confirmed', 'checks_pending', 'merge_intent'].includes(previous.phase)) throw new Error('Integración previa requiere revisión manual; no se repetirá a ciegas.');
-  const unresolvedMergeIntent = previous?.phase === 'merge_intent';
   const record = { ...previous, jobId: job.id, receiptId: intent.receiptId, repository: dest.repository, sourceBranch: job.branch, baseBranch: dest.baseBranch, status: 'preflight', attempts: previous?.attempts || 0, updatedAt: now() };
   const save = async (phase, extra = {}) => {
-    Object.assign(record, extra, { phase, status: phase === 'complete' ? 'completed' : phase === 'needs_attention' || phase === 'checks_pending' ? phase : 'running', needsAttention: false, updatedAt: now() });
+    Object.assign(record, extra, { phase, status: phase === 'complete' ? 'completed' : phase === 'needs_attention' || phase === 'checks_pending' ? phase : 'running', needsAttention: false, error: extra.error ?? null, updatedAt: now() });
     await persist(structuredClone(record));
-    const labels = { preflight_complete: 'Preflight aprobado; commit local preparado.', commit_intent: 'Commit local solicitado.', commit_confirmed: 'Commit local confirmado.', push_intent: 'Push solicitado; confirmación pendiente.', push_confirmed: 'Push remoto confirmado.', pr_intent: 'Creación de PR solicitada.', pr_confirmed: 'PR confirmada; checks pendientes.', checks_pending: 'PR/checks pendientes o bloqueados.', merge_intent: 'Merge solicitado; confirmación pendiente.', complete: 'Integración remota confirmada.', needs_attention: 'Necesita revisión manual.' };
+    const labels = { preflight_complete: 'Preflight aprobado; commit local preparado.', commit_intent: 'Commit local solicitado.', commit_confirmed: 'Commit local confirmado.', push_intent: 'Push solicitado; confirmación pendiente.', push_confirmed: 'Push remoto confirmado.', pr_intent: 'Creación de PR solicitada.', pr_confirmed: 'PR confirmada; checks pendientes.', checks_pending: 'Esperando comprobaciones de GitHub sobre la PR existente.', merge_intent: 'Merge solicitado; confirmación pendiente.', complete: 'Integración remota confirmada.', needs_attention: 'Necesita revisión manual.' };
     const summary = [labels[phase] || phase, extra.commitSha ? `SHA ${extra.commitSha}` : '', extra.prUrl || '', extra.mergeSha ? `Merge ${extra.mergeSha}` : '', extra.error || ''].filter(Boolean).join(' · ');
     await ctx.reportStage?.({ key: 'integration', status: phase === 'needs_attention' ? 'blocked' : phase === 'complete' || phase === 'skipped' ? 'succeeded' : 'running', summary, ...extra });
   };
-  const g = args => git(args, workspace), h = args => gh(args, workspace);
+  const checkAbort = () => ctx.signal?.throwIfAborted();
+  const g = args => { checkAbort(); return git(args, workspace); }, h = args => { checkAbort(); return gh(args, workspace); };
   const repo = githubRepository(`https://github.com/${dest.repository}`);
   const origin = githubRepository(await g(['remote', 'get-url', 'origin']));
   if (repo.toLowerCase() !== origin.toLowerCase()) throw new Error('Origin GitHub y mapping confirmado no coinciden.');
@@ -47,14 +70,18 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   const ghUser = (await h(['api', 'user', '--jq', '.login'])).trim().toLowerCase();
   if (ghUser !== repo.split('/')[0].toLowerCase()) throw new Error('La cuenta gh activa no coincide con el propietario del repositorio.');
   if (previous?.phase === 'merge_intent' && previous.prNumber) {
-    const state = JSON.parse(await h(['pr', 'view', String(previous.prNumber), '--repo', repo, '--json', 'state,mergedAt,mergeCommit']));
+    const state = JSON.parse(await h(['pr', 'view', String(previous.prNumber), '--repo', repo, '--json', pullRequestIdentityFields + ',mergedAt,mergeCommit']));
+    if (!sameRepositoryPullRequest(state, repo, job.branch, dest.baseBranch) || state.number !== previous.prNumber || state.headRefOid !== previous.commitSha) throw new Error('La PR del merge pendiente no coincide con la identidad y commit registrados.');
     if (state.state === 'MERGED' && state.mergedAt && sha(state.mergeCommit?.oid)) {
       await save('complete', { prNumber: previous.prNumber, prUrl: previous.prUrl, commitSha: previous.commitSha, mergeSha: state.mergeCommit.oid, mergedAt: state.mergedAt, reconciled: true });
       return record;
     }
+    // Never rewind an unresolved mutation into pr_confirmed: a later replay
+    // must still see the original merge intent and must not repeat the effect.
+    throw new Error('Merge previo ambiguo y no confirmado; consulta la misma PR antes de cualquier nueva acción.');
   }
   if (!(await g(['config', 'user.name'])).trim() || !(await g(['config', 'user.email'])).trim()) throw new Error('Falta identidad Git configurada.');
-    const status = await g(['status', '--porcelain=v1', '-z']);
+  const status = await g(['status', '--porcelain=v1', '-z']);
   const approvedSnapshot = job.integrationSnapshot;
   const baselineHead = (await g(['rev-parse', 'HEAD'])).trim();
   if (!sha(baselineHead)) throw new Error('HEAD no válido.');
@@ -71,20 +98,22 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (!sha(base) || !sha(remoteHead) || (remoteHead !== job.destination?.remoteSha && !reconciledPush) || (base !== job.destination?.baseSha && !reconciledBase)) throw new Error('Baseline remoto divergente o desactualizado.');
   const behind = (await g(['rev-list', '--count', `HEAD..${remoteHead}`])).trim();
   if (behind !== '0') throw new Error('La rama remota diverge del checkout; sincroniza y revisa manualmente.');
-  const existing = await h(['pr', 'list', '--repo', repo, '--head', `${repo.split('/')[0]}:${job.branch}`, '--base', dest.baseBranch, '--state', 'open', '--json', 'number,url,headRefOid,baseRefOid']);
-  const prs = JSON.parse(existing || '[]');
+  const existing = await h(['pr', 'list', '--repo', repo, '--head', job.branch, '--base', dest.baseBranch, '--state', 'open', '--limit', '100', '--json', pullRequestIdentityFields]);
+  const prs = sameRepositoryPullRequests(JSON.parse(existing || '[]'), repo, job.branch, dest.baseBranch);
   if (job.branch !== dest.baseBranch && prs.length > 1) throw new Error('Más de una PR abierta para head/base; requiere revisión.');
   if (job.branch === dest.baseBranch && base !== remoteHead) throw new Error('Rama fuente/base no sincronizada para push directo.');
+  if (previous?.phase === 'push_intent' && remoteHead !== previous.commitSha) throw new Error('Push previo ambiguo y no confirmado; revisión manual necesaria.');
+  if (previous?.phase === 'pr_intent' && !prs.length) throw new Error('Creación de PR ambigua; no hay PR observable. Revisión manual necesaria antes de repetir.');
   record.attempts = (record.attempts || 0) + 1;
   const originalBaseline = previous?.baseline || baselineHead;
-  await save('preflight_complete', { baseline: originalBaseline, remoteBaseSha: base, remoteSourceSha: remoteHead, manifest: approvedSnapshot });
+  await save('preflight_complete', { baseline: originalBaseline, remoteBaseSha: base, remoteSourceSha: remoteHead, manifest: previous?.manifest || approvedSnapshot });
   let head = baselineHead;
   if (previous?.commitSha) {
-    if (baselineHead !== previous.commitSha || status) throw new Error('El commit previamente registrado no coincide con el checkout; necesita revisión.');
+    if (baselineHead !== previous.commitSha || bytes(status).length !== 0) throw new Error('El commit previamente registrado no coincide con el checkout; necesita revisión.');
     head = previous.commitSha;
   } else if (previous?.phase === 'commit_intent') {
     const candidate = (await g(['rev-parse', 'HEAD'])).trim();
-    if (candidate === previous.baseline || status) throw new Error('Commit previo ambiguo; revisa el checkout antes de continuar.');
+    if (candidate === previous.baseline || bytes(status).length !== 0) throw new Error('Commit previo ambiguo; revisa el checkout antes de continuar.');
     head = candidate;
     await save('commit_confirmed', { baseline: previous.baseline, commitSha: head, manifest: approvedSnapshot });
   } else {
@@ -115,14 +144,17 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   const pushed = (await g(['ls-remote', '--exit-code', '--heads', 'origin', job.branch])).trim().split(/\s+/)[0];
   if (pushed !== head) throw new Error('Push ambiguo: remoto no confirma el SHA; necesita revisión.');
   await save('push_confirmed', { commitSha: head, pushedAt: now() });
-  const refreshedPrs = JSON.parse((await h(['pr', 'list', '--repo', repo, '--head', `${repo.split('/')[0]}:${job.branch}`, '--base', dest.baseBranch, '--state', 'open', '--json', 'number,url,headRefOid,baseRefOid'])) || '[]');
+  const refreshedPrs = sameRepositoryPullRequests(JSON.parse((await h(['pr', 'list', '--repo', repo, '--head', job.branch, '--base', dest.baseBranch, '--state', 'open', '--limit', '100', '--json', pullRequestIdentityFields])) || '[]'), repo, job.branch, dest.baseBranch);
+  if (refreshedPrs.length > 1) throw new Error('Más de una PR abierta para head/base; requiere revisión.');
   let pr = refreshedPrs[0] || prs[0];
   if (!pr && previous?.phase === 'pr_intent') throw new Error('Creación de PR ambigua; no hay PR observable. Revisión manual necesaria antes de repetir.');
   if (!pr) {
     await save('pr_intent', { commitSha: head });
     await h(['pr', 'create', '--repo', repo, '--head', `${repo.split('/')[0]}:${job.branch}`, '--base', dest.baseBranch, '--title', job.title.slice(0, 120), '--body', `Integración automática del job ${job.id} (recibo ${intent.receiptId}).`]);
-    const found = await h(['pr', 'list', '--repo', repo, '--head', `${repo.split('/')[0]}:${job.branch}`, '--base', dest.baseBranch, '--state', 'open', '--json', 'number,url,headRefOid,baseRefOid']);
-    pr = JSON.parse(found || '[]')[0];
+    const found = await h(['pr', 'list', '--repo', repo, '--head', job.branch, '--base', dest.baseBranch, '--state', 'open', '--limit', '100', '--json', pullRequestIdentityFields]);
+    const createdPrs = sameRepositoryPullRequests(JSON.parse(found || '[]'), repo, job.branch, dest.baseBranch);
+    if (createdPrs.length > 1) throw new Error('Más de una PR abierta para head/base; requiere revisión.');
+    pr = createdPrs[0];
     if (!pr) throw new Error('PR no confirmada tras crearla; necesita revisión.');
   }
   if (pr.headRefOid !== head) throw new Error('La PR abierta apunta a un commit diferente del aprobado.');
@@ -130,27 +162,45 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   const checkReadiness = async () => {
     const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
     const checks = detail.statusCheckRollup;
-    const ready = detail.state === 'OPEN' && detail.headRefOid === head && detail.mergeable === 'MERGEABLE'
-      && Array.isArray(checks) && checks.length > 0
-      && checks.every(check => check?.conclusion === 'SUCCESS');
-    return { ready, detail };
+    const summary = Array.isArray(checks) ? checks.slice(0, 80).map(check => ({ name: String(check?.name || check?.context || '').slice(0, 160), status: String(check?.status || '').slice(0, 40), conclusion: String(check?.conclusion || '').slice(0, 40) })) : [];
+    let failure = detail.state !== 'OPEN' ? 'La PR dejó de estar abierta.'
+      : detail.headRefOid !== head || detail.baseRefOid !== base ? 'La PR cambió de commit fuente o base; requiere nueva revisión.'
+      : detail.mergeable === 'CONFLICTING' ? 'La PR tiene conflictos.' : '';
+    if (!failure && Array.isArray(checks) && checks.some(check => check?.conclusion && !['SUCCESS', 'PENDING'].includes(check.conclusion))) failure = 'Un check terminó sin aprobación.';
+    const ready = !failure && detail.mergeable === 'MERGEABLE' && Array.isArray(checks) && checks.length > 0
+      && checks.every(check => check?.conclusion === 'SUCCESS' && !['QUEUED', 'IN_PROGRESS', 'WAITING', 'PENDING'].includes(check.status));
+    return { ready, failure, checks: summary, mergeable: detail.mergeable };
   };
-  const initialChecks = await checkReadiness();
-  if (!initialChecks.ready) {
-    await save('checks_pending', { prNumber: pr.number, prUrl: pr.url });
-    throw new Error('PR pendiente de checks, conflicto o revisión; necesita atención.');
-  }
-  if (unresolvedMergeIntent) throw new Error('Merge previo ambiguo y la PR sigue abierta; confirma el estado en GitHub antes de cualquier nueva acción.');
-  if (previous?.phase === 'merge_intent') {
-    const state = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergedAt,mergeCommit']));
-    if (state.state === 'MERGED' && sha(state.mergeCommit?.oid)) { await save('complete', { prNumber: pr.number, prUrl: pr.url, commitSha: head, mergeSha: state.mergeCommit.oid, mergedAt: state.mergedAt, reconciled: true }); return record; }
-  }
-  // Re-read immediately before the mutation so a newly pending/failed check cannot race the merge.
-  const finalChecks = await checkReadiness();
-  if (!finalChecks.ready) {
-    await save('checks_pending', { prNumber: pr.number, prUrl: pr.url });
-    throw new Error('PR pendiente de checks, conflicto o revisión; necesita atención.');
-  }
+  const deadline = checksTimeoutMs === null ? Infinity : clock() + checksTimeoutMs;
+  let lastChecks;
+  const waitUntilReady = async () => {
+    for (;;) {
+      checkAbort();
+      const result = await checkReadiness();
+      checkAbort();
+      if (result.ready) {
+        record.checks = result.checks;
+        record.checkState = 'passed';
+        record.checkedAt = now();
+        delete record.waitTimedOut;
+        return;
+      }
+      const signature = JSON.stringify(result);
+      if (signature !== lastChecks || result.failure || clock() >= deadline) {
+        lastChecks = signature;
+        await save('checks_pending', { prNumber: pr.number, prUrl: pr.url, checks: result.checks,
+          checkState: result.failure ? 'failed' : 'waiting', checkedAt: now(),
+          ...(result.failure ? { error: result.failure } : {}), ...(clock() >= deadline ? { waitTimedOut: true } : {}) });
+      }
+      if (result.failure) throw Object.assign(new Error(`PR pendiente de revisión: ${result.failure}`), { code: 'github_checks_blocked' });
+      if (clock() >= deadline) throw Object.assign(new Error('PR pendiente de checks al agotar la espera acotada; conserva esta PR para revisión.'), { code: 'github_checks_timeout' });
+      await wait(Math.min(checksIntervalMs, deadline - clock()), ctx.signal);
+    }
+  };
+  await waitUntilReady();
+  // Re-read immediately before the mutation; a newly queued check is awaited
+  // within the same deadline, while a changed head/base or terminal failure blocks.
+  await waitUntilReady();
   await save('merge_intent', { prNumber: pr.number, prUrl: pr.url });
   await h(['pr', 'merge', String(pr.number), '--repo', repo, '--merge', '--match-head-commit', head]);
   const merged = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergedAt,mergeCommit']));
@@ -209,12 +259,26 @@ async function untrackedFingerprint(workspace, run) {
   return hash.digest();
 }
 export async function captureIntegrationSnapshot(workspace) {
-  const run = async args => (await exec('git', args, { cwd: workspace, env: safeEnv(), encoding: null, windowsHide: true, shell: false, timeout: 10_000, maxBuffer: 2_000_000 })).stdout;
+  const { git } = createIntegrationCommandAdapters({ timeoutMs: 10_000 });
+  const run = args => git(args, workspace);
   return diffFingerprint(await run(['status', '--porcelain=v1', '-z']), await run(['diff', '--binary', 'HEAD']), await run(['diff', '--cached', '--binary']), await untrackedFingerprint(workspace, run));
-}export async function integrateGitHubDefault(job, ctx, options = {}) {
+}
+
+export function createIntegrationCommandAdapters({ signal, executeCommand = exec, timeoutMs = 30_000 } = {}) {
   const invoke = async (exe, args, cwd) => {
-    try { return (await exec(exe, args, { cwd, env: safeEnv(), encoding: 'utf8', windowsHide: true, shell: false, timeout: 30_000, maxBuffer: 1_000_000 })).stdout.trim(); }
+    const binary = exe === 'git' && ['status', 'diff', 'ls-files'].includes(args[0]);
+    try {
+      const { stdout } = await executeCommand(exe, args, { cwd, env: safeEnv(), encoding: null, windowsHide: true, shell: false,
+        signal, timeout: timeoutMs, maxBuffer: binary ? 2_000_000 : 1_000_000 });
+      // These fields are length-framed bytes in the approval hash. Decoding or
+      // trimming them changes porcelain columns, NUL paths and diff endings.
+      return binary ? bytes(stdout) : bytes(stdout).toString('utf8').trim();
+    }
     catch { throw new Error(`${exe} falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar.`); }
   };
-  return integrateGitHub(job, ctx, { git: (args, cwd) => invoke('git', args, cwd), gh: (args, cwd) => invoke('gh', args, cwd), ...options });
+  return { git: (args, cwd) => invoke('git', args, cwd), gh: (args, cwd) => invoke('gh', args, cwd) };
+}
+
+export async function integrateGitHubDefault(job, ctx, { executeCommand = exec, ...options } = {}) {
+  return integrateGitHub(job, ctx, { ...createIntegrationCommandAdapters({ signal: ctx.signal, executeCommand }), ...options });
 }

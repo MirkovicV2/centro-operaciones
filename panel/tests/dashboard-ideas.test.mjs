@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireLock, releaseLock, loadState } from '../queue.mjs';
 
-test('HTTP panel saves idea, configures checkout, keeps busy send durable and queues without autoRun', async t => {
+test('HTTP panel blocks legacy direct idea sends before creating jobs', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'panel-ideas-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'workspaces', 'isolated', '.git'), { recursive: true });
@@ -29,27 +29,18 @@ test('HTTP panel saves idea, configures checkout, keeps busy send durable and qu
   };
   const project = (await api('/api/projects', { name: 'Proyecto HTTP', business: 'agency' })).value;
   const idea = (await api('/api/ideas', { business: 'agency', projectId: project.id, text: 'Idea HTTP para desarrollar', focus: 'mixed', operationId: 'capture-http-1234' })).value;
-  const missing = await api(`/api/ideas/${idea.id}/send`, { kind: 'code' });
-  assert.equal(missing.value.job, undefined); assert.match(missing.value.message, /checkout/);
-  assert.equal((await api(`/api/projects/${project.id}/update`, { checkout: '../outside' })).status, 400);
-  assert.equal((await api(`/api/projects/${project.id}/update`, { checkout: 'workspaces/isolated', baseBranch: 'main' })).status, 200);
-  const confirmation = { projectId: project.id, checkout: 'workspaces/isolated', branch: 'main', baseBranch: 'main', objective: 'Implementar flujo HTTP', successCriteria: 'Verificar comportamiento HTTP sin ejecutar' };
-  const lock = await acquireLock(root);
-  try {
-    const sends = await Promise.all([1, 2].map(() => api(`/api/ideas/${idea.id}/send`, { kind: 'code', confirmation })));
-    sends.forEach(result => { assert.equal(result.value.started, undefined); assert.equal(result.value.job, undefined); });
-    const busy = (await api('/api/state')).value;
-    assert.equal(busy.executor.available, false); assert.equal(busy.ideas.length, 1);
-  } finally { await releaseLock(lock); }
+  const legacy = await api(`/api/ideas/${idea.id}/send`, { kind: 'code' });
+  assert.equal(legacy.status, 409);
+  assert.match(legacy.value.error, /coordinador/);
   const state = (await api('/api/state')).value;
-  assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].state, 'queued'); assert.equal(state.jobs[0].attempts, 0);
-  assert.equal(state.settings.autoRun, false);
-  assert.equal((await api('/api/run', {})).status, 409);
-  assert.equal((await loadState(root)).jobs[0].attempts, 0);
-  assert.equal(state.checkouts[0].value, 'workspaces/isolated');
-  const again = await api(`/api/ideas/${idea.id}/send`, { kind: 'code' });
-  assert.equal(again.value.existing, true); assert.equal(again.value.started, undefined);
-  assert.equal((await loadState(root)).jobs.length, 1);
+  assert.equal(state.jobs.length, 0, 'legacy direct-send route must not create a job');
+  assert.equal(state.coordinatorRequests.length, 0, 'no coordinator request is created by the rejected legacy route');
+  assert.equal(state.settings.runtime.pid, child.pid);
+  assert.equal(state.settings.runtime.entry, app);
+  for (const name of ['dashboard.mjs', 'request-trace.mjs', 'knowledge-access.mjs', 'requests-view.js']) assert.ok(Object.keys(state.settings.runtime.fingerprints).some(file => path.basename(file) === name));
+  assert.ok(Object.values(state.settings.runtime.fingerprints).every(hash => /^[a-f0-9]{64}$/.test(hash)));
   const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-  for (const id of ['idea-checkout', 'idea-send-status', 'save-idea-development', 'save-idea-only', 'run-next']) assert.match(html, new RegExp(`id="${id}"`));
+  for (const id of ['idea-checkout', 'idea-send-status', 'save-idea-only', 'run-next', 'coordinator-requests-list']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /Guardar y enviar al coordinador/);
+  assert.doesNotMatch(html, /Guardar y enviar a desarrollo|Guardar y enviar al planificador/);
 });

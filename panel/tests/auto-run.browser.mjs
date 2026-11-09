@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { loadState, summarize, addJob } from '../../queue.mjs';
 import { confirmSubmission, readAutoRun, setAutoRun, createAutoRunner } from '../../auto-run.mjs';
 import { createProject, loadDashboardState } from '../agency-assistant/dashboard-state.mjs';
+import { submitTaskToCoordinator, routeTaskFromCoordinator } from '../agency-assistant/coordinator-inbox.mjs';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : '../../workspaces/portfolio-motion/node_modules/playwright/index.mjs');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-browser-'));
 let browser;
@@ -18,6 +19,8 @@ try {
   const start = source.indexOf('async function handleApi('), end = source.indexOf('\nconst server =', start);
   const localCheck = source.slice(source.indexOf('function assertLocalRequest('), source.indexOf('\nasync function readJson('));
   const context = vm.createContext({ QUEUE_ROOT: root, PORT: 43893, URL, loadDashboardState, confirmSubmission, setAutoRun,
+    submitTaskToCoordinator: (queueRoot, input) => submitTaskToCoordinator(queueRoot, input, { notify: async () => ({ status: 'sent', runId: 'run_browser_fixture', messageId: 'msg_browser_fixture' }) }),
+    routeTaskFromCoordinator,
     readJson: async request => request.body, send: (response, status, value) => Object.assign(response, { status, value }),
   });
   const handleApi = vm.runInContext(`${localCheck}\n${source.slice(start, end)}\nhandleApi`, context);
@@ -36,7 +39,7 @@ try {
     const request = route.request(), url = new URL(request.url());
     assert.equal(url.origin, 'http://127.0.0.1:43893');
     if (request.method() === 'POST') {
-      assert.ok(['/api/auto-run', '/api/jobs'].includes(url.pathname));
+      assert.ok(['/api/auto-run', '/api/jobs'].includes(url.pathname) || /^\/api\/coordinator\/requests\/[a-zA-Z0-9_-]+\/route$/.test(url.pathname));
       const body = request.postDataJSON(); posts.push({ route: url.pathname, body });
       const response = {};
       await handleApi({ method: 'POST', body, headers: { host: url.host, origin: url.origin } }, response, url);
@@ -45,12 +48,12 @@ try {
     if (url.pathname === '/api/state') {
       const queue = await loadState(root);
       return route.fulfill({ json: { automation: await readAutoRun(root), executor: { available: true }, checkouts: [], queue: summarize(queue), jobs: queue.jobs,
-        projects: [project], ideas: [], questions: [], domains: [], tasks: [], messages: [], settings: { autoRun: false, vaultPath: '', telegram: false } } });
+        projects: [project], ideas: [], questions: [], coordinatorRequests: (await loadDashboardState(root)).coordinatorRequests, domains: [], tasks: [], messages: [], settings: { autoRun: false, vaultPath: '', telegram: false } } });
     }
     if (url.pathname === '/api/config') return route.fulfill({ json: { autoRun: false, vaultPath: '' } });
     if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false } });
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-    assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js'].includes(name));
+    assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js', 'requests-view.js'].includes(name));
     return route.fulfill({ body: await fs.readFile(new URL(`../dashboard/${name}`, import.meta.url)), contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });
   });
   await page.goto('http://127.0.0.1:43893/#trabajos');
@@ -68,8 +71,22 @@ try {
     await page.locator('#job-form [name=prompt]').fill('Objetivo verificable del panel');
     await page.locator('#job-form [name=successCriteria]').fill('Entregar un plan priorizado');
     await page.locator('#job-form [type=submit]').click();
-    await page.locator('dialog[open]').getByRole('button', { name: 'Confirmar y encolar', exact: true }).click();
+    await page.locator('dialog[open]').getByRole('button', { name: 'Enviar al coordinador', exact: true }).click();
     await page.locator('#job-form').waitFor({ state: 'hidden' });
+    const request = (await loadDashboardState(root)).coordinatorRequests.find(item => item.snapshot.title === title);
+    assert.ok(request, 'the panel persists the request before routing');
+    if (request.status !== 'routed') {
+      assert.equal(request.status, 'pending');
+      assert.equal((await loadState(root)).jobs.some(job => job.id.startsWith(request.id)), false, 'notification alone cannot enqueue');
+      assert.equal((await readAutoRun(root)).receipts.some(receipt => receipt.jobId.startsWith(request.id)), false, 'notification alone cannot grant automatic eligibility');
+    }
+    // Simulate the coordinator's explicit route over the same intercepted API.
+    const routed = await page.evaluate(async requestId => {
+      const response = await fetch(`/api/coordinator/requests/${requestId}/route`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'analysis', reason: 'Decisión explícita simulada; sin agente real.' }) });
+      return { status: response.status, value: await response.json() };
+    }, request.id);
+    assert.equal(routed.status, 200);
+    assert.equal(routed.value.request.status, 'routed');
   };
   await submit('Nuevo automático');
   assert.equal(posts.filter(item => item.route === '/api/jobs').length, 1);

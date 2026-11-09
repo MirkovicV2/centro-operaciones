@@ -46,7 +46,7 @@ try {
         if (url.pathname === '/api/config') return route.fulfill({ json: { autoRun: false, vaultPath: '' } });
         if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false, nodes: [], edges: [] } });
         const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-        assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js'].includes(name), name);
+        assert.ok(['index.html', 'app.js', 'style.css', 'ideas-view.js', 'requests-view.js'].includes(name), name);
         return route.fulfill({ body: await fs.readFile(new URL(name, dashboard)), contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });
       });
       await page.goto('http://127.0.0.1:43901/#trabajos', { waitUntil: 'domcontentloaded' });

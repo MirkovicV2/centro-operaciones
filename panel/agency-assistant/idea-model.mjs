@@ -1,9 +1,10 @@
 import path from 'node:path';
+import { withInboxLock } from './inbox-lock.mjs';
 
 const locks = new Map();
 export function withIdeaLock(root, id, action) {
   const key = `${path.resolve(root)}:${id}`;
-  const pending = (locks.get(key) || Promise.resolve()).then(action);
+  const pending = (locks.get(key) || Promise.resolve()).then(() => withInboxLock(root, `idea:${id}`, action));
   locks.set(key, pending.catch(() => {}));
   return pending;
 }

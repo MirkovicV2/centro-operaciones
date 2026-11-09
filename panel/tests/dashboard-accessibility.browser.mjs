@@ -43,13 +43,14 @@ async function auditRoot(root, rules) {
 try {
   for (const width of [320, 390, 800, 1440]) {
     const page = await browser.newPage({ viewport: { width, height: 900 }, reducedMotion: 'reduce' });
+    const snapshot = structuredClone(data);
     const errors = [], posts = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.route('**/*', async route => {
       const url = new URL(route.request().url());
       assert.equal(url.origin, 'http://127.0.0.1:43891', 'external request forbidden');
       if (route.request().method() !== 'GET') { posts.push(url.pathname); return route.abort(); }
-      if (url.pathname === '/api/state') return route.fulfill({ json: data });
+      if (url.pathname === '/api/state') return route.fulfill({ json: snapshot });
       if (url.pathname === '/api/config') return route.fulfill({ json: data.settings });
       if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false, nodes: [], edges: [] } });
       const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
@@ -57,7 +58,7 @@ try {
     });
     await page.goto('http://127.0.0.1:43891/');
     await page.locator('#action-summary .action-group').first().waitFor();
-    await page.locator('a[href="#trabajos"]').click();
+    await page.locator('.nav-link[href="#trabajos"]').click();
     await page.locator('#history > summary').click();
     const historyRoot = await visibleRoot(page, '#history', 'Historial', width);
     const historyControls = historyRoot.locator('.history-filters input, .history-filters select');
@@ -128,6 +129,49 @@ try {
       });
     });
     for (const result of contrast) assert.ok(result.ratio >= 4.5, JSON.stringify(result));
+    if (width === 320 || width === 1440) {
+      const idea = page.locator('#idea-i details');
+      await idea.locator('summary').click();
+      await idea.locator('summary').blur();
+      snapshot.ideas[0].text = 'Idea actualizada durante la lectura';
+      await page.evaluate(() => refresh());
+      assert.equal(await idea.evaluate(element => element.open), true);
+      assert.match(await idea.textContent(), /actualizada durante la lectura/);
+
+      const live = snapshot.jobs[0];
+      live.state = 'running'; live.attempts = 1; live.prompt = 'Encargo simulado';
+      snapshot.automation = { businesses: { agency: true }, receipts: [], history: [] };
+      const stage = live.workflow.steps[0];
+      stage.status = 'running'; stage.dispatchId = 'ctx_live';
+      stage.summary = 'Informe simulado\n'.repeat(30);
+      await page.locator('.nav-link[href="#trabajos"]').click();
+      await page.evaluate(() => refresh());
+      const receipts = page.locator('#automation-controls details');
+      await receipts.locator('summary').click();
+      snapshot.automation.history.push({ type: 'claimed', jobId: live.id });
+      await page.evaluate(() => refresh());
+      assert.equal(await receipts.evaluate(element => element.open), true);
+      const card = page.locator('#job-agency-queued');
+      await card.locator('.job-summary').click();
+      const report = card.getByText('Ver informe de etapa', { exact: true });
+      await report.click();
+      await card.locator('.workflow-stage-report').evaluate(element => { element.scrollTop = 120; });
+      await report.focus();
+      stage.status = 'succeeded'; stage.summary += 'Actualización visible';
+      await page.evaluate(() => refresh());
+      assert.equal(await card.evaluate(element => element.open), true);
+      assert.equal(await report.evaluate(element => element.parentElement.open && document.activeElement === element), true);
+      assert.equal(await card.locator('.workflow-stage-report').evaluate(element => element.scrollTop), 120);
+      assert.match(await card.locator('.workflow-stage-report').textContent(), /Actualización visible/);
+      live.state = 'succeeded';
+      await page.evaluate(() => refresh());
+      assert.equal(await card.evaluate(element => element.open && element.closest('#history').open), true);
+      assert.equal(await report.evaluate(element => element.parentElement.open && document.activeElement === element), true);
+      await card.locator('.job-summary').click();
+      live.result = { text: 'Entrega simulada' };
+      await page.evaluate(() => refresh());
+      assert.equal(await card.evaluate(element => element.open), false);
+    }
     assert.deepEqual(errors, []); assert.deepEqual(posts, []);
     evidence.push({ axeScope: 'visible active view root (#history, #proyectos, #ideas)', scenario: 'history-open-visible-controls', ...layout, projectScenario: 'projects-visible-baseBranch-and-status-filter', projectContext, ideasScenario: 'ideas-visible-project-filter', ideasContext, contrast, audit, projectAudit, ideasAudit });
     console.log(`PASS ${width}px: axe scoped al root visible; controles de Historial/Proyectos/Ideas presentes; sin overflow; contraste >=4.5; sin POST ni errores JS`);

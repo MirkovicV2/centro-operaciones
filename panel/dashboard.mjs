@@ -3,12 +3,21 @@ import http from 'node:http';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { projectMemory } from './project-memory.mjs';
 import { resolveOperationsRoot } from './operations-root.mjs';
-import { addJob, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob } from './queue.mjs';
-import { inspectDestination } from '../project-destination.mjs';
-import { confirmSubmission, readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt } from '../auto-run.mjs';
+import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
+import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
+import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt } from '../auto-run.mjs';
 import { createWorker } from '../providers.mjs';
-import { checkoutChoices, sendIdeaToQueue, reconcileIdeaRequests } from './agency-assistant/idea-workflow.mjs';
+import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
+import { submitTaskToCoordinator, routeTaskFromCoordinator, checkCoordinatorRequestNotice } from './agency-assistant/coordinator-inbox.mjs';
+import { reportCoordinatorQuestions, answerCoordinatorQuestion, readCoordinatorRequest, withdrawCoordinatorRequest, respondToCoordinatorRequest } from './agency-assistant/coordinator-dialogue.mjs';
+import { buildRequestTraces, createPreparationObserver, readRequestTrace } from './request-trace.mjs';
+import { queryRequestContext, queryJobContext, readContextConsultations } from './knowledge-access.mjs';
+import { createCoordinatorHealth } from './coordinator-health.mjs';
+import { authorizeWorkerHandoff, verifyWorkerQuestion, questionsForEscalation } from './worker-decisions.mjs';
+import { resumeCoordinatedDispatch, retryCoordinatedCheckout } from './dispatch-recovery.mjs';
 import { loadState as loadAssistantState } from './agency-assistant/store.mjs';
 import { runBot } from './agency-assistant/bot.mjs';
 import {
@@ -17,26 +26,52 @@ import {
   saveDashboardConfig,
   safeMarkdownText,
   writeJobNote,
+  writeProjectMemoryNote,
 } from './agency-assistant/knowledge.mjs';
 import {
   answerQuestion,
   captureJobQuestions,
+  jobQuestions,
+  reconcileContinuations,
+  retrySavedContinuation,
   markMessageHandled,
   createProject,
   updateProject,
   createIdea,
   mutateIdea,
-  extractQuestions,
   loadDashboardState,
+  changeDashboardState,
   markExported,
-  recordJobConfirmation,
 } from './agency-assistant/dashboard-state.mjs';
 
 const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const QUEUE_ROOT = resolveOperationsRoot(APP_ROOT);
+const coordinatorHealth = createCoordinatorHealth(QUEUE_ROOT);
 const PORT = Number(process.env.CENTRO_OPERATIONS_PORT || 4187);
+const tailscaleAccess = await fs.readFile(path.join(APP_ROOT, 'data', 'tailscale-access.json'), 'utf8')
+  .then(content => {
+    const { hostname, login } = JSON.parse(content);
+    if (!/^(?:[a-z0-9-]+\.){2,}ts\.net$/.test(hostname) || typeof login !== 'string' || !login.trim()) {
+      throw new Error('Configuración de acceso Tailscale inválida.');
+    }
+    return { hostname, login };
+  })
+  .catch(error => {
+    if (error.code !== 'ENOENT') console.warn('Acceso Tailscale desactivado: revisa la configuración local.');
+    return null;
+  });
+const runtime = Object.freeze({
+  pid: process.pid,
+  startupAt: new Date().toISOString(),
+  entry: fileURLToPath(import.meta.url),
+  fingerprints: Object.fromEntries(await Promise.all(['dashboard.mjs', '../queue.mjs', '../providers.mjs', '../orca-provider.mjs', 'coordinator-bridge.mjs', 'coordinator-routing.mjs', '../coordination.mjs', 'worker-decisions.mjs', 'quality-handoff.mjs', 'project-memory.mjs', 'agency-assistant/coordinator-dialogue.mjs', 'request-trace.mjs', 'knowledge-access.mjs', 'dashboard/requests-view.js'].map(async relative => {
+    const file = fileURLToPath(new URL(relative, import.meta.url));
+    return [file, createHash('sha256').update(await fs.readFile(file)).digest('hex')];
+  }))),
+});
 let shutdownRequested = false;
-const autoRunner = createAutoRunner(QUEUE_ROOT, { worker: createWorker() });
+const observePreparation = createPreparationObserver();
+const autoRunner = createAutoRunner(QUEUE_ROOT, { worker: createWorker(), parallelBusinesses: true });
 
 function send(response, status, body, contentType = 'application/json; charset=utf-8') {
   response.writeHead(status, {
@@ -49,10 +84,26 @@ function send(response, status, body, contentType = 'application/json; charset=u
   response.end(contentType.startsWith('application/json') ? JSON.stringify(body) : body);
 }
 
-function assertLocalRequest(request) {
-  const host = String(request.headers.host || '').split(':')[0].toLowerCase();
+function assertLocalRequest(request, tailscale = null) {
+  const authority = String(request.headers.host || '').toLowerCase();
+  const host = authority.split(':')[0];
+  const { origin } = request.headers;
+  const forwardedHost = request.headers['x-forwarded-host'];
+  if (forwardedHost !== undefined || request.headers['tailscale-user-login'] !== undefined || request.headers['tailscale-funnel-request'] !== undefined) {
+    if (!tailscale || request.socket?.remoteAddress !== '127.0.0.1'
+      || (authority !== tailscale.hostname && authority !== `${tailscale.hostname}:443`)
+      || String(forwardedHost).toLowerCase() !== authority
+      || request.headers['x-forwarded-proto'] !== 'https'
+      || request.headers['tailscale-funnel-request'] !== undefined
+      || request.headers['tailscale-user-login'] !== tailscale.login) {
+      throw Object.assign(new Error('Acceso restringido a la cuenta autorizada en Tailscale.'), { status: 403 });
+    }
+    if ((request.method !== 'GET' || origin !== undefined) && origin !== `https://${tailscale.hostname}`) {
+      throw Object.assign(new Error('Origen de petición no permitido.'), { status: 403 });
+    }
+    return;
+  }
   if (!['127.0.0.1', 'localhost'].includes(host)) throw new Error('El panel solo acepta conexiones locales.');
-  const origin = request.headers.origin;
   if (origin) {
     const originUrl = new URL(origin);
     if (!['127.0.0.1', 'localhost'].includes(originUrl.hostname.toLowerCase()) || Number(originUrl.port || 80) !== PORT) {
@@ -81,8 +132,10 @@ async function botRunning() {
 }
 
 async function dashboardData() {
-  const executor = await recoverDashboardQueue(QUEUE_ROOT);
-  if (executor.available) await reconcileIdeaRequests(QUEUE_ROOT);
+  const byBusiness = Object.fromEntries(await Promise.all(QUEUE_BUSINESSES.map(async business =>
+    [business, await recoverDashboardQueue(QUEUE_ROOT, { business })])));
+  const available = Object.values(byBusiness).some(executor => executor.available);
+  const executor = { available, ...(available ? {} : { reason: byBusiness.agency.reason }), byBusiness };
   const [queue, assistant, inbox, config, isBotRunning] = await Promise.all([
     loadQueue(QUEUE_ROOT),
     loadAssistantState(),
@@ -91,6 +144,9 @@ async function dashboardData() {
     botRunning(),
   ]);
   const queueSummary = summarize(queue);
+  const automation = await readAutoRun(QUEUE_ROOT);
+  const knowledge = await readContextConsultations(QUEUE_ROOT, { requestIds: inbox.coordinatorRequests.map(item => item.id), jobIds: queue.jobs.map(item => item.id) });
+  const requestTraces = await buildRequestTraces(QUEUE_ROOT, { requests: inbox.coordinatorRequests.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))), jobs: queue.jobs, questions: inbox.questions, automation, knowledge, observePreparation });
   return {
     executor,
     checkouts: await checkoutChoices(QUEUE_ROOT),
@@ -112,12 +168,43 @@ async function dashboardData() {
       };
     }),
     questions: inbox.questions.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+    continuations: inbox.continuations,
     ideas: inbox.ideas,
+    coordinatorRequests: inbox.coordinatorRequests.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+    requestTraces,
+    coordination: await coordinatorHealth(),
     messages: inbox.messages.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
     exportedCount: Object.keys(inbox.exportedJobs).length,
-    automation: await readAutoRun(QUEUE_ROOT),
-    settings: { vaultPath: config.vaultPath, queueRoot: QUEUE_ROOT, autoRun: false, telegram: isBotRunning },
+    automation,
+    settings: { vaultPath: config.vaultPath, queueRoot: QUEUE_ROOT, autoRun: false, telegram: isBotRunning, runtime },
   };
+}
+
+let coordinatorRecoveryRunning = false;
+async function resumeCoordinatorRoutes() {
+  if (coordinatorRecoveryRunning) return;
+  coordinatorRecoveryRunning = true;
+  try {
+  const inbox = await loadDashboardState(QUEUE_ROOT);
+  for (const request of inbox.coordinatorRequests.filter(item => !['withdrawn', 'answered'].includes(item.status)
+    && (item.notification?.status === 'pending' || item.answerNotices?.some(notice => notice.notification?.status === 'pending'))).slice(0, 3)) {
+    try { await checkCoordinatorRequestNotice(QUEUE_ROOT, request.id); } catch { /* Durable intent remains pending. */ }
+  }
+  for (const request of inbox.coordinatorRequests.filter(item => item.status === 'routing' && item.route?.kind)) {
+    try {
+      if (request.kind === 'idea') await routeCoordinatorIdea(QUEUE_ROOT, request.id, request.route.kind, request.route.confirmation || {});
+      else await routeTaskFromCoordinator(QUEUE_ROOT, request.id, request.route.kind, { reason: request.route.reason || '', confirmation: request.route.confirmation });
+    } catch (error) {
+      await changeDashboardState(QUEUE_ROOT, state => {
+        const current = state.coordinatorRequests.find(item => item.id === request.id);
+        if (current?.status === 'routing') {
+          current.route = { ...current.route, lastAttemptAt: new Date().toISOString(), lastError: String(error.message || 'No se pudo reanudar la ruta.').slice(0, 1000) };
+          current.updatedAt = new Date().toISOString();
+        }
+      });
+    }
+  }
+  } finally { coordinatorRecoveryRunning = false; }
 }
 
 async function syncFinishedJobs() {
@@ -125,30 +212,64 @@ async function syncFinishedJobs() {
   const queue = await loadQueue(QUEUE_ROOT);
   const inbox = await loadDashboardState(QUEUE_ROOT);
   for (const job of queue.jobs) {
-    if (job.state === 'succeeded') {
-      const questions = extractQuestions(job.result?.text ?? '');
-      if (questions.length && !inbox.questions.some(item => item.jobId === job.id)) {
+    if (['succeeded', 'needs_attention', 'running'].includes(job.state)) {
+      const questions = jobQuestions(job);
+      if (questions.length && !(job.state === 'running' && job.coordination)) {
         await captureJobQuestions(QUEUE_ROOT, job, questions);
       }
     }
-    if (!['succeeded', 'needs_attention'].includes(job.state)) continue;
+    if (!['succeeded', 'needs_attention', 'cancelled'].includes(job.state)) continue;
     if (!config.vaultPath) continue;
-    const saved = await writeJobNote(QUEUE_ROOT, job);
-    if (saved.path && (inbox.exportedJobs[job.id]?.notePath !== saved.path || saved.created)) {
-      await markExported(QUEUE_ROOT, job.id, saved.path);
+    const saved = await writeJobNote(QUEUE_ROOT, job, { revision: queue.revision });
+    const visiblePath = saved.currentPath || saved.path;
+    if (saved.current !== false && visiblePath && (inbox.exportedJobs[job.id]?.notePath !== visiblePath || saved.created)) {
+      await markExported(QUEUE_ROOT, job.id, visiblePath);
     }
+  }
+  await reconcileContinuations(QUEUE_ROOT);
+}
+
+async function syncProjectMemory() {
+  const [config, queue, inbox] = await Promise.all([readDashboardConfig(QUEUE_ROOT), loadQueue(QUEUE_ROOT), loadDashboardState(QUEUE_ROOT)]);
+  if (!config.vaultPath) return;
+  for (const project of inbox.projects) {
+    const memory = projectMemory({ business: project.business, projectId: project.id }, queue.jobs);
+    try { await writeProjectMemoryNote(config.vaultPath, project, memory, queue.revision); }
+    catch (error) { console.warn(`No se pudo actualizar la memoria de ${project.id}: ${error.code || error.message}`); }
   }
 }
 
-async function handleApi(request, response, url) {
+let qualitySyncRunning = false;
+async function syncQuality() {
+  if (qualitySyncRunning) return;
+  qualitySyncRunning = true;
+  try { await syncQualityHandoffs(QUEUE_ROOT); }
+  catch { console.warn('La sincronización de calidad se reintentará.'); }
+  finally { qualitySyncRunning = false; }
+}
+
+async function handleApi(request, response, url, tailscale = null) {
   if (request.method === 'GET' && url.pathname === '/api/state') return send(response, 200, await dashboardData());
+  if (request.method === 'GET' && url.pathname === '/api/coordinators') return send(response, 200, await coordinatorHealth());
+  const coordinatorRead = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)$/);
+  if (request.method === 'GET' && coordinatorRead) return send(response, 200, await readCoordinatorRequest(QUEUE_ROOT, coordinatorRead[1]));
+  const traceRead = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/trace$/);
+  if (request.method === 'GET' && traceRead) return send(response, 200, await readRequestTrace(QUEUE_ROOT, traceRead[1], { observePreparation }));
   if (request.method === 'GET' && url.pathname === '/api/graph') return send(response, 200, await buildKnowledgeGraph(QUEUE_ROOT, url.searchParams.get('business')));
   if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
-  assertLocalRequest(request);
+  assertLocalRequest(request, tailscale);
   const body = await readJson(request);
+  const contextRequest = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/context$/);
+  if (contextRequest) return send(response, 200, await queryRequestContext(QUEUE_ROOT, contextRequest[1], body));
+  const contextJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/context$/);
+  if (contextJob) return send(response, 200, await queryJobContext(QUEUE_ROOT, contextJob[1], body));
+  const coordinatorResponse = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/response$/);
+  if (coordinatorResponse) return send(response, 200, await respondToCoordinatorRequest(QUEUE_ROOT, coordinatorResponse[1], body));
 
   if (url.pathname === '/api/auto-run') return send(response, 200, await setAutoRun(QUEUE_ROOT, body.business, body.enabled, { confirm: body.confirm === true }));
+  const checkoutRetry = url.pathname.match(/^\/api\/auto-run\/([a-zA-Z0-9_-]+)\/retry-checkout$/);
+  if (checkoutRetry) return send(response, 200, await retryCoordinatedCheckout(QUEUE_ROOT, checkoutRetry[1], { confirm: body.confirm === true }));
   const receiptReview = url.pathname.match(/^\/api\/auto-run\/([a-zA-Z0-9_-]+)\/review$/);
   if (receiptReview) return send(response, 200, await reviewAutoReceipt(QUEUE_ROOT, receiptReview[1], { confirm: body.confirm === true }));
 
@@ -167,90 +288,122 @@ async function handleApi(request, response, url) {
   }
   const ideaMutation = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/(update|trash|archive|restore)$/);
   if (ideaMutation) return send(response, 200, await mutateIdea(QUEUE_ROOT, ideaMutation[1], ideaMutation[2], body));
-  const ideaSend = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/send$/);
-  if (ideaSend) {
-    const result = await sendIdeaToQueue(QUEUE_ROOT, ideaSend[1], body.kind, body.projectId, body.confirmation);
+  const coordinatorRequest = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/coordinator$/);
+  if (coordinatorRequest) return send(response, 200, await sendIdeaToCoordinator(QUEUE_ROOT, coordinatorRequest[1]));
+  const coordinatorRoute = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/route$/);
+  if (coordinatorRoute) {
+    const request = (await loadDashboardState(QUEUE_ROOT)).coordinatorRequests.find(item => item.id === coordinatorRoute[1]);
+    const result = request?.kind === 'idea'
+      ? await routeCoordinatorIdea(QUEUE_ROOT, coordinatorRoute[1], body.kind, { ...(body.confirmation || {}), reason: body.reason })
+      : await routeTaskFromCoordinator(QUEUE_ROOT, coordinatorRoute[1], body.kind, { reason: body.reason, confirmation: body.confirmation });
     return send(response, 200, result);
   }
+  const coordinatorNotice = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/notify$/);
+  if (coordinatorNotice) return send(response, 200, await checkCoordinatorRequestNotice(QUEUE_ROOT, coordinatorNotice[1]));
+  const workerHandoff = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/handoffs$/);
+  if (workerHandoff) return send(response, 200, await authorizeWorkerHandoff(QUEUE_ROOT, workerHandoff[1], body));
+  const qualityPlan = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/quality-plan$/);
+  if (qualityPlan) {
+    const item = await readCoordinatorRequest(QUEUE_ROOT, qualityPlan[1]);
+    return send(response, 200, await recordQualityPlan(QUEUE_ROOT, item, body));
+  }
+  const coordinatorQuestions = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/questions$/);
+  if (coordinatorQuestions) {
+    const item = await readCoordinatorRequest(QUEUE_ROOT, coordinatorQuestions[1]);
+    if (body.origin?.kind === 'quality-block') {
+      const origin = await verifyQualityQuestion(QUEUE_ROOT, item, body.origin);
+      return send(response, 200, await reportCoordinatorQuestions(QUEUE_ROOT, coordinatorQuestions[1], { ...body, origin }));
+    }
+    if (body.origin) {
+      const { job, step } = await verifyWorkerQuestion(QUEUE_ROOT, item, body.origin);
+      const questions = await captureJobQuestions(QUEUE_ROOT, job, questionsForEscalation(job, step, body.questions));
+      return send(response, 200, { requestId: item.id, jobId: job.id, mode: 'job-decisions', questions });
+    }
+    return send(response, 200, await reportCoordinatorQuestions(QUEUE_ROOT, coordinatorQuestions[1], body));
+  }
+  const coordinatorWithdraw = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/withdraw$/);
+  if (coordinatorWithdraw) return send(response, 200, await withdrawCoordinatorRequest(QUEUE_ROOT, coordinatorWithdraw[1]));
+  const ideaSend = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/send$/);
+  if (ideaSend) return send(response, 409, { error: 'El panel ya no inicia agentes directamente desde Ideas. Envía la idea al coordinador para que decida la ruta.' });
+  const resumeDispatch = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/resume$/);
+  if (resumeDispatch) return send(response, 200, await resumeCoordinatedDispatch(QUEUE_ROOT, resumeDispatch[1], { confirm: body.confirmReviewed === true }));
   const reviewedJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/(retry|resolve)$/);
   if (reviewedJob) {
     let job;
     if (reviewedJob[2] === 'retry') {
       const current = (await loadQueue(QUEUE_ROOT)).jobs.find(item => item.id === reviewedJob[1]);
       const receipt = current?.autoIntent?.eligible ? (await readAutoRun(QUEUE_ROOT)).receipts.find(item => item.jobId === current.id) : null;
-      job = receipt?.status === 'needs_attention'
-        ? await retryAutoReceipt(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true, noDispatchConfirmed: body.noDispatchConfirmed === true })
-        : await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
+      const confirm = body.confirmReviewed === true;
+      if (receipt?.status === 'needs_attention' && (stoppedDeveloperCheckpoint(current) || settledQaRevalidation(current))) {
+        job = await resumeCoordinatedDispatch(QUEUE_ROOT, current.id, { confirm });
+      } else {
+        job = receipt?.status === 'needs_attention'
+          ? await retryAutoReceipt(QUEUE_ROOT, reviewedJob[1], { confirm, noDispatchConfirmed: body.noDispatchConfirmed === true })
+          : await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm });
+      }
     } else {
       job = await resolveJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
     }
     return send(response, 200, job);
   }
   if (url.pathname === '/api/jobs') {
-    const prompt = String(body.prompt || '').trim();
-    const successCriteria = String(body.successCriteria || '').trim();
-    if (prompt.length < 4) throw new Error('Describe un objetivo concreto antes de encolar.');
-    if (successCriteria.length < 4 || successCriteria.length > 1800) throw new Error('Describe un criterio de éxito verificable (4–1800 caracteres).');
-    const projectId = String(body.projectId || '');
-    const projects = (await loadDashboardState(QUEUE_ROOT)).projects;
-    const project = projectId ? projects.find(item => item.id === projectId) : null;
-    if (projectId && (!project || project.business !== body.business)) throw new Error('El proyecto no existe o pertenece a otra línea de negocio.');
-    let destination;
-    if (body.kind === 'code') {
-      if (!project || !project.checkout || !project.branch) throw new Error('Configura el destino del proyecto antes de encolar.');
-      if (!project.baseBranch) throw new Error('Configura la rama base GitHub existente del proyecto antes de encolar.');
-      if (body.confirmation?.checkout !== project.checkout || body.confirmation?.branch !== project.branch || body.confirmation?.baseBranch !== (project.baseBranch || '') || body.confirmation?.projectId !== project.id) throw new Error('Confirma proyecto, checkout y ramas fuente/base.');
-      destination = await inspectDestination(QUEUE_ROOT, project.checkout, project.branch);
-      destination.repository = project.repository || '';
-      destination.baseBranch = project.baseBranch || '';
-    }
-    const submission = await confirmSubmission(QUEUE_ROOT, body.operationId, {
-      business: body.business,
-      projectId: project?.id,
-      projectName: project?.name,
-      kind: body.kind,
-      title: String(body.title || '').trim(),
-      prompt: `${prompt}\n\nCriterio de éxito:\n${successCriteria}`,
-      provider: body.provider || 'orca',
-      workspace: destination?.workspace,
-      branch: destination?.branch, destination,
-      isolated: !!destination,
-      maxUsd: Number(body.maxUsd || 0.1),
-    });
-    if (destination && submission.receipt) await recordJobConfirmation(QUEUE_ROOT, submission.receipt.jobId, body.business, destination);
-    const job = submission.job;
-    return send(response, job ? 201 : 202, { id: submission.receipt.jobId, receipt: submission.receipt, ...(job ? { business: job.business, kind: job.kind, title: job.title, state: job.state, provider: job.provider, workflow: job.workflow } : { state: 'confirmed_pending' }) });
+    const result = await submitTaskToCoordinator(QUEUE_ROOT, body);
+    return send(response, 202, result);
   }
   if (url.pathname === '/api/run') return send(response, 409, { error: 'No se drena la cola desde el panel. Solo se admiten recibos nuevos elegibles por su ID; la cola manual requiere run --execute con --id.' });
   const messageMatch = url.pathname.match(/^\/api\/messages\/([a-zA-Z0-9_-]+)\/handled$/);
   if (messageMatch) return send(response, 200, await markMessageHandled(QUEUE_ROOT, messageMatch[1]));
+  const retryContinuation = url.pathname.match(/^\/api\/continuations\/([a-zA-Z0-9_-]+)\/retry$/);
+  if (retryContinuation) return send(response, 200, await retrySavedContinuation(QUEUE_ROOT, retryContinuation[1]));
   const answerMatch = url.pathname.match(/^\/api\/questions\/([a-zA-Z0-9_-]+)\/answer$/);
-  if (answerMatch) return send(response, 200, await answerQuestion(QUEUE_ROOT, answerMatch[1], body.answer));
+  if (answerMatch) {
+    const question = (await loadDashboardState(QUEUE_ROOT)).questions.find(item => item.id === answerMatch[1]);
+    const answered = question?.coordinatorRequestId
+      ? await answerCoordinatorQuestion(QUEUE_ROOT, answerMatch[1], body.answer)
+      : await answerQuestion(QUEUE_ROOT, answerMatch[1], body.answer);
+    if (question?.origin?.kind === 'quality-block') void syncQuality();
+    return send(response, 200, answered);
+  }
   return send(response, 404, { error: 'No se encontró esta ruta.' });
 }
 
 const server = http.createServer(async (request, response) => {
   try {
-    assertLocalRequest(request);
+    assertLocalRequest(request, tailscaleAccess);
     const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
-    if (url.pathname.startsWith('/api/')) return await handleApi(request, response, url);
+    if (url.pathname.startsWith('/api/')) return await handleApi(request, response, url, tailscaleAccess);
     if (request.method !== 'GET') return send(response, 405, 'Método no permitido.', 'text/plain; charset=utf-8');
     const relative = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\//, '');
-    if (!['index.html', 'app.js', 'style.css', 'ideas-view.js'].includes(relative)) return send(response, 404, 'No encontrado.', 'text/plain; charset=utf-8');
-    const contentTypes = { 'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'ideas-view.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8' };
-    return send(response, 200, await fs.readFile(path.join(APP_ROOT, 'dashboard', relative), 'utf8'), contentTypes[relative]);
+    const contentTypes = {
+      'index.html': 'text/html; charset=utf-8',
+      'app.js': 'text/javascript; charset=utf-8',
+      'ideas-view.js': 'text/javascript; charset=utf-8',
+      'requests-view.js': 'text/javascript; charset=utf-8',
+      'style.css': 'text/css; charset=utf-8',
+      'panel.webmanifest': 'application/manifest+json; charset=utf-8',
+      'panel-icon-192.png': 'image/png',
+      'panel-icon-512.png': 'image/png',
+    };
+    if (!Object.hasOwn(contentTypes, relative)) return send(response, 404, 'No encontrado.', 'text/plain; charset=utf-8');
+    return send(response, 200, await fs.readFile(path.join(APP_ROOT, 'dashboard', relative)), contentTypes[relative]);
   } catch (error) {
-    return send(response, 400, { error: error.message || 'No se pudo completar la operación.' });
+    return send(response, [403, 409].includes(error.status) ? error.status : 400, { error: error.message || 'No se pudo completar la operación.', ...(error.code ? { code: error.code } : {}) });
   }
 });
 
 server.listen(PORT, '127.0.0.1', () => {
   autoRunner.start();
+  void resumeCoordinatorRoutes();
+  void syncQuality();
+  void syncProjectMemory().catch(() => {});
   console.log(`Panel local del Centro de Operaciones: http://127.0.0.1:${PORT}`);
   void syncFinishedJobs().catch(() => console.warn('La sincronización de Obsidian se reintentará.'));
 });
 
 setInterval(() => { void syncFinishedJobs().catch(() => console.warn('La sincronización de Obsidian se reintentará.')); }, 10_000).unref();
+setInterval(() => { void resumeCoordinatorRoutes().catch(() => {}); }, 10_000).unref();
+setInterval(() => { void syncQuality(); }, 10_000).unref();
+setInterval(() => { void syncProjectMemory().catch(() => {}); }, 10_000).unref();
 
 
 async function keepBotRunning() {

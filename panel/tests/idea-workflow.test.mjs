@@ -9,6 +9,13 @@ import { checkoutChoices, sendIdeaToQueue, reconcileIdeaRequests } from '../agen
 import { readDashboardConfig, saveDashboardConfig } from '../agency-assistant/knowledge.mjs';
 import { addJob, loadState, runQueue, acquireLock, releaseLock, recoverDashboardQueue, retryJob, resolveJob } from '../queue.mjs';
 import { approved, runOrca } from '../../orca-provider.mjs';
+import { verifyDispatchSpec } from '../../orca-evidence.mjs';
+
+async function completeSpec(root, brief) {
+  const artifact = { path: JSON.parse(brief.match(/^SPEC_FILE: (.+)$/m)[1]), sha256: brief.match(/^SPEC_SHA256: ([a-f0-9]{64})$/m)[1] };
+  await verifyDispatchSpec(root, artifact);
+  return fs.readFile(artifact.path, 'utf8');
+}
 
 const createIdea = (root, business, text, projectId, operationId) => captureIdea(root, business, text, projectId, operationId, { focus: 'mixed' });
 
@@ -23,7 +30,7 @@ async function fixture(t) {
   const project = await createProject(root, 'Proyecto de prueba', 'agency');
   return { root, project };
 }
-const confirmation = project => ({ projectId: project.id, checkout: 'workspaces/checkout', branch: 'main', baseBranch: 'main', objective: 'Implementar esta idea concreta', successCriteria: 'Comprobar el comportamiento definido' });
+const confirmation = project => ({ projectId: project.id, checkout: 'workspaces/checkout', branch: 'main', baseBranch: 'main', objective: 'Implementar esta idea concreta', successCriteria: 'Comprobar el comportamiento definido', productAcceptance: ['Comprobar el comportamiento definido'] });
 const spec = id => ({ id, business: 'agency', kind: 'analysis', title: id, prompt: 'Analizar sin modificar código.', provider: 'orca' });
 
 test('capture persists locally without Obsidian and duplicate capture/send creates one code job', async t => {
@@ -115,7 +122,7 @@ test('exact dispatch never runs an earlier job or falls back to another ID', asy
 
 test('recovery cannot displace owner, retains dispatches, and retry/close require review with attempt limit', async t => {
   const { root } = await fixture(t);
-  const job = await addJob(root, spec('abandoned'));
+  const job = await addJob(root, { ...spec('abandoned'), maxAttempts: 2 });
   const state = await loadState(root);
   const running = { ...job, state: 'running', attempts: 1, workflow: { ...job.workflow, currentStage: 'planner', steps: [{ key: 'planner', status: 'running', dispatchId: 'dispatch-old', summary: 'Informe conservado' }] } };
   await fs.appendFile(path.join(root, 'data', 'events.jsonl'), JSON.stringify({ schema: 1, revision: state.revision + 1, patch: { jobs: [running] } }) + '\n');
@@ -157,7 +164,7 @@ test('oversized instructions remain saved without dispatching an incomplete idea
 test('existing checkout worker argv contains no creation flags and preserves task title', async t => {
   const { root } = await fixture(t);
   const workspace = path.join(root, 'workspaces', 'checkout');
-  const job = { ...spec('argv-contract'), kind: 'code', title: 'Inicio con checkout existente', workspace, isolated: true };
+  const job = { ...spec('argv-contract'), attempts: 1, kind: 'code', title: 'Inicio con checkout existente', workspace, isolated: true };
   const captured = [];
   const stoppedBeforeDispatch = new Error('argv captured; do not launch a worker');
   const ctx = { root, registerCleanup() {} };
@@ -174,9 +181,10 @@ test('existing checkout worker argv contains no creation flags and preserves tas
   assert.deepEqual(args, [
     'orchestration', 'worker-start', '--spec', args[3], '--agent', 'codex', '--model', 'gpt-6.1-sol',
     '--effort', 'medium', '--worktree', `path:${workspace}`, '--run', 'run_argv123',
-    '--task-title', `${job.title} — Diseño UX`,
+    '--task-title', args[args.indexOf('--task-title') + 1],
   ]);
-  assert.match(args[3], /PERFIL EXISTENTE: ux/);
+  assert.match(args.at(-1), /^Agencia · UX · i1 · #[a-f0-9]{8} · Inicio con checkout existente$/);
+  assert.match(await completeSpec(root, args[3]), /PERFIL EXISTENTE: ux/);
   for (const flag of ['--name', '--repo', '--base-branch', '--display-name', '--comment', '--setup']) {
     assert.equal(args.includes(flag), false, `${flag} is rejected for an existing worktree`);
   }
@@ -193,14 +201,15 @@ test('simulated Orca executes profiles sequentially and QA gate prevents review 
       if (args[1] === 'worker-start') {
         assert.equal(args.includes('--display-name'), false);
         assert.equal(args[args.indexOf('--worktree') + 1], `path:${path.join(root, 'workspaces', 'checkout')}`);
-        assert.ok(args[args.indexOf('--spec') + 1].includes(job.prompt), 'every effective stage receives the complete idea snapshot');
+        const fullSpec = await completeSpec(root, args[args.indexOf('--spec') + 1]);
+        assert.ok(fullSpec.includes(job.prompt), 'every effective stage reads the complete verified idea snapshot');
         assert.equal(active, false); active = true;
-        current = args[args.indexOf('--spec') + 1].match(/PERFIL EXISTENTE: (\w+)/)[1];
+        current = fullSpec.match(/PERFIL EXISTENTE: (\w+)/)[1];
         starts.push(current);
-        return { dispatchId: `ctx_stage_${current}` };
+        return { dispatchId: `ctx_stage_${current}`, taskId: `task_stage_${current}` };
       }
-      if (args[1] === 'worker-show') { active = false; return { state: 'succeeded', taskId: `task-${current}` }; }
-      if (args[1] === 'inbox') return { messages: [] };
+      if (args[1] === 'worker-show') { active = false; return { state: 'succeeded', taskId: `task_stage_${current}` }; }
+      if (args[1] === 'inbox') return { messages: [{ id: `msg_${current}`, type: 'worker_done', run_id: 'run_test123', payload: { dispatchId: `ctx_stage_${current}`, taskId: `task_stage_${current}`, outcome: 'succeeded' }, body: current === 'qa_agency' && !qaPass ? 'RESULTADO: APROBADO\nNo es final' : 'Informe simulado.\nRESULTADO: APROBADO' }] };
       if (args[1] === 'worker-read') return { transcript: { messages: [{ role: 'assistant', blocks: [{ type: 'text', text: current === 'qa_agency' && !qaPass ? 'RESULTADO: APROBADO\nNo es final' : 'Informe simulado.\nRESULTADO: APROBADO' }] }] } };
       throw new Error(`Unexpected command ${args}`);
     };

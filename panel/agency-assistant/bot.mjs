@@ -276,7 +276,7 @@ export async function handleUpdate(update, { allowedChatId, now = new Date() } =
           try {
             const question = await answerQuestion(QUEUE_ROOT, match[1], match[2]);
             reply = question.followUpJobId
-              ? `Respuesta guardada para «${safeValue(question.title, 120)}». Continuación en cola: ${safeValue(question.followUpJobId, 80)}. Se ejecutará automáticamente si el modo automático está activado en el panel.`
+              ? `Respuesta guardada para «${safeValue(question.title, 120)}». Continuación en cola: ${safeValue(question.followUpJobId, 80)}. Consulta su estado y despacho en el panel; responder no activa la ejecución automática.`
               : `Respuesta guardada para «${safeValue(question.title, 120)}». Los agentes del mismo negocio podrán consultarla en sus próximas tareas.`;
           } catch (error) { reply = error.message; }
         }
