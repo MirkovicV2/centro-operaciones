@@ -11,7 +11,7 @@ sudo apt update
 sudo apt install git curl python3
 node --version
 npm --version
-git clone --branch feature/cola-en-segundo-plano https://github.com/MirkovicV2/centro-operaciones.git
+git clone https://github.com/MirkovicV2/centro-operaciones.git
 cd centro-operaciones
 CENTRO_ORCA_AGENT=claude npm start
 ```
