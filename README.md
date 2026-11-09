@@ -4,6 +4,8 @@ Cola local para videojuegos (`games`) y agencia digital (`agency`). Este reposit
 
 ## Empezar
 
+En Ubuntu 26.10, usa la [guía de instalación para Linux y Claude Code](docs/UBUNTU_CLAUDE.md). Comparte el mismo código y los mismos contratos que Windows.
+
 Cada instalación usa su propia cola y configuración. Instala Node.js 20 o posterior y Git. Para ejecutar agentes, configura Orca en ese equipo y vincula sus coordinadores según la [guía de coordinación](docs/COORDINATOR_OPERATIONS.md). Si Orca está instalado en otra ruta, configura `ORCA_CLI_COMMAND` con la ruta a su ejecutable. La integración remota requiere una cuenta de GitHub con acceso al repositorio de cada proyecto.
 
 En **Conocimiento** puedes conectar tu propia bóveda de Obsidian. La cola, los checkouts de proyectos, la bóveda y las credenciales se guardan fuera del código versionado.

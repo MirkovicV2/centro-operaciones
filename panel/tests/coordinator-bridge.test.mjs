@@ -44,7 +44,7 @@ test('a new project idea and its follow-up consultation carry distinct types and
   const snapshot = { ...request.snapshot, projectId: null, destinationConfirmation: null };
   async function notice(input) {
     let body;
-    const result = await notifyCoordinatorRequest(input, { cwd, env, beforeSend: async () => {}, command: async args => {
+    const result = await notifyCoordinatorRequest(input, { cwd, env: { ...env, CENTRO_ORCA_AGENT: 'claude' }, beforeSend: async () => {}, command: async args => {
       if (args[1] === 'run-show') return owner;
       if (args[1] === 'inbox') return { messages: [] };
       assert.equal(args[1], 'send');
@@ -58,6 +58,7 @@ test('a new project idea and its follow-up consultation carry distinct types and
   assert.match(idea.split('\n')[1], /kind=idea.*coordinación de encargo/);
   assert.ok(idea.split('\n')[2].includes('/api/coordinator/requests/' + request.id));
   assert.match(idea, /COORDINATOR_PREPARATION\.md/);
+  assert.match(idea, /--agent claude/);
   assert.doesNotMatch(idea, /Intención: task|\/response/);
 
   const followup = await notice({ ...request, id: 'coord-0987654321abcdef', kind: 'task', intent: 'consultation', snapshot });

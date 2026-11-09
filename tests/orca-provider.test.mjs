@@ -29,13 +29,24 @@ function context(root) {
   };
 }
 
-for (const business of ['games', 'agency']) test(`fresh ${business} code workflow uses supported argv and persists each finished stage`, async t => {
+for (const [business, agent] of [['games', 'codex'], ['agency', 'codex'], ['games', 'claude']]) test(`fresh ${business} ${agent} code workflow uses supported argv and persists each finished stage`, async t => {
+  const previous = process.env.CENTRO_ORCA_AGENT;
+  if (agent === 'codex') delete process.env.CENTRO_ORCA_AGENT;
+  else process.env.CENTRO_ORCA_AGENT = agent;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CENTRO_ORCA_AGENT;
+    else process.env.CENTRO_ORCA_AGENT = previous;
+  });
   const { root, workspace } = await fixture(t);
   const ctx = context(root), starts = [], outputs = new Map();
   const command = async args => {
     if (args[0] === 'repo') return { repos: [{ path: workspace }] };
     if (args[1] === 'run-create') return { runId: 'run_abcdef' };
     if (args[1] === 'worker-start') {
+      assert.equal(args[args.indexOf('--agent') + 1], agent);
+      assert.equal(args.includes('--model'), agent === 'codex');
+      assert.equal(args.includes('--effort'), agent === 'codex');
+      assert.equal(ctx.updates.at(-1).orcaAgent, agent);
       assert.equal(args.includes('--display-name'), false);
       assert.equal(args.includes('--name'), false);
       const dispatchId = `ctx_stage${starts.length + 1}`;

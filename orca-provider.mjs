@@ -14,7 +14,7 @@ import { verifyUnicodeDeliveryTransport } from './orca-delivery-transport.mjs';
 import { ContractError, deliveryInstructions, deliveryApproved, fingerprint, parseDelivery, handoffText, IDENTIFIERS } from './workflow-contract.mjs';
 import { ORCA_OUTPUT_LIMIT_BYTES, isOrcaStatusReadError, normalizeWorkerStatus, checkWorkerIdentity, matchingCompletion, pendingStageDelivery, stageAskAnswered, readCompleteTranscript, saveStageReport, readStageReport, saveDispatchSpec, verifyDispatchSpec } from './orca-evidence.mjs';
 
-import { ORCA_EXE } from './local-tools.mjs';
+import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 export { ORCA_EXE };
 const PROFILE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.codex', 'agents');
 const GAME_SKILL_DIR = path.resolve(PROFILE_DIR, '..', 'skills', 'game-production');
@@ -309,6 +309,9 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
       else await inspectDestination(ctx.root, path.relative(ctx.root, workspace), job.branch);
     }
     const retry = savedStep?.retryOf;
+    // Jobs predating agent selection always started with Codex.
+    const orcaAgent = retry ? retry.orcaAgent ?? 'codex' : configuredOrcaAgent();
+    const launchPreferences = orcaAgent === 'codex' ? ['--model', role.model, '--effort', role.effort] : [];
     if (retry && !['failed', 'cancelled', 'abandoned'].includes(retry.dispatchStatus)
       && !(role.stageKey === 'developer' && isStoppedDeveloperRetry(job, savedStep))) {
       throw new ProviderError('orca_retry_invalid', 'El intento anterior no permite un retry automático.', { uncertain: true });
@@ -320,13 +323,13 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
     const brief = retry ? null : dispatchBrief(specArtifact, specIdentity);
-    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
+    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
     try {
       started = await command([
-        'orchestration', 'worker-start', ...(retry ? ['--task', retry.taskId, '--retry-of', retry.dispatchId] : ['--spec', brief]), '--agent', 'codex', '--model', role.model,
-        '--effort', role.effort, '--worktree', `path:${workspace}`, '--run', runId,
+        'orchestration', 'worker-start', ...(retry ? ['--task', retry.taskId, '--retry-of', retry.dispatchId] : ['--spec', brief]), '--agent', orcaAgent, ...launchPreferences,
+        '--worktree', `path:${workspace}`, '--run', runId,
         ...(job.coordination ? ['--from', job.coordination.senderId] : []),
         ...(!retry ? ['--task-title', displayName] : []),
         ...(!retry && IDENTIFIERS.taskId.test(savedStep?.predecessorTaskId ?? '') ? ['--parent', savedStep.predecessorTaskId] : []),

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { ORCA_OUTPUT_LIMIT_BYTES } from '../orca-evidence.mjs';
 import { readCoordinatorBindings, selectCoordinatorBinding, isCoordinatorIdentity } from './coordinator-routing.mjs';
 
-import { ORCA_EXE } from '../local-tools.mjs';
+import { ORCA_EXE, configuredOrcaAgent } from '../local-tools.mjs';
 const safeCode = error => /^[a-z][a-z0-9_]{2,80}$/.test(error?.code || '') ? error.code : 'orca_command_failed';
 const commandError = (code, exitCode) => Object.assign(new Error('No se pudo confirmar la operación de Orca.'), { code, ...(Number.isInteger(exitCode) ? { exitCode } : {}) });
 
@@ -35,7 +35,7 @@ export { execute as coordinatorCommand };
 function marker(request) { return `[PANEL_COORDINATOR_REQUEST:${request.id}]`; }
 const coordinatorAutonomy = 'AUTONOMÍA: consulta el encargo, las decisiones guardadas, los artefactos y el estado actual antes de escalar. Comprueba si el PC, la GPU, el dispositivo de pruebas o una sesión ya configurada cubren la necesidad dentro de la autorización vigente. Resuelve las decisiones técnicas dentro del equipo y usa alternativas reversibles que mantengan los criterios. Si aún falta un permiso, recurso o decisión imprescindible que solo Daniel puede proporcionar, registra en esta petición una pregunta concreta con lo comprobado y qué queda pendiente. Mantén en marcha las partes independientes que puedan avanzar con seguridad.';
 
-function messageBody(request) {
+function messageBody(request, env) {
   const snapshot = request.snapshot;
   const requestId = request.parentRequestId || request.requestId || request.id;
   const port = process.env.CENTRO_OPERATIONS_PORT || '4187';
@@ -100,7 +100,7 @@ function messageBody(request) {
       `Responde en POST ${requestUrl}/response con JSON {"responseId":"final-response","text":"respuesta útil para Daniel","runId":"TU_RUN_ORIGINAL","senderId":"TU_IDENTIDAD_ORIGINAL","sources":["source.id realmente citado"]}. La consulta no requiere destino de código ni admite /route o worker-start.`,
       `Si esta consulta pide el progreso de otro encargo, consulta GET http://127.0.0.1:${port}/api/state y la traza de ese encargo usando su propio ID. Mantén separados el registro del encargo y el de esta consulta.`,
     ] : [
-      'Si el registro canónico es kind=idea y el usuario autorizó crear un proyecto nuevo, aplica docs/COORDINATOR_PREPARATION.md: delega únicamente su preparación en un trabajador ORCA de tu misma Run, conserva la correlación y verifica el destino obtenido antes de /route. No exijas al usuario projectId o checkout que ha encargado crear. UX, Desarrollo, QA, Revisión e integración siguen a cargo de la cola.',
+      `Si el registro canónico es kind=idea y el usuario autorizó crear un proyecto nuevo, aplica docs/COORDINATOR_PREPARATION.md. Para preparar el destino en la misma Run, usa --agent ${configuredOrcaAgent(env)}. Con Claude usa el modelo de su instalación, sin flags de modelo de Codex. Conserva la correlación y verifica el destino antes de /route. No pidas projectId ni checkout si el usuario encargó crearlos. UX, Desarrollo, QA, Revisión e integración siguen a cargo de la cola.`,
       'Decide la ruta como coordinador: análisis usa Planificador; cambios de código usan UX → Desarrollo → QA → Revisión. La ruta autoriza la secuencia y las correcciones reproducibles de QA y Revisión dentro del contrato. El panel conserva quién autorizó cada etapa y su origen. No existe job ni dispatch de producto hasta que se confirme la decisión; una preparación autorizada se registra por separado bajo la misma solicitud y Run.',
       `Para trasladar una aclaración interna recibida por ask, responde primero a ese mismo mensaje en Orca desde tu identidad con [CENTRO_TRASPASO:developer] en la primera línea, la etapa real en el marcador y la aclaración a partir de la segunda. Registra el traspaso con POST ${requestUrl}/handoffs con JSON {"origin":{"jobId":"JOB_REAL","runId":"RUN_REAL","taskId":"TASK_REAL","dispatchId":"DISPATCH_REAL","messageId":"MENSAJE_ASK_REAL","senderId":"TU_IDENTIDAD"},"toStage":"developer","note":"aclaración o referencia aprobada"}. El panel entrega la pregunta original y la nota a la etapa autorizada mediante el contexto del job. Usa en note el mismo texto que sigue al marcador, que puede incluir el siguiente paso para el trabajador que preguntó. El traspaso no abre trabajadores, modifica el contrato ni autoriza efectos externos.`,
       `Para aplicar la decisión, el coordinador puede hacer POST http://127.0.0.1:${port}/api/coordinator/requests/${requestId}/route con JSON {"kind":"analysis"|"code","reason":"motivo breve"}. Para código incluye confirmation con projectId, checkout, branch, baseBranch, objective, successCriteria y productAcceptance comprobados y confirmados conforme a las decisiones vigentes. Una confirmación fallida de Idea puede corregirse con confirmation.revise=true antes de que exista recibo o job. Resuelve los detalles delegados; pregunta a Daniel solo si falta autorización o una decisión humana imprescindible.`,
@@ -165,6 +165,12 @@ export async function notifyCoordinatorRequest(request, { command = execute, cwd
     if (existing) return { ...result('sent', 'coordinator_delivery_found', 'Entrega localizada en la Run original.'), messageId: existing.id || null, deduplicated: true };
     if (uncertain) return result('unknown', 'coordinator_delivery_uncertain', 'El aviso pudo entregarse y no aparece en esta página del buzón; no se reenvía sin revisar la entrega original.');
   } catch (error) { exitCode = error.exitCode; return result(uncertain ? 'unknown' : 'pending', safeCode(error), 'No se pudo consultar el coordinador; no se ha intentado enviar otro aviso.'); }
+  let body;
+  try { body = messageBody(request, env); }
+  catch (error) {
+    if (error.code !== 'orca_agent_invalid') throw error;
+    return result('pending', error.code, error.message);
+  }
   stage = 'persist-send-intent';
   await beforeSend({ ...binding });
   try {
@@ -172,7 +178,7 @@ export async function notifyCoordinatorRequest(request, { command = execute, cwd
     const sent = await command([
       'orchestration', 'send', '--from', senderId, '--to', `run:${runId}`,
       '--subject', `${request.kind === 'quality-block' ? 'Validación pendiente' : 'Solicitud del panel'}: ${request.snapshot.title}`.slice(0, 180),
-      '--body', messageBody(request), '--thread-id', request.id,
+      '--body', body, '--thread-id', request.id,
     ], { cwd });
     const messageId = sent?.messageId || sent?.id || sent?.message?.id;
     if (!messageId) return result('unknown', 'coordinator_message_id_missing', 'Orca no devolvió el identificador de entrega; revisa el buzón antes de repetir.');

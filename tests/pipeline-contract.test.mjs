@@ -219,7 +219,13 @@ test('all four stages exchange validated evidence and retain acceptance past cha
   }
 });
 
-test('native retry reuses immutable Task input while queue attempt advances', async t => {
+test('native retry keeps the immutable Task input and launch agent while queue attempt advances', async t => {
+  const previousAgent = process.env.CENTRO_ORCA_AGENT;
+  process.env.CENTRO_ORCA_AGENT = 'claude';
+  t.after(() => {
+    if (previousAgent === undefined) delete process.env.CENTRO_ORCA_AGENT;
+    else process.env.CENTRO_ORCA_AGENT = previousAgent;
+  });
   const f = await fixture(t); await addJob(f.root, f.spec);
   const simulator = fakeOrca(f.workspace);
   const command = async args => {
@@ -233,12 +239,16 @@ test('native retry reuses immutable Task input while queue attempt advances', as
   await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
   const failed = (await loadState(f.root)).jobs[0]; assert.equal(failed.state, 'needs_attention');
   assert.equal(failed.workflow.steps[0].dispatchStatus, 'failed');
+  assert.equal(failed.workflow.steps[0].orcaAgent, 'claude');
+  process.env.CENTRO_ORCA_AGENT = 'codex';
   await retryJob(f.root, failed.id, { confirm: true });
   await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
   const resumed = (await loadState(f.root)).jobs[0]; assert.equal(resumed.state, 'succeeded', JSON.stringify(resumed.error));
   const retry = simulator.started[1]; assert.equal(retry.taskId, simulator.started[0].taskId);
   assert.equal(retry.args[retry.args.indexOf('--retry-of') + 1], simulator.started[0].dispatchId);
   assert.equal(retry.args.includes('--task-title'), false, 'retry must not rename the existing native Task');
+  assert.equal(retry.args[retry.args.indexOf('--agent') + 1], 'claude');
+  assert.equal(retry.args.includes('--model'), false);
   assert.equal(resumed.workflow.steps[0].displayName, failed.workflow.steps[0].displayName);
   assert.match(resumed.workflow.steps[0].displayName, / · UX · i1 · /);
   assert.equal(resumed.workflow.steps[0].attempt, 2); assert.equal(resumed.workflow.steps[0].taskInputAttempt, 1);
