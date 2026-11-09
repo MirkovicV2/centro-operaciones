@@ -10,9 +10,9 @@ import { inspectCommittedIntegration } from '../integration-recovery.mjs';
 import { assertContractRevisionCheckpoint, assertContractRevisionRecord, contractRevisionHash } from '../contract-revision.mjs';
 import { fingerprint, parseDelivery } from '../workflow-contract.mjs';
 
-export function retryCoordinatedCheckout(root, receiptId, { confirm = false, command = coordinatorCommand } = {}) {
+export function retryCoordinatedCheckout(root, receiptId, { confirm = false, command = coordinatorCommand, inspectIntegrationEffects } = {}) {
   return retryCheckoutAdmission(root, receiptId, {
-    confirm,
+    confirm, ...(inspectIntegrationEffects ? { inspectIntegrationEffects } : {}),
     inspectWorker: async (cwd, workspace, step) => {
       if (!step.runId || !step.taskId) throw new Error('Faltan los identificadores del trabajador anterior.');
       const shown = await command(['orchestration', 'worker-show', '--dispatch', step.dispatchId, '--full'], { cwd });
@@ -171,12 +171,12 @@ export async function inspectRecoveryDispatch(root, job, expected, { command = c
   return worker;
 }
 
-export async function resumeCoordinatedDispatch(root, jobId, { confirm = false, command = coordinatorCommand, qualityAction, uxHandoff, developerDecision, stageDecision } = {}) {
+export async function resumeCoordinatedDispatch(root, jobId, { confirm = false, command = coordinatorCommand, inspectIntegrationEffects, qualityAction, uxHandoff, developerDecision, stageDecision } = {}) {
   if (!confirm) throw new Error('Confirma la revisión del trabajador antes de continuar.');
   const job = (await loadState(root)).jobs.find(item => item.id === jobId);
   if (!job) throw new Error('No encuentro el encargo que se quiere continuar.');
   return recoverKnownDispatchReceipt(root, jobId, {
-    confirm, qualityAction, uxHandoff, developerDecision, stageDecision,
+    confirm, qualityAction, uxHandoff, developerDecision, stageDecision, ...(inspectIntegrationEffects ? { inspectIntegrationEffects } : {}),
     inspectDispatch: expected => inspectRecoveryDispatch(root, job, expected, { command }),
   });
 }
