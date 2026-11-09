@@ -1398,25 +1398,45 @@ export async function completeReviewedCodeJob(root, id, { confirm = false, evide
   });
 }
 
+// The ledger timestamp of the last event that persisted this job. The executor
+// was alive at that moment, so it bounds the interrupted attempt more tightly
+// than the detection time. Returns null without a usable timestamp.
+async function lastPersistedEventAt(root, jobId) {
+  let raw;
+  try { raw = await fs.readFile(ledger(root), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  let latest = null;
+  for (const line of raw.split('\n').filter(Boolean)) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (!event?.patch?.jobs?.some(job => job?.id === jobId)) continue;
+    latest = typeof event.at === 'string' && Number.isFinite(Date.parse(event.at)) ? event.at : null;
+  }
+  return latest;
+}
+
 // Records the interrupted segment so a same-attempt recovery can bound the time
-// it already consumed. elapsedMs runs until detection, so it includes the time the
-// executor was down: with an explicit timeoutMs a long outage can exhaust the
-// budget. Future improvement: end the segment at the job's last persisted event.
-function interruptedSegment(job, finishedAt) {
+// it already consumed. The segment ends at the job's last persisted event when the
+// ledger has one after the segment start; otherwise at the detection time, which
+// also counts the time the executor was down.
+function interruptedSegment(job, detectedAt, lastEventAt) {
   const resumed = job.livenessResume?.phase === 'consumed' && job.livenessResume.attempt === job.attempts;
   const startedAt = resumed ? job.livenessResume.consumedAt : job.startedAt;
+  const bounded = lastEventAt && Date.parse(lastEventAt) >= Date.parse(startedAt) && Date.parse(lastEventAt) <= Date.parse(detectedAt);
+  const finishedAt = bounded ? lastEventAt : detectedAt;
   const elapsedMs = Date.parse(finishedAt) - Date.parse(startedAt);
   if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return [];
   return [{ attempt: job.attempts, startedAt, finishedAt, elapsedMs, outcome: 'needs_attention', error: 'interrupted',
-    ...(resumed ? { recoveryId: job.livenessResume.id } : {}) }];
+    finishedAtSource: bounded ? 'last_persisted_event' : 'detection', ...(resumed ? { recoveryId: job.livenessResume.id } : {}) }];
 }
 
 export async function recoverRunning(root, state, business) {
   const finishedAt = stamp();
-  const jobs = state.jobs.filter(j => j.state === 'running' && (!business || j.business === business)).map(j => ({
+  const running = state.jobs.filter(j => j.state === 'running' && (!business || j.business === business));
+  const lastEvents = new Map(await Promise.all(running.map(async j => [j.id, await lastPersistedEventAt(root, j.id)])));
+  const jobs = running.map(j => ({
     ...j,
     state: 'needs_attention',
-    attemptHistory: [...(j.attemptHistory ?? []), ...interruptedSegment(j, finishedAt)],
+    attemptHistory: [...(j.attemptHistory ?? []), ...interruptedSegment(j, finishedAt, lastEvents.get(j.id))],
     ...(j.workflow ? {
       workflow: {
         ...j.workflow,

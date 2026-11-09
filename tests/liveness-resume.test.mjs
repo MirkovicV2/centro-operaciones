@@ -322,6 +322,10 @@ test('a developer interrupted while really running records its segment and resum
   const running = (await loadState(root)).jobs[0];
   assert.equal(running.state, 'running');
   assert.equal(running.attemptHistory?.length ?? 0, 0);
+  // The executor was alive when it persisted the developer start; that event bounds the segment.
+  const persisted = (await fs.readFile(path.join(data, 'events.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const lastEventAt = persisted.filter(event => event.patch?.jobs?.some(item => item.id === running.id)).at(-1).at;
+  assert.ok(Number.isFinite(Date.parse(lastEventAt)));
 
   let calls = 0;
   await createAutoRunner(root, { verify, worker: async () => { calls++; } }).tick();
@@ -334,6 +338,10 @@ test('a developer interrupted while really running records its segment and resum
   assert.equal(segment.error, 'interrupted');
   assert.ok(Number.isFinite(segment.elapsedMs) && segment.elapsedMs >= 0);
   assert.equal(segment.startedAt, running.startedAt);
+  assert.equal(segment.finishedAt, lastEventAt);
+  assert.equal(segment.finishedAtSource, 'last_persisted_event');
+  assert.equal(segment.elapsedMs, Date.parse(lastEventAt) - Date.parse(running.startedAt));
+  assert.ok(Date.parse(interrupted.finishedAt) >= Date.parse(segment.finishedAt));
 
   await recoverKnownDispatchReceipt(root, sent.job.id, { confirm: true, verify, inspectDispatch: async () => ({ ...dev, state: 'succeeded', liveness: 'exited' }) });
   const queued = (await loadState(root)).jobs[0];
@@ -363,4 +371,23 @@ test('an interrupted segment without a usable start time keeps the elapsed-time 
   assert.equal(job.state, 'needs_attention');
   assert.equal(job.attemptHistory.filter(item => item.attempt === job.attempts).length, 0);
   await assert.rejects(f.recover(), /tiempo consumido/);
+});
+
+test('an interrupted segment without a timestamped ledger event falls back to the detection time', async t => {
+  const f = await fixture(t);
+  const before = Date.now();
+  await patchJob(f.root, job => {
+    job.state = 'running';
+    job.attemptHistory = job.attemptHistory.filter(item => item.attempt !== job.attempts);
+    Object.assign(job.workflow.steps.find(step => step.key === 'developer'), { status: 'running', dispatchStatus: 'active', error: null });
+  });
+  await createAutoRunner(f.root, { verify: f.verify, worker: async () => assert.fail('No worker may start.') }).tick();
+  const job = (await loadState(f.root)).jobs[0];
+  assert.equal(job.state, 'needs_attention');
+  const segment = job.attemptHistory.at(-1);
+  assert.equal(segment.error, 'interrupted');
+  assert.equal(segment.finishedAtSource, 'detection');
+  assert.equal(segment.finishedAt, job.finishedAt);
+  assert.ok(Date.parse(segment.finishedAt) >= before);
+  assert.equal(segment.elapsedMs, Date.parse(segment.finishedAt) - Date.parse(job.startedAt));
 });
