@@ -382,6 +382,10 @@ const server = http.createServer(async (request, response) => {
       return await actorContext.run(principal, () => handleApi(request, response, url, tailscaleAccess));
     }
     if (request.method !== 'GET') return send(response, 405, 'Método no permitido.', 'text/plain; charset=utf-8');
+    // New panel (in progress): /nuevo serves panel/app/index.html; /app/<name>.js|.css its modules and styles.
+    if (url.pathname === '/nuevo' || url.pathname === '/nuevo/') return send(response, 200, await fs.readFile(path.join(APP_ROOT, 'app', 'index.html')), 'text/html; charset=utf-8');
+    const appFile = url.pathname.match(/^\/app\/([a-z0-9-]+\.(js|css))$/);
+    if (appFile) return send(response, 200, await fs.readFile(path.join(APP_ROOT, 'app', appFile[1])), appFile[2] === 'js' ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8');
     const relative = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\//, '');
     const contentTypes = {
       'index.html': 'text/html; charset=utf-8',

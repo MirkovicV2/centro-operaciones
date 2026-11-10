@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1D1D20" media="(prefers-color-scheme: dark)">
+  <title>Centro de Operaciones</title>
+  <link rel="manifest" href="/panel.webmanifest">
+  <link rel="stylesheet" href="/app/base.css">
+  <script type="module" src="/app/main.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <dialog id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+    <div class="in"><h2 id="confirm-title"></h2><p id="confirm-body"></p></div>
+    <div class="foot"><button type="button" class="btn" id="confirm-cancel">Volver</button><button type="button" class="btn primary" id="confirm-ok">Confirmar</button></div>
+  </dialog>
+  <dialog id="search" aria-label="Buscar o saltar a">
+    <input id="search-input" type="search" placeholder="Buscar una pantalla, un trabajo o un asunto…" aria-label="Buscar" autocomplete="off">
+    <ul id="search-results"></ul>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
