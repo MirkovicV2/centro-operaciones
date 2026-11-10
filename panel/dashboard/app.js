@@ -1337,8 +1337,13 @@ for (const selector of ['#project-search', '#project-business-filter', '#project
   $(selector).addEventListener('change', () => { if (state.data) renderProjects(state.data); });
 }
 
-$('#show-new-job').addEventListener('click', () => { $('#job-form').hidden = false; $('#job-form').scrollIntoView({ behavior: 'smooth', block: 'center' }); });
-$('#hide-new-job').addEventListener('click', () => { $('#job-form').hidden = true; });
+$('#show-new-job').addEventListener('click', () => { $('#job-form').hidden = false; $('#job-form').querySelector('select, input, textarea')?.focus(); });
+$('#hide-new-job').addEventListener('click', () => { $('#job-form').hidden = true; $('#show-new-job').focus(); });
+// The new-job form is shown as a sheet: Escape closes it and focus returns to the button that opened it.
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || $('#job-form').hidden || document.querySelector('dialog[open]')) return;
+  $('#job-form').hidden = true; $('#show-new-job').focus();
+});
 $('#job-business').addEventListener('change', () => refreshProjectSelectors(state.data?.projects || []));
 $('#idea-business').addEventListener('change', () => refreshProjectSelectors(state.data?.projects || []));
 $('#job-kind').addEventListener('change', event => document.querySelectorAll('.workspace-field').forEach(field => { field.hidden = event.target.value !== 'code'; }));
