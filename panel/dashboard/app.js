@@ -165,6 +165,23 @@ function renderAutomation(raw) {
   if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
 }
 
+// Stage track: one short bar per workflow step, in order. Colour and a text label, never colour alone.
+function stageTrack(job) {
+  const steps = (job.workflow?.steps || []).filter(step => step.status !== 'skipped');
+  if (!steps.length) return null;
+  const track = el('span', 'stage-track');
+  const tone = { succeeded: 'ok', running: 'active', blocked: 'fail', failed: 'fail', queued: 'wait' };
+  for (const step of steps) {
+    const bar = el('span', `stage-bar is-${tone[step.status] || 'wait'}`);
+    bar.title = `${step.label}: ${workflowStatusNames[step.status] || step.status}`;
+    track.append(bar);
+  }
+  const current = steps.find(step => ['running', 'blocked', 'failed'].includes(step.status));
+  track.setAttribute('role', 'img');
+  track.setAttribute('aria-label', current ? `Etapa ${current.label}: ${workflowStatusNames[current.status] || current.status}` : `${steps.filter(step => step.status === 'succeeded').length} de ${steps.length} etapas completadas`);
+  return track;
+}
+
 function renderJobs(data) {
   const list = $('#jobs-list'), historyList = $('#history-list');
   const historyFilters = [...$('#history .history-filters').querySelectorAll('input, select')].map(input => input.value);
@@ -258,6 +275,8 @@ function renderJobs(data) {
     summary.append(el('span', `company-pill ${job.business}`, businessNames[job.business] || job.business));
     summary.append(el('span', 'job-title', job.title));
     if (job.projectName) summary.append(el('span', 'company-pill project-pill', job.projectName));
+    const track = stageTrack(job);
+    if (track) summary.append(track);
     summary.append(el('span', `job-state ${job.state}`, statusNames[job.state] || job.state));
     summary.append(el('span', 'job-chevron', '⌄'));
     card.append(summary);
@@ -1261,20 +1280,8 @@ function renderOverviewCharts(traces) {
     activity.append(overviewLegend(), chart);
   }
 
-  const ring = el('div', 'overview-ring');
-  if (traces.length) {
-    let offset = 0;
-    const segments = Object.entries(requestCounts).filter(([, count]) => count).map(([tone, count]) => {
-      const start = offset;
-      offset += 100 * count / traces.length;
-      return `var(--chart-${tone}) ${start}% ${Math.min(100, offset)}%`;
-    });
-    ring.style.setProperty('--ring-fill', `conic-gradient(${segments.join(',')})`);
-  }
-  const center = el('div', 'overview-ring-center');
-  center.append(el('strong', '', String(traces.length)), el('span', '', traces.length === 1 ? 'Petición' : 'Peticiones'));
-  ring.append(center);
-  $('#overview-status').replaceChildren(ring, overviewLegend(requestCounts, { ...overviewStatusLabels, done: 'Cerradas' }));
+  const totals = el('p', 'overview-total', `${traces.length} ${traces.length === 1 ? 'petición' : 'peticiones'} en este negocio`);
+  $('#overview-status').replaceChildren(totals, overviewLegend(requestCounts, { ...overviewStatusLabels, done: 'Cerradas' }));
 }
 
 function renderActionSummary(raw, data) {
@@ -1282,70 +1289,68 @@ function renderActionSummary(raw, data) {
   renderOverviewCharts(traces);
   const metrics = $('#overview-metrics'); metrics.replaceChildren();
   const groups = [
-    ['Requiere tu acción', [...data.jobs.filter(job => job.state === 'needs_attention').map(job => ({ title: job.title, reason: job.error?.message || 'Revisa la etapa y sus informes antes de continuar.', job })), ...data.questions.filter(q => q.status === 'pending').map(q => ({ title: q.question, reason: 'Decisión pendiente', href: '#ideas' }))]],
-    ['En curso', data.jobs.filter(job => job.state === 'running').map(job => ({ title: job.title, reason: `Etapa: ${job.workflow?.currentStage || 'sin confirmar'}`, job }))],
-    ['Siguiente paso', [...data.jobs.filter(job => ['queued', 'retry_wait'].includes(job.state)).map(job => ({ title: job.title, reason: data.automation?.receipts?.find(item => item.jobId === job.id)?.reason || (job.autoIntent?.eligible ? `Cola automática · ${raw.automation?.businesses?.[job.business] ? 'esperando al ejecutor' : 'empresa pausada'}` : 'Cola manual · despacho por ID pendiente'), job })), ...data.projects.filter(project => project.nextAction).map(project => ({ title: project.name, reason: project.nextAction, href: '#proyectos' }))]],
+    ['Requiere tu acción', [...data.jobs.filter(job => job.state === 'needs_attention').map(job => ({ title: job.title, reason: job.error?.message || 'Revisa la etapa y sus informes antes de continuar.', job, kind: 'attention' })), ...data.questions.filter(q => q.status === 'pending').map(q => ({ title: q.question, reason: 'Decisión pendiente', href: '#ideas', kind: 'question' }))]],
+    ['En curso', data.jobs.filter(job => job.state === 'running').map(job => ({ title: job.title, reason: `Etapa: ${job.workflow?.steps?.find(step => step.key === job.workflow?.currentStage)?.label || job.workflow?.currentStage || 'sin confirmar'}`, job, kind: 'running' }))],
+    ['Siguiente paso', [...data.jobs.filter(job => ['queued', 'retry_wait'].includes(job.state)).map(job => ({ title: job.title, reason: data.automation?.receipts?.find(item => item.jobId === job.id)?.reason || (job.autoIntent?.eligible ? `Cola automática · ${raw.automation?.businesses?.[job.business] ? 'esperando al ejecutor' : 'empresa pausada'}` : 'Cola manual · despacho por ID pendiente'), job, kind: 'next' })), ...data.projects.filter(project => project.nextAction).map(project => ({ title: project.name, reason: project.nextAction, href: '#proyectos', kind: 'project' }))]],
   ];
   const locations = ['attention', 'running', 'next'];
+  // The summary is one sentence of real counts, not a row of tiles.
   const metricValues = [
-    ['running', 'Trabajos en curso', groups[1][1].length, '▷'],
-    ['pending', 'En cola', data.queue.counts.queued + data.queue.counts.retry_wait, '≡'],
-    ['total', 'Peticiones registradas', traces.length, '▤'],
-    ['attention', 'Requiere tu acción', groups[0][1].length, '!'],
+    ['running', 'en curso', groups[1][1].length],
+    ['pending', 'en cola', data.queue.counts.queued + data.queue.counts.retry_wait],
+    ['attention', 'requieren tu acción', groups[0][1].length],
+    ['total', traces.length === 1 ? 'petición registrada' : 'peticiones registradas', traces.length],
   ];
-  for (const [tone, label, value, glyph] of metricValues) {
-    const metric = el('div', 'overview-metric');
+  for (const [tone, label, value] of metricValues) {
+    const metric = el('span', 'overview-metric');
     metric.dataset.tone = tone;
-    const icon = el('span', 'overview-metric-icon', glyph);
-    icon.setAttribute('aria-hidden', 'true');
-    metric.append(icon, el('strong', 'overview-metric-value', String(value)), el('span', 'overview-metric-label', label));
+    metric.append(el('strong', 'overview-metric-value', String(value)), ' ', el('span', 'overview-metric-label', label));
     metrics.append(metric);
   }
+  const emptyText = { attention: 'Nada te espera ahora mismo.', running: 'Sin trabajos en marcha.', next: 'Captura una idea o define el siguiente paso de un proyecto.' };
   for (const [index, [title, items]] of groups.entries()) {
     const tone = locations[index];
-    const section = el('section', 'action-group');
+    const section = el('section', 'action-group overview-list');
     section.dataset.tone = tone;
     const heading = el('h2', 'action-heading', title);
     heading.append(' ', el('span', 'action-count', String(items.length)));
     section.append(heading);
-    if (!items.length) section.append(el('p', 'section-copy', title === 'Siguiente paso' ? 'Captura una idea o define el siguiente paso de un proyecto.' : 'Sin pendientes en este grupo.'));
-    // Repeated causes are grouped, with each affected job still reachable.
-    const causes = new Map();
-    for (const item of items) { const list = causes.get(item.reason) || []; list.push(item); causes.set(item.reason, list); }
-    for (const [reason, entries] of causes) {
-      const card = el('article', 'action-card'); card.append(el('p', '', `${reason}${entries.length > 1 ? ` · ${entries.length} avisos` : ''}`));
-      for (const item of entries) { const button = el('button', 'text-button', item.title); button.onclick = () => item.job ? focusJob(item.job.id) : (location.hash = item.href); card.append(button); }
-      const last = entries.map(item => item.job?.finishedAt || item.job?.createdAt).filter(Boolean).sort().at(-1);
-      if (last) card.append(el('small', '', `Última aparición: ${formatDate(last)}`));
-      section.append(card);
+    if (!items.length) section.append(el('p', 'section-copy overview-empty-line', emptyText[tone]));
+    for (const item of items) {
+      const row = el('button', `overview-row is-${item.kind}`);
+      row.type = 'button';
+      const text = el('span', 'overview-row-text');
+      text.append(el('span', 'overview-row-title', item.title), el('span', 'overview-row-reason', item.reason));
+      const mark = el('span', 'overview-row-mark');
+      mark.setAttribute('aria-hidden', 'true');
+      row.append(mark, text);
+      if (item.job) {
+        const track = stageTrack(item.job);
+        if (track) row.append(track);
+        const when = item.job.finishedAt || item.job.startedAt || item.job.createdAt;
+        if (when) row.append(el('span', 'overview-row-when', formatDate(when)));
+      }
+      row.onclick = () => item.job ? focusJob(item.job.id) : (location.hash = item.href);
+      section.append(row);
     }
     $('#overview-' + tone).replaceChildren(section);
   }
   const recent = $('#overview-recent');
   recent.replaceChildren();
-  if (!traces.length) recent.append(el('p', 'section-copy', 'Las peticiones de este negocio aparecerán aquí.'));
+  if (!traces.length) recent.append(el('p', 'section-copy overview-empty-line', 'Las peticiones de este negocio aparecerán aquí.'));
   else {
-    const table = el('table', 'overview-table');
-    table.setAttribute('aria-labelledby', 'overview-recent-title');
-    const header = table.createTHead().insertRow();
-    for (const title of ['Petición', 'Estado', 'Última actividad']) {
-      const cell = el('th', '', title);
-      cell.scope = 'col';
-      header.append(cell);
-    }
-    const body = table.createTBody();
+    const list = el('ul', 'overview-requests');
     for (const trace of traces.slice(0, 5)) {
-      const row = body.insertRow();
+      const item = el('li', 'overview-request');
       const title = trace.title || 'Petición';
       const context = trace.projectName || (trace.intent === 'consultation' ? 'Consulta general' : 'Sin proyecto');
-      const nameCell = row.insertCell();
-      nameCell.append(el('strong', '', title));
-      if (context !== title) nameCell.append(el('small', '', context));
+      const text = el('span', 'overview-row-text');
+      text.append(el('strong', 'overview-row-title', title), el('span', 'overview-row-reason', context !== title ? context : ''));
       const status = overviewTone(trace.status);
-      row.insertCell().append(el('span', `request-state is-${status === 'pending' ? 'active' : status}`, trace.statusLabel || 'Pendiente'));
-      row.insertCell().textContent = formatDate(trace.events?.at(-1)?.at);
+      item.append(text, el('span', `request-state is-${status === 'pending' ? 'active' : status}`, trace.statusLabel || 'Pendiente'), el('span', 'overview-row-when', formatDate(trace.events?.at(-1)?.at)));
+      list.append(item);
     }
-    recent.append(table);
+    recent.append(list);
   }
   const blockers = $('#global-blockers'); blockers.replaceChildren();
   for (const business of ['agency', 'games']) {

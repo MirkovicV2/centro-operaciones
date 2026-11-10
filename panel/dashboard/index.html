@@ -50,51 +50,35 @@
           <div><h1 id="context-title">Agencia digital</h1><p class="section-copy">Actividad del equipo y estado de los encargos</p></div>
           <a class="button primary" href="#ideas">＋ Nueva idea</a>
         </div>
-        <div id="overview-metrics" class="overview-metrics" aria-label="Resumen de actividad"></div>
-        <div id="action-summary" class="workspace-layout overview-board">
-          <section class="workspace-panel overview-chart" aria-labelledby="overview-activity-title">
-            <header class="workspace-panel-heading"><h2 id="overview-activity-title">Actividad por etapa</h2><a class="text-button" href="#trabajos">Ver trabajos →</a></header>
-            <p class="overview-panel-copy">Etapas registradas en las peticiones de este negocio</p>
-            <div id="overview-activity"></div>
-          </section>
-          <section class="workspace-panel overview-chart" aria-labelledby="overview-status-title">
-            <header class="workspace-panel-heading"><h2 id="overview-status-title">Estado de peticiones</h2></header>
-            <div id="overview-status"></div>
-          </section>
-          <div class="workspace-main">
-            <section class="workspace-panel" aria-labelledby="overview-recent-title">
-              <header class="workspace-panel-heading"><h2 id="overview-recent-title">Peticiones recientes</h2><a class="text-button" href="#peticiones">Ver todas →</a></header>
+        <p id="overview-metrics" class="overview-summary" aria-label="Resumen de actividad"></p>
+        <div id="action-summary" class="overview-layout">
+          <div class="overview-main">
+            <div id="overview-attention"></div>
+            <div id="overview-running"></div>
+            <div id="overview-next"></div>
+            <section class="action-group overview-list" aria-labelledby="overview-recent-title">
+              <h2 class="action-heading" id="overview-recent-title">Peticiones recientes <a class="text-button" href="#peticiones">Ver todas</a></h2>
               <div id="overview-recent" class="overview-recent"></div>
             </section>
-            <div id="overview-running"></div>
           </div>
-          <div class="workspace-rail">
-            <div id="overview-attention"></div><div id="overview-next"></div>
-          </div>
+          <aside class="overview-rail" aria-label="Contexto">
+            <section class="rail-block" aria-labelledby="overview-activity-title">
+              <h2 class="rail-title" id="overview-activity-title">Actividad por etapa</h2>
+              <div id="overview-activity"></div>
+            </section>
+            <section class="rail-block" aria-labelledby="overview-status-title">
+              <h2 class="rail-title" id="overview-status-title">Estado de peticiones</h2>
+              <div id="overview-status"></div>
+            </section>
+            <section class="rail-block status-grid" aria-label="Conexiones y cola">
+              <h2 class="rail-title">Cola y conexiones</h2>
+              <div class="status-card"><span class="status-name">Cola</span><span id="queue-badge" class="badge neutral">Leyendo</span><span class="status-line"><b id="metric-active">—</b> activos · <span id="metric-needs">—</span> necesitan revisión</span></div>
+              <div class="status-card"><span class="status-name">Obsidian</span><span id="obsidian-badge" class="badge neutral">Sin conectar</span><span class="status-line"><b id="metric-notes">—</b> resultados guardados · <span id="obsidian-foot">Configura la bóveda una vez</span></span></div>
+              <div class="status-card"><span class="status-name">Tu criterio</span><span class="badge neutral">Bandeja</span><span class="status-line"><b id="metric-questions">—</b> preguntas esperan respuesta</span></div>
+              <div class="status-card"><span class="status-name">Telegram</span><span id="telegram-badge" class="badge neutral">Desconectado</span><span class="status-line"><b id="metric-domains">—</b> dominios · <span id="telegram-foot">Telegram se configura localmente</span></span></div>
+            </section>
+          </aside>
         </div>
-        <div class="status-grid">
-          <article class="status-card">
-            <div class="card-top"><span class="status-icon purple">▤</span><span id="queue-badge" class="badge neutral">Leyendo</span></div>
-            <div class="metric" id="metric-active">—</div><div class="metric-label">trabajos activos en la cola</div>
-            <div class="metric-foot"><span id="metric-needs">—</span> necesitan revisión</div>
-          </article>
-          <article class="status-card">
-            <div class="card-top"><span class="status-icon green">✳</span><span id="obsidian-badge" class="badge neutral">Sin conectar</span></div>
-            <div class="metric" id="metric-notes">—</div><div class="metric-label">resultados guardados en Obsidian</div>
-            <div class="metric-foot" id="obsidian-foot">Configura la bóveda una vez</div>
-          </article>
-          <article class="status-card">
-            <div class="card-top"><span class="status-icon amber">?</span><span class="badge neutral">Bandeja</span></div>
-            <div class="metric" id="metric-questions">—</div><div class="metric-label">preguntas que esperan tu criterio</div>
-            <div class="metric-foot">Puedes responder aquí o por Telegram</div>
-          </article>
-          <article class="status-card">
-            <div class="card-top"><span class="status-icon blue">◉</span><span id="telegram-badge" class="badge neutral">Desconectado</span></div>
-            <div class="metric" id="metric-domains">—</div><div class="metric-label">dominios activos en inventario</div>
-            <div class="metric-foot" id="telegram-foot">Telegram se configura localmente</div>
-          </article>
-        </div>
-
       </section>
 
       <section class="page-section" id="peticiones">
