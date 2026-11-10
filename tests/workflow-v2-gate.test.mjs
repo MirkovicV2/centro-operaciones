@@ -96,7 +96,9 @@ test('an ACCEPT recommendation stops the job for the owner and never reaches int
 test('a V2 rejection, failed checks and operational blocks stop with their own codes', async t => {
   assert.equal((await gate(t, { result: summary('revision', [{ recommendation: 'REJECT' }]) })).error.code, 'workflow_v2_rejected');
   assert.equal((await gate(t, { result: summary('preparacion', []) })).error.code, 'workflow_v2_checks_failed');
-  assert.equal((await gate(t, { result: summary('bloqueado', [], { blocked_reason: 'unit review launch blocked' }) })).error.code, 'workflow_v2_blocked');
+  const blocked = (await gate(t, { result: summary('bloqueado', [], { blocked_reason: 'unit review launch blocked' }) })).error;
+  assert.equal(blocked.code, 'workflow_v2_blocked');
+  assert.match(blocked.message, /Motivo: unit review launch blocked/);
 });
 
 test('a refused submit or unreadable output is reported, not treated as a review', async t => {

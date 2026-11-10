@@ -165,7 +165,8 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
   const workflowV2 = { task: task.id, outcome, status: summary.status, tier: summary.tier ?? null, candidate,
     identity: summary.identity ?? null, evidenceId: summary.evidence_id ?? null, reviews: summary.reviews ?? [],
     blockedReason: summary.blocked_reason ?? null, next: summary.next ?? null };
-  const line = [MESSAGES[outcome], summary.tier ? `Nivel ${summary.tier}.` : '', summary.next ? `Siguiente: ${summary.next}` : ''].filter(Boolean).join(' ');
+  const line = [MESSAGES[outcome], summary.tier ? `Nivel ${summary.tier}.` : '', summary.blocked_reason ? `Motivo: ${summary.blocked_reason}.` : '',
+    summary.next ? `Siguiente: ${summary.next}` : ''].filter(Boolean).join(' ');
   await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: line.slice(0, 1000), error: code, workflowV2 });
   const error = new ProviderError(code, line.slice(0, 500), { uncertain: false });
   error.details = { v2Task: task.id, v2Status: String(summary.status ?? ''), v2Tier: String(summary.tier ?? ''),
