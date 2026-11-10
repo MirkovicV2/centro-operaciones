@@ -10,7 +10,8 @@
       "checks": ["unit-tests"],
       "risks": [],
       "declaredTier": null,
-      "timeoutMs": 3600000
+      "timeoutMs": 3600000,
+      "integrateAfterApproval": false
     }
   }
 }

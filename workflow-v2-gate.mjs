@@ -6,16 +6,22 @@
 // runs the policy checks in Bubblewrap and launches the isolated reviewer. Without
 // the file, or for any project not listed in it, nothing changes.
 //
-// Phase A (this module): the Centro never integrates a governed job. V2's review is a
+// Phase A (default): the Centro never integrates a governed job. V2's review is a
 // recommendation and only the owner decides, in V2, so the job stops with the V2
-// state and the owner's next step. Integration after the owner approves in V2 is a
-// separate step, bound to the same candidate.
+// state and the owner's next step.
+//
+// Phase B (per project, "integrateAfterApproval": true): the same stop, and then the owner
+// approves in V2 (`wfv2 approve`) and retries the job in the Centro. The retry does not
+// submit again: it reads `wfv2 status` for the V2 task bound to this exact candidate and
+// integrates only if V2 shows "aprobado" for the identity and evidence recorded at submit
+// and the checkout still has the fingerprint QA validated. Each candidate gets its own V2
+// task (job id + fingerprint prefix), so a changed candidate needs a new approval.
 //
 // data/workflow-v2.json (local, private, gitignored like the rest of data/):
 //   { "version": 1, "engineeringSystem": "<checkout of engineering-system>", "python": "python3",
 //     "projects": { "<projectId>": { "stateRoot": "<dir outside the checkout>",
 //       "reviewerConfig": "<reviewer.json>" | null, "allowedPaths": ["src/"], "checks": ["unit-tests"],
-//       "risks": [], "declaredTier": null, "timeoutMs": 3600000 } } }
+//       "risks": [], "declaredTier": null, "timeoutMs": 3600000, "integrateAfterApproval": false } } }
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,10 +54,12 @@ export function normalizeWorkflowV2(value) {
     if (!strings(entry.checks ?? [], s => NAME.test(s))) fail(`${id}: checks debe ser una lista de nombres de la política.`);
     if (!strings(entry.risks ?? [], s => NAME.test(s))) fail(`${id}: risks debe ser una lista de nombres.`);
     if (entry.declaredTier != null && !TIERS.has(entry.declaredTier)) fail(`${id}: declaredTier debe ser FAST, STANDARD, CRITICAL o null.`);
+    if (entry.integrateAfterApproval != null && typeof entry.integrateAfterApproval !== 'boolean') fail(`${id}: integrateAfterApproval debe ser true o false.`);
     const timeoutMs = entry.timeoutMs ?? 3_600_000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 4 * 3_600_000) fail(`${id}: timeoutMs entre 60000 y 14400000.`);
     projects[id] = { stateRoot: entry.stateRoot, reviewerConfig: entry.reviewerConfig ?? null, allowedPaths: [...entry.allowedPaths],
-      checks: [...(entry.checks ?? [])], risks: [...(entry.risks ?? [])], declaredTier: entry.declaredTier ?? null, timeoutMs };
+      checks: [...(entry.checks ?? [])], risks: [...(entry.risks ?? [])], declaredTier: entry.declaredTier ?? null, timeoutMs,
+      integrateAfterApproval: entry.integrateAfterApproval === true };
   }
   return { engineeringSystem: value.engineeringSystem, python, projects };
 }
@@ -74,13 +82,29 @@ export async function workflowV2For(root, job) {
 }
 
 export const v2TaskId = job => String(job.id).replace(/[^A-Za-z0-9_-]/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 120) || 'job';
+const HEX64 = /^[a-f0-9]{64}$/i;
+// Phase B: one V2 task per candidate, so an approval can never be reused for other files.
+export const v2CandidateTaskId = (job, snapshot) => `${v2TaskId(job).slice(0, 107)}-${String(snapshot).slice(0, 12).toLowerCase()}`;
+const taskIdFor = (job, entry) => entry.integrateAfterApproval && HEX64.test(job.workflowV2Snapshot ?? '') ? v2CandidateTaskId(job, job.workflowV2Snapshot) : v2TaskId(job);
+
+// The latest V2 submission recorded for exactly this QA fingerprint (current workflow first, then history).
+export function priorV2Submission(job, snapshot) {
+  if (!HEX64.test(snapshot ?? '')) return null;
+  for (const workflow of [job.workflow, ...[...(job.workflowHistory ?? [])].reverse()]) {
+    const step = workflow?.steps?.find(item => item.key === 'reviewer');
+    const v2 = step?.workflowV2;
+    if (v2?.qaSnapshot === snapshot && typeof v2.task === 'string' && v2.task && typeof v2.identity === 'string' && v2.identity
+      && typeof v2.evidenceId === 'string' && v2.evidenceId && HEX64.test(v2.candidate ?? '')) return v2;
+  }
+  return null;
+}
 
 // The V2 TASK from the job contract: each acceptance criterion is judged by the V2 reviewer
 // (manual evidence); each configured check must pass in the sandbox.
 export function buildV2Task(job, entry) {
   const acceptance = job.contract?.acceptance ?? [];
   return {
-    schema: 'wfv2-task', version: 1, id: v2TaskId(job),
+    schema: 'wfv2-task', version: 1, id: taskIdFor(job, entry),
     title: String(job.title || job.contract?.objective || job.id).slice(0, 300),
     declared_tier: entry.declaredTier, risks: entry.risks, allowed_paths: entry.allowedPaths, checks: entry.checks,
     criteria: [
@@ -125,6 +149,7 @@ export function interpretV2(summary) {
 
 const MESSAGES = {
   owner_pending: 'Workflow V2 terminó su revisión y recomienda aceptar. Decide tú en V2; el Centro no integra un encargo gobernado por V2.',
+  owner_pending_b: 'Workflow V2 terminó su revisión y recomienda aceptar. Decide tú en V2; si apruebas, reintenta este trabajo en el Centro y se integrará solo este candidato.',
   rejected: 'El revisor de Workflow V2 rechazó el candidato. Lee el informe en V2, registra tu veredicto y corrige.',
   reviewer_missing: 'Workflow V2 necesita una revisión, pero el proyecto no tiene revisor configurado (reviewerConfig).',
   checks_failed: 'Las comprobaciones de Workflow V2 fallaron en el sandbox; no se lanzó ninguna revisión.',
@@ -176,14 +201,108 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
   const workflowV2 = { task: task.id, outcome, status: summary.status, tier: summary.tier ?? null, candidate, qaSnapshot: job.workflowV2Snapshot ?? null,
     identity: summary.identity ?? null, evidenceId: summary.evidence_id ?? null, reviews: summary.reviews ?? [],
     blockedReason: summary.blocked_reason ?? null, next: summary.next ?? null };
-  const line = [MESSAGES[outcome], summary.tier ? `Nivel ${summary.tier}.` : '', summary.blocked_reason ? `Motivo: ${summary.blocked_reason}.` : '',
+  const line = [MESSAGES[entry.integrateAfterApproval && outcome === 'owner_pending' ? 'owner_pending_b' : outcome], summary.tier ? `Nivel ${summary.tier}.` : '', summary.blocked_reason ? `Motivo: ${summary.blocked_reason}.` : '',
     summary.next ? `Siguiente: ${summary.next}` : ''].filter(Boolean).join(' ');
   await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: line.slice(0, 1000), error: code, workflowV2 });
   const error = new ProviderError(code, line.slice(0, 500), { uncertain: false });
   error.details = { v2Task: task.id, v2Status: String(summary.status ?? ''), v2Tier: String(summary.tier ?? ''),
     v2Candidate: candidate ?? '', v2Next: String(summary.next ?? '') };
-  if (job.workflow?.steps?.some(step => step.key === 'integration')) {
+  // Phase B keeps the integration step pending: it runs after the owner's approval, on retry.
+  if (!entry.integrateAfterApproval && job.workflow?.steps?.some(step => step.key === 'integration')) {
     await ctx.reportStage?.({ key: 'integration', status: 'skipped', summary: 'Gobernado por Workflow V2: el Centro no integra; decide el owner en V2.' });
   }
   throw error;
+}
+
+const STATUS_STOPS = {
+  pendiente_owner: ['workflow_v2_owner_pending', 'Workflow V2 aún no tiene tu aprobación para este candidato. Aprueba en V2 y vuelve a reintentar.', false],
+  revision: ['workflow_v2_owner_pending', 'Workflow V2 todavía espera tu veredicto sobre la revisión. Decide en V2 y vuelve a reintentar.', false],
+  rechazado: ['workflow_v2_rejected', 'Rechazaste este candidato en Workflow V2; no se integra. Corrige y vuelve a pasar QA y V2.', false],
+  escalado: ['workflow_v2_rejected', 'Workflow V2 escaló este candidato; resuélvelo en V2. No se integra.', false],
+  cerrada: ['workflow_v2_rejected', 'La tarea de Workflow V2 está cerrada sin aprobación; no se integra.', false],
+  bloqueado: ['workflow_v2_blocked', 'Workflow V2 está bloqueado para este candidato; desbloquéalo en V2.', false],
+};
+
+// Phase B: reads `wfv2 status` for the task submitted for this candidate. Returns the approval binding
+// only when V2 shows "aprobado" for the same identity and evidence recorded at submit; otherwise
+// reports the reviewer stage and throws. Read-only on the V2 side.
+export async function resolveWorkflowV2Approval(job, ctx, entry, prior, { run = defaultRun } = {}) {
+  const argv = [entry.python, '-m', 'wfv2.cli', '--repo', entry.stateRoot, 'status', prior.task];
+  let result;
+  try { result = await run(argv, { cwd: entry.engineeringSystem, timeoutMs: 120_000, signal: ctx.signal }); }
+  catch (error) {
+    await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: 'No se pudo consultar Workflow V2.', error: 'workflow_v2_unavailable' });
+    throw new ProviderError('workflow_v2_unavailable', `No se pudo consultar Workflow V2: ${excerpt(error.message)}`.slice(0, 500), { uncertain: false });
+  }
+  let status;
+  try { if (result.timedOut || result.code !== 0) throw new Error(); status = JSON.parse(result.stdout); }
+  catch {
+    const detail = result?.timedOut ? 'se agotó el tiempo' : excerpt(result?.stderr?.trim().split('\n').at(-1) ?? '') || `salida ${result?.code}`;
+    await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: `No se pudo leer el estado de Workflow V2: ${detail}`.slice(0, 1000), error: 'workflow_v2_unavailable' });
+    throw new ProviderError('workflow_v2_unavailable', `No se pudo leer el estado de Workflow V2: ${detail}`.slice(0, 500), { uncertain: false });
+  }
+  const binding = { task: prior.task, identity: prior.identity, evidenceId: prior.evidenceId, candidate: prior.candidate, qaSnapshot: prior.qaSnapshot };
+  const record = (outcome, extra = {}) => ({ ...prior, outcome, status: String(status?.status ?? ''), ...extra });
+  if (status?.task !== prior.task) {
+    const error = new ProviderError('workflow_v2_identity_mismatch', 'Workflow V2 devolvió el estado de otra tarea.', { uncertain: true });
+    await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code, workflowV2: record('identity_mismatch') });
+    throw error;
+  }
+  if (status.status === 'aprobado') {
+    if (status.identity !== prior.identity || status.evidence_id !== prior.evidenceId) {
+      const error = new ProviderError('workflow_v2_approval_mismatch', 'La aprobación de Workflow V2 está atada a otra identidad o evidencia que el candidato enviado. No se integra; vuelve a pasar QA y V2.', { uncertain: false });
+      await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code, workflowV2: record('approval_mismatch') });
+      throw error;
+    }
+    const approved = record('approved', { approvedSeenAt: new Date().toISOString() });
+    // The queue moves a stopped stage through running before it can succeed; an already approved one stays.
+    if (job.workflow?.steps?.find(step => step.key === 'reviewer')?.status !== 'succeeded') {
+      await ctx.reportStage?.({ key: 'reviewer', status: 'running', summary: `Workflow V2: comprobando tu aprobación (tarea ${prior.task}).` });
+    }
+    await ctx.reportStage?.({ key: 'reviewer', status: 'succeeded', summary: `Aprobado por ti en Workflow V2 (tarea ${prior.task}). Se integrará solo este candidato.`, workflowV2: approved });
+    return binding;
+  }
+  const [code, message] = STATUS_STOPS[status.status] ?? ['workflow_v2_unexpected', `Workflow V2 devolvió un estado que el Centro no reconoce: ${String(status.status).slice(0, 40)}.`];
+  await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: message, error: code, workflowV2: record(code === 'workflow_v2_owner_pending' ? 'owner_pending' : code.replace('workflow_v2_', '')) });
+  const error = new ProviderError(code, message, { uncertain: false });
+  error.details = { v2Task: prior.task, v2Status: String(status.status ?? '') };
+  throw error;
+}
+
+const BINDING_KEYS = ['task', 'identity', 'evidenceId', 'candidate', 'qaSnapshot'];
+// Phase B: before any Git or GitHub effect, the integration record is bound to the V2 approval. A restart
+// or retry finds the same binding and continues; a record bound to another approval, or with effects and
+// no binding, stops the job instead of integrating.
+export async function bindWorkflowV2Approval(job, approval, { previous, persist }) {
+  const saved = previous?.workflowV2Approval;
+  if (saved) {
+    if (BINDING_KEYS.some(key => saved[key] !== approval[key])) {
+      throw new ProviderError('workflow_v2_approval_mismatch', 'La integración registrada pertenece a otra aprobación de Workflow V2. No se integra este candidato; revisa el registro.', { uncertain: true });
+    }
+    return previous;
+  }
+  const effects = ['commitSha', 'manifest', 'prNumber', 'prUrl', 'mergeSha'].some(key => previous?.[key] != null);
+  if (effects || (previous?.phase && !['validation_pending', 'validation_approved'].includes(previous.phase))) {
+    throw new ProviderError('workflow_v2_integration_unbound', 'Ya hay una integración registrada sin la aprobación de Workflow V2. Revísala antes de continuar.', { uncertain: true });
+  }
+  const record = { ...previous, jobId: job.id, receiptId: job.autoIntent.receiptId, repository: job.destination?.repository,
+    sourceBranch: job.branch, baseBranch: job.destination?.baseBranch, phase: 'validation_approved', status: 'validated', needsAttention: false, error: null,
+    workflowV2Approval: { ...Object.fromEntries(BINDING_KEYS.map(key => [key, approval[key]])), boundAt: new Date().toISOString() } };
+  await persist(record);
+  return record;
+}
+
+// Phase B: whether a stopped job can be resumed to read the owner's V2 approval and integrate. Pure.
+// Either the job stopped waiting for the owner, or the approval was already seen and the integration
+// step stopped (interrupted by a restart, or blocked); integration resumes from its own record.
+const RESUMABLE_V2_STOPS = new Set(['workflow_v2_owner_pending', 'workflow_v2_unavailable']);
+export function workflowV2Resumable(job) {
+  if (job?.state !== 'needs_attention' || job.kind !== 'code') return false;
+  const steps = job.workflow?.steps ?? [];
+  const reviewer = steps.find(step => step.key === 'reviewer'), integration = steps.find(step => step.key === 'integration');
+  const v2 = reviewer?.workflowV2;
+  if (!v2?.task || !v2.identity || !v2.evidenceId || !HEX64.test(v2.qaSnapshot ?? '') || !HEX64.test(v2.candidate ?? '')) return false;
+  if (steps.find(step => step.key === 'qa')?.status !== 'succeeded') return false;
+  if (reviewer.status === 'blocked') return RESUMABLE_V2_STOPS.has(reviewer.error) && (!integration || integration.status === 'queued');
+  return reviewer.status === 'succeeded' && v2.outcome === 'approved' && integration?.status === 'blocked' && !integration.dispatchId;
 }

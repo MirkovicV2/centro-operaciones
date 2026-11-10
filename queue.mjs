@@ -1,3 +1,4 @@
+import { workflowV2Resumable } from './workflow-v2-gate.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -1287,8 +1288,11 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
     const workflow = previous.workflow;
     const stageIndex = workflow?.steps?.findIndex(step => step.key === workflow.currentStage) ?? -1;
     const activeStep = stageIndex >= 0 ? workflow.steps[stageIndex] : workflow?.steps?.find(step => ['failed', 'blocked', 'running'].includes(step.status));
+    // A deterministic integration step has no Orca dispatch to check. After a Workflow V2 approval it
+    // resumes from its own record, which never repeats an effect it cannot confirm (phase B).
     if (activeStep && ['running', 'blocked'].includes(activeStep.status) && !activeStep.dispatchId
-      && (activeStep.error === 'interrupted' || ['starting', 'unknown'].includes(activeStep.dispatchStatus))) {
+      && (activeStep.error === 'interrupted' || ['starting', 'unknown'].includes(activeStep.dispatchStatus))
+      && !(activeStep.key === 'integration' && workflowV2Resumable(previous))) {
       throw new QueueError('El despacho de esta etapa no quedó confirmado. Comprueba Orca antes de reintentar; la cola no iniciará una copia nueva.', 'dispatch_unknown');
     }
     const recovery = stoppedDeveloperRecovery;
