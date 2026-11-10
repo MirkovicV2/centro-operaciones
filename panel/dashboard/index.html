@@ -22,6 +22,7 @@
       <nav class="nav" aria-label="Navegación principal">
         <div class="nav-caption" aria-hidden="true">Seguimiento</div>
         <a class="nav-link active" href="#inicio"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="7" height="7" rx="1"/><rect x="13.5" y="4" width="7" height="7" rx="1"/><rect x="3.5" y="14" width="7" height="6" rx="1"/><rect x="13.5" y="14" width="7" height="6" rx="1"/></svg></span> Resumen</a>
+        <a class="nav-link" href="#atencion"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15zM10 21h4"/></svg></span> Atención <i id="attention-count">0</i></a>
         <a class="nav-link" href="#peticiones"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 5H4v12h4v3l4-3h8zM8 9h8m-8 4h5"/></svg></span> Peticiones <i id="request-count">0</i></a>
         <a class="nav-link" href="#trabajos"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.1M4 12h.1M4 18h.1"/></svg></span> Trabajos</a>
         <div class="nav-caption" aria-hidden="true">Operaciones</div>
@@ -78,6 +79,14 @@
               <div class="status-card"><span class="status-name">Telegram</span><span id="telegram-badge" class="badge neutral">Desconectado</span><span class="status-line"><b id="metric-domains">—</b> dominios · <span id="telegram-foot">Telegram se configura localmente</span></span></div>
             </section>
           </aside>
+        </div>
+      </section>
+
+      <section class="page-section" id="atencion" hidden>
+        <div class="section-heading section-heading-spaced"><div><div class="eyebrow">BANDEJA</div><h2>Atención</h2><p class="section-copy">Lo que espera tu criterio, en un solo sitio. Cada asunto explica qué ocurrió, por qué te necesita y dónde se decide.</p></div></div>
+        <div class="attention-layout">
+          <div id="attention-list" class="attention-list" aria-label="Asuntos pendientes"></div>
+          <div id="attention-detail" class="attention-detail" aria-live="polite"></div>
         </div>
       </section>
 

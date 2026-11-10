@@ -182,6 +182,92 @@ function stageTrack(job) {
   return track;
 }
 
+
+// Atención: one inbox for what waits on the owner. It explains and links to where each thing is
+// decided; the actions themselves stay where they already live (Trabajos, Ideas), so there is one path.
+function attentionItems(data) {
+  const items = [];
+  for (const job of data.jobs.filter(item => item.state === 'needs_attention')) {
+    const step = job.workflow?.steps?.find(item => item.key === job.workflow?.currentStage);
+    const evidence = [];
+    if (step?.summary) evidence.push({ label: `Informe de ${step.label}`, level: 'Declarado por el agente' });
+    if (job.error?.code) evidence.push({ label: `Código ${job.error.code}`, level: 'Registrado por el Centro' });
+    if (step?.dispatchId) evidence.push({ label: `Dispatch ${step.dispatchId}`, level: 'Registrado por el Centro' });
+    items.push({
+      id: `job-${job.id}`, kind: 'job', group: 'Trabajos que necesitan revisión', label: 'Revisión', tone: 'attention',
+      title: job.title, context: `${job.projectName || businessNames[job.business]} · #${job.id}`, at: job.finishedAt || job.createdAt,
+      what: job.error?.message || 'El trabajo se detuvo y necesita revisión.',
+      why: `Etapa ${step?.label || job.workflow?.currentStage || 'sin confirmar'} · intento ${job.attempts}/${job.maxAttempts}. Hasta que decidas, el trabajo no sigue.`,
+      where: 'Las opciones (reintentar, retomar o cerrar) están en la ficha del trabajo y piden confirmación.',
+      action: ['Abrir el trabajo', () => { location.hash = '#trabajos'; focusJob(job.id); }], evidence, job,
+    });
+  }
+  for (const question of data.questions.filter(item => item.status === 'pending')) {
+    items.push({
+      id: `question-${question.id}`, kind: 'question', group: 'Preguntas para ti', label: 'Pregunta', tone: 'question',
+      title: question.question, context: question.projectName || question.jobTitle || businessNames[question.business] || '', at: question.createdAt,
+      what: question.context || 'Un agente o el coordinador necesita tu criterio para continuar.',
+      why: 'La respuesta se une a las decisiones del encargo; el agente sigue con lo que no depende de ella.',
+      where: 'Se responde en Ideas y preguntas, o por Telegram.',
+      action: ['Responder en Ideas y preguntas', () => { location.hash = '#ideas'; }], evidence: [],
+    });
+  }
+  for (const request of (data.coordinatorRequests || []).filter(item => ['unknown', 'needs_attention'].includes(item.notification?.status))) {
+    items.push({
+      id: `request-${request.id}`, kind: 'request', group: 'Avisos al coordinador', label: 'Aviso', tone: 'attention',
+      title: request.snapshot?.title || 'Solicitud del panel', context: request.projectName || request.snapshot?.projectName || 'Sin proyecto', at: request.createdAt,
+      what: request.notification?.reason || 'No consta que el aviso llegara al coordinador.',
+      why: 'Mientras no se confirme la entrega, el coordinador puede no haber visto la solicitud.',
+      where: 'Se consulta la entrega en Orca desde la solicitud, en Trabajos.',
+      action: ['Ver la solicitud', () => { location.hash = '#trabajos'; document.getElementById('coordinator-inbox')?.scrollIntoView({ block: 'start' }); }], evidence: [],
+    });
+  }
+  return items;
+}
+
+function renderAttention(data) {
+  const items = attentionItems(data);
+  $('#attention-count').textContent = String(items.length);
+  const list = $('#attention-list'), detail = $('#attention-detail');
+  const signature = JSON.stringify([state.business, state.attentionSelected, items.map(item => [item.id, item.what, item.at])]);
+  if (list.dataset.signature === signature) return;
+  list.dataset.signature = signature;
+  list.replaceChildren(); detail.replaceChildren();
+  if (!items.length) {
+    list.append(el('p', 'attention-empty', 'Nada te espera ahora mismo.'));
+    detail.append(el('p', 'attention-empty', 'Cuando un trabajo se detenga, un agente pregunte o un aviso no llegue, aparecerá aquí.'));
+    return;
+  }
+  const selected = items.find(item => item.id === state.attentionSelected) || items[0];
+  for (const group of [...new Set(items.map(item => item.group))]) {
+    list.append(el('h3', 'attention-group', group));
+    for (const item of items.filter(entry => entry.group === group)) {
+      const row = el('button', `attention-row is-${item.tone}${item === selected ? ' selected' : ''}`);
+      row.type = 'button';
+      row.setAttribute('aria-pressed', String(item === selected));
+      const mark = el('span', 'overview-row-mark'); mark.setAttribute('aria-hidden', 'true');
+      const text = el('span', 'overview-row-text');
+      text.append(el('span', 'overview-row-title', item.title), el('span', 'overview-row-reason', [item.label, item.context, item.at && formatDate(item.at)].filter(Boolean).join(' · ')));
+      row.append(mark, text);
+      row.onclick = () => { state.attentionSelected = item.id; renderAttention(data); };
+      list.append(row);
+    }
+  }
+  detail.append(el('p', 'attention-kicker', `${selected.label} · ${selected.context}`), el('h3', 'attention-title', selected.title));
+  if (selected.job) { const track = stageTrack(selected.job); if (track) detail.append(track); }
+  for (const [heading, text] of [['Qué ocurrió', selected.what], ['Por qué te necesita', selected.why], ['Dónde se decide', selected.where]]) {
+    detail.append(el('h4', 'attention-label', heading), el('p', 'attention-text', text));
+  }
+  if (selected.evidence.length) {
+    detail.append(el('h4', 'attention-label', 'Evidencia'));
+    const evidence = el('ul', 'attention-evidence');
+    for (const entry of selected.evidence) { const li = el('li', '', entry.label); li.append(el('span', 'attention-level', entry.level)); evidence.append(li); }
+    detail.append(evidence);
+  }
+  const button = el('button', 'button primary', selected.action[0]); button.type = 'button'; button.onclick = selected.action[1];
+  detail.append(button);
+}
+
 function renderJobs(data) {
   const list = $('#jobs-list'), historyList = $('#history-list');
   const historyFilters = [...$('#history .history-filters').querySelectorAll('input, select')].map(input => input.value);
@@ -1024,6 +1110,7 @@ async function refresh() {
     refreshProjectSelectors(data.projects || []);
     ideaCheckoutHint();
     renderJobs(data);
+    renderAttention(data);
     renderQuestions(data);
     window.RequestsView?.render(data, state.business);
     renderIdeas(data);
@@ -1199,7 +1286,7 @@ function applyBusinessContext() {
 }
 function showSection() {
   const id = location.hash.slice(1) || 'inicio';
-  const selected = ['inicio', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
+  const selected = ['inicio', 'atencion', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
   if (state.visibleSection === selected) return;
   state.visibleSection = selected;
   document.querySelectorAll('.page-section').forEach(section => { section.hidden = section.id !== selected; });
