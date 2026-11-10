@@ -35,8 +35,15 @@ function addField(hash, value) {
 
 // `git` and `gh` are injected command adapters. Tests use deterministic fakes;
 // production calls are only reached from the explicitly eligible auto-run path.
+// 17: a bounded default wait for checks (15 min, the maximum the validation below
+// allows) instead of an unbounded one, and an actionable no_checks state when the
+// PR never registers any check.
+export const DEFAULT_CHECKS_TIMEOUT_MS = 900_000;
+// Checks can register minutes after the push; only a PR still without any check after
+// this grace is reported as no_checks (before the generic timeout, with a clearer action).
+export const DEFAULT_NO_CHECKS_GRACE_MS = 600_000;
 export async function integrateGitHub(job, ctx, { git, gh, persist = async () => {}, previous = null, now = () => new Date().toISOString(),
-  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = null, checksIntervalMs = 15_000 } = {}) {
+  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = DEFAULT_CHECKS_TIMEOUT_MS, checksIntervalMs = 15_000, noChecksGraceMs = DEFAULT_NO_CHECKS_GRACE_MS } = {}) {
   const intent = job.autoIntent;
   if (!intent || intent.eligible !== true || !intent.receiptId || job.state === 'cancelled') return { status: 'skipped', reason: 'not_eligible' };
   const dest = job.destination || {};
@@ -46,7 +53,8 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (!dest.repository || !branchOk(job.branch) || !branchOk(dest.baseBranch)) throw new Error('Configura repositorio y ramas fuente/base existentes antes de integrar.');
   if (!git || !gh) throw new Error('Adaptadores de GitHub no configurados; necesita revisión.');
   if (checksTimeoutMs !== null && (!Number.isFinite(checksTimeoutMs) || checksTimeoutMs < 0 || checksTimeoutMs > 900_000)
-    || !Number.isFinite(checksIntervalMs) || checksIntervalMs < 1 || checksIntervalMs > 30_000) throw new Error('Límites de espera de checks inválidos.');
+    || !Number.isFinite(checksIntervalMs) || checksIntervalMs < 1 || checksIntervalMs > 30_000
+    || noChecksGraceMs !== null && (!Number.isFinite(noChecksGraceMs) || noChecksGraceMs < 0)) throw new Error('Límites de espera de checks inválidos.');
   if (previous && ['jobId', 'receiptId', 'repository', 'sourceBranch', 'baseBranch'].some(key => previous[key] !== ({ jobId: job.id, receiptId: intent.receiptId, repository: dest.repository, sourceBranch: job.branch, baseBranch: dest.baseBranch })[key])) throw new Error('El registro de integración pertenece a otro encargo o destino.');
   if (previous?.commitSha && (!/^[a-f0-9]{64}$/i.test(previous.manifest || '') || previous.manifest !== job.integrationSnapshot)) throw new Error('Falta el manifest original del commit aprobado; no se sustituye por otro snapshot.');
   if (previous?.phase === 'complete') return previous;
@@ -172,6 +180,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
     return { ready, failure, checks: summary, mergeable: detail.mergeable };
   };
   const deadline = checksTimeoutMs === null ? Infinity : clock() + checksTimeoutMs;
+  const noChecksAt = noChecksGraceMs === null ? Infinity : clock() + noChecksGraceMs;
   let lastChecks;
   const waitUntilReady = async () => {
     for (;;) {
@@ -185,16 +194,19 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
         delete record.waitTimedOut;
         return;
       }
+      // A mergeable PR still without a single registered check after the grace has no CI to wait for.
+      const noChecks = !result.failure && result.mergeable === 'MERGEABLE' && result.checks.length === 0 && clock() >= noChecksAt && clock() < deadline;
       const signature = JSON.stringify(result);
-      if (signature !== lastChecks || result.failure || clock() >= deadline) {
+      if (signature !== lastChecks || result.failure || noChecks || clock() >= deadline) {
         lastChecks = signature;
         await save('checks_pending', { prNumber: pr.number, prUrl: pr.url, checks: result.checks,
-          checkState: result.failure ? 'failed' : 'waiting', checkedAt: now(),
-          ...(result.failure ? { error: result.failure } : {}), ...(clock() >= deadline ? { waitTimedOut: true } : {}) });
+          checkState: result.failure ? 'failed' : noChecks ? 'no_checks' : 'waiting', checkedAt: now(),
+          ...(result.failure ? { error: result.failure } : noChecks ? { error: 'La PR no tiene checks registrados.' } : {}), ...(clock() >= deadline ? { waitTimedOut: true } : {}) });
       }
       if (result.failure) throw Object.assign(new Error(`PR pendiente de revisión: ${result.failure}`), { code: 'github_checks_blocked' });
+      if (noChecks) throw Object.assign(new Error(`La PR ${pr.url} no tiene checks registrados: configura CI en la rama base o revisa y fusiona manualmente; la integración no fusiona sin checks aprobados.`), { code: 'github_no_checks' });
       if (clock() >= deadline) throw Object.assign(new Error('PR pendiente de checks al agotar la espera acotada; conserva esta PR para revisión.'), { code: 'github_checks_timeout' });
-      await wait(Math.min(checksIntervalMs, deadline - clock()), ctx.signal);
+      await wait(Math.min(checksIntervalMs, deadline - clock(), Math.max(1, noChecksAt - clock())), ctx.signal);
     }
   };
   await waitUntilReady();
