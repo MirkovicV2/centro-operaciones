@@ -18,7 +18,7 @@
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="24" cy="24" r="11"/><circle cx="24" cy="24" r="4"/><path d="M24 13V7m0 28v6M13 24H7m28 0h6M16 16l-5-5m21 21 5 5m-5-21 5-5M16 32l-5 5"/><circle cx="24" cy="4" r="3"/><circle cx="24" cy="44" r="3"/><circle cx="4" cy="24" r="3"/><circle cx="44" cy="24" r="3"/><path d="M8 8h3v3H8zm29 29h3v3h-3zm0-29h3v3h-3zM8 37h3v3H8z" fill="currentColor" stroke="none"/></svg></span>
         <span><b>Centro</b><small>de operaciones</small></span>
       </a>
-      <label class="business-selector">Negocio<select id="business-context"><option value="agency">Agencia digital</option><option value="games">Videojuegos</option></select></label>
+      <label class="business-selector"><span class="visually-hidden">Negocio</span><select id="business-context"><option value="agency">Agencia digital</option><option value="games">Videojuegos</option></select></label>
       <nav class="nav" aria-label="Navegación principal">
         <div class="nav-caption" aria-hidden="true">Seguimiento</div>
         <a class="nav-link active" href="#inicio"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="7" height="7" rx="1"/><rect x="13.5" y="4" width="7" height="7" rx="1"/><rect x="3.5" y="14" width="7" height="6" rx="1"/><rect x="13.5" y="14" width="7" height="6" rx="1"/></svg></span> Resumen</a>
@@ -63,11 +63,19 @@
             </section>
           </div>
           <aside class="overview-rail" aria-label="Contexto">
-            <section class="rail-block" aria-labelledby="overview-activity-title">
+            <section class="rail-block" aria-labelledby="overview-projects-title">
+              <h2 class="rail-title" id="overview-projects-title">Proyectos</h2>
+              <div id="overview-projects"></div>
+            </section>
+            <section class="rail-block" aria-labelledby="overview-feed-title">
+              <h2 class="rail-title" id="overview-feed-title">Actividad</h2>
+              <ol id="overview-feed" class="overview-feed"></ol>
+            </section>
+            <section class="rail-block" aria-labelledby="overview-activity-title" hidden>
               <h2 class="rail-title" id="overview-activity-title">Actividad por etapa</h2>
               <div id="overview-activity"></div>
             </section>
-            <section class="rail-block" aria-labelledby="overview-status-title">
+            <section class="rail-block" aria-labelledby="overview-status-title" hidden>
               <h2 class="rail-title" id="overview-status-title">Estado de peticiones</h2>
               <div id="overview-status"></div>
             </section>

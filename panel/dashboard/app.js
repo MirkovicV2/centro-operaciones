@@ -91,6 +91,22 @@ function capturePanelDetails(...roots) {
   };
 }
 
+// Relative time for lists ("hace 12 min"); the full date stays in the title attribute and in detail views.
+function relativeTime(value) {
+  if (!value) return 'Sin fecha';
+  const date = new Date(value), minutes = Math.round((Date.now() - date.valueOf()) / 60000);
+  if (Number.isNaN(minutes)) return String(value);
+  if (minutes < 1) return 'ahora';
+  if (minutes < 60) return `hace ${minutes} min`;
+  if (minutes < 60 * 24) return `hace ${Math.round(minutes / 60)} h`;
+  if (minutes < 60 * 24 * 2) return 'ayer';
+  return formatDate(value);
+}
+function timeNode(value, className = 'overview-row-when') {
+  const node = el('time', className, relativeTime(value));
+  if (value) { node.dateTime = new Date(value).toISOString?.() || String(value); node.title = new Date(value).toLocaleString('es-ES'); }
+  return node;
+}
 function formatDate(value) {
   if (!value) return 'Sin fecha';
   const date = new Date(value);
@@ -247,7 +263,7 @@ function renderAttention(data) {
       row.setAttribute('aria-pressed', String(item === selected));
       const mark = el('span', 'overview-row-mark'); mark.setAttribute('aria-hidden', 'true');
       const text = el('span', 'overview-row-text');
-      text.append(el('span', 'overview-row-title', item.title), el('span', 'overview-row-reason', [item.label, item.context, item.at && formatDate(item.at)].filter(Boolean).join(' · ')));
+      text.append(el('span', 'overview-row-title', item.title), el('span', 'overview-row-reason', [item.label, item.context, item.at && relativeTime(item.at)].filter(Boolean).join(' · ')));
       row.append(mark, text);
       row.onclick = () => { state.attentionSelected = item.id; renderAttention(data); };
       list.append(row);
@@ -1557,9 +1573,42 @@ function renderOverviewCharts(traces) {
   $('#overview-status').replaceChildren(totals, overviewLegend(requestCounts, { ...overviewStatusLabels, done: 'Cerradas' }));
 }
 
+// Overview side rail, as in the mockup: each project with its stage, next action and active job, then the
+// latest events across requests. Only what /api/state already carries.
+function renderOverviewRail(data, traces) {
+  const projects = $('#overview-projects'); projects.replaceChildren();
+  const list = (data.projects || []).filter(project => project.status !== 'completed').slice(0, 6);
+  if (!list.length) projects.append(el('p', 'rail-empty', 'Sin proyectos en este negocio todavía.'));
+  for (const project of list) {
+    const card = el('a', 'rail-project'); card.href = '#proyectos';
+    const head = el('span', 'rail-project-head');
+    head.append(el('span', 'rail-mono', (project.name || '?').trim().charAt(0).toUpperCase()), el('b', '', project.name));
+    if (project.stage) head.append(el('span', 'rail-stage', project.stage));
+    card.append(head);
+    const active = data.jobs.find(job => job.projectId === project.id && ['running', 'needs_attention'].includes(job.state));
+    card.append(el('span', 'rail-line', active ? `#${active.id} · ${statusNames[active.state]}` : 'Sin trabajos activos'));
+    if (project.nextAction) card.append(el('span', 'rail-next', `Siguiente: ${project.nextAction}`));
+    const checkout = (data.checkouts || []).find(item => item.projectId === project.id);
+    const source = el('span', 'rail-source');
+    const mark = el('span', `pv pv-${project.workspace || checkout ? 'observed' : 'unknown'}`); mark.setAttribute('aria-hidden', 'true');
+    source.append(mark, project.workspace || checkout ? 'Checkout configurado' : 'Sin checkout');
+    card.append(source);
+    projects.append(card);
+  }
+  const feed = $('#overview-feed'); feed.replaceChildren();
+  const events = traces.flatMap(trace => (trace.events || []).map(event => ({ ...event, title: trace.title }))).filter(event => event.at).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 6);
+  if (!events.length) feed.append(el('li', 'rail-empty', 'La actividad aparecerá aquí.'));
+  for (const event of events) {
+    const li = el('li', '');
+    li.append(el('span', 'feed-text', `${event.label || event.kind || 'Evento'} · ${event.title || ''}`), timeNode(event.at, 'feed-time'));
+    feed.append(li);
+  }
+}
+
 function renderActionSummary(raw, data) {
   const traces = data.requestTraces.filter(trace => trace.status !== 'withdrawn');
   renderOverviewCharts(traces);
+  renderOverviewRail(data, traces);
   const metrics = $('#overview-metrics'); metrics.replaceChildren();
   const groups = [
     ['Requiere tu acción', [...data.jobs.filter(job => job.state === 'needs_attention').map(job => ({ title: job.title, reason: job.error?.message || 'Revisa la etapa y sus informes antes de continuar.', job, kind: 'attention' })), ...data.questions.filter(q => q.status === 'pending').map(q => ({ title: q.question, reason: 'Decisión pendiente', href: '#ideas', kind: 'question' }))]],
@@ -1601,7 +1650,7 @@ function renderActionSummary(raw, data) {
         const track = stageTrack(item.job);
         if (track) row.append(track);
         const when = item.job.finishedAt || item.job.startedAt || item.job.createdAt;
-        if (when) row.append(el('span', 'overview-row-when', formatDate(when)));
+        if (when) row.append(timeNode(when));
       }
       row.onclick = () => item.job ? openRun(item.job.id) : (location.hash = item.href);
       section.append(row);
@@ -1620,7 +1669,7 @@ function renderActionSummary(raw, data) {
       const text = el('span', 'overview-row-text');
       text.append(el('strong', 'overview-row-title', title), el('span', 'overview-row-reason', context !== title ? context : ''));
       const status = overviewTone(trace.status);
-      item.append(text, el('span', `request-state is-${status === 'pending' ? 'active' : status}`, trace.statusLabel || 'Pendiente'), el('span', 'overview-row-when', formatDate(trace.events?.at(-1)?.at)));
+      item.append(text, el('span', `request-state is-${status === 'pending' ? 'active' : status}`, trace.statusLabel || 'Pendiente'), timeNode(trace.events?.at(-1)?.at));
       list.append(item);
     }
     recent.append(list);
