@@ -16,9 +16,9 @@ Si fuente y base son iguales se crea un commit local y se hace push normal sin f
 
 ### Checks con un token fine-grained (mejora 38)
 
-Con la sesión normal de `gh` (keyring o un token clásico) los checks se leen de `statusCheckRollup`, como siempre. Un token fine-grained no puede leer *check runs*: el permiso Checks no existe para ese tipo de token y GitHub responde «Resource not accessible by personal access token». Solo en ese caso, y desde entonces para esa integración (`checksSource: "actions"` en el registro), los checks se leen de la API de Actions (`repos/<owner>/<repo>/actions/runs?head_sha=<head>`): cuenta la ejecución más reciente de cada workflow y evento para el commit exacto, y una lista incompleta o de 100 o más ejecuciones bloquea en vez de suponer.
+La integración consulta el conjunto completo de checks mediante `statusCheckRollup`. Si la credencial no puede leer los check runs antes de publicar, se detiene con `github_checks_unreadable`. Si la lectura se bloquea después de abrir la PR, conserva la misma PR en `no_permission`. Para reanudar, usa una credencial con acceso al conjunto completo.
 
-Permisos mínimos del token fine-grained, limitado al repositorio: Contents (lectura y escritura), Pull requests (lectura y escritura), Actions (lectura) y Metadata (lectura). Límite: por esta vía solo se ven los workflows de GitHub Actions; si la rama base exige checks de otra CI (estados de commit o apps externas), usa la sesión normal de `gh`. La protección de rama de GitHub sigue impidiendo el merge si un check requerido no ha pasado.
+La API de Actions solo muestra sus propios workflows. No autoriza el merge cuando falta acceso al resto de checks. La compatibilidad de un token fine-grained depende de que pueda consultar todos los checks en el repositorio de destino.
 
 ## Estados de panel
 
