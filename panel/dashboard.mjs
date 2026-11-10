@@ -60,6 +60,11 @@ const tailscaleAccess = await fs.readFile(path.join(APP_ROOT, 'data', 'tailscale
     if (error.code !== 'ENOENT') console.warn('Acceso Tailscale desactivado: revisa la configuración local.');
     return null;
   });
+// 25: with Claude, Orca must open workers as Terminal. Read-only check; the panel only warns.
+import { configuredOrcaAgent } from '../local-tools.mjs';
+import { inspectOrcaAgentSettings } from '../orca-settings.mjs';
+const orcaPreflight = await inspectOrcaAgentSettings({ agent: configuredOrcaAgent() }).catch(error => ({ available: false, reason: error.code || 'orca_settings_error', surface: 'unknown', permissionMode: null, warnings: [] }));
+for (const warning of configuredOrcaAgent() === 'claude' ? orcaPreflight.warnings : []) console.warn(`Preflight de Orca: ${warning}`);
 const runtime = Object.freeze({
   pid: process.pid,
   startupAt: new Date().toISOString(),
@@ -176,7 +181,7 @@ async function dashboardData() {
     messages: inbox.messages.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
     exportedCount: Object.keys(inbox.exportedJobs).length,
     automation,
-    settings: { vaultPath: config.vaultPath, queueRoot: QUEUE_ROOT, autoRun: false, telegram: isBotRunning, runtime },
+    settings: { vaultPath: config.vaultPath, queueRoot: QUEUE_ROOT, autoRun: false, telegram: isBotRunning, runtime, orcaAgent: configuredOrcaAgent(), orcaPreflight },
   };
 }
 

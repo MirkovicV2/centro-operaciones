@@ -20,3 +20,11 @@ export function configuredOrcaAgent(env = process.env) {
 }
 
 export const CODEX_EXE = localExecutable('codex', 'OpenAI', 'Codex', 'bin', 'codex.exe');
+
+// Orca's per-user data directory. Windows keeps APPDATA; Linux follows XDG (observed on
+// Ubuntu 26.10: ~/.config/orca); macOS uses Application Support (hypothesis, not verified).
+export function orcaUserDataDir({ platform = process.platform, env = process.env, home = homedir() } = {}) {
+  if (platform === 'win32') return path.win32.join(env.APPDATA ?? path.win32.join(home, 'AppData', 'Roaming'), 'orca');
+  if (platform === 'darwin') return path.posix.join(home, 'Library', 'Application Support', 'orca');
+  return path.posix.join(env.XDG_CONFIG_HOME?.trim() || path.posix.join(home, '.config'), 'orca');
+}

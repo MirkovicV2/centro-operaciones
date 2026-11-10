@@ -42,6 +42,19 @@ Abre [el panel local](http://127.0.0.1:4187) y deja esa terminal abierta. Puedes
 
 Comprueba la conexión con `curl -fsS http://127.0.0.1:4187/api/coordinators`. Si la Run o el propietario no coinciden, revisa esos datos en la terminal del coordinador. Conserva el lanzamiento con `CENTRO_ORCA_AGENT=claude npm start`. El valor selecciona Claude para los trabajadores que lanza el panel y para la preparación indicada al coordinador. Los trabajadores usan el modelo configurado en Claude Code. Sin esa variable, el panel usa Codex. La recuperación desde archivos de sesión privados es específica de Codex. Claude usa la entrega y la transcripción nativas de Orca.
 
+## Abrir los agentes Claude como Terminal
+
+Orca 1.4.253 abre por defecto los agentes nuevos como **sesión de chat** (`agentDefaultSurface: chat`). Un trabajador así (`structworker_…`) no tiene terminal: la cola no puede observar su salida en vivo y en la prueba E2E solo las etapas con trabajadores de **Terminal** cerraron con normalidad. Antes de ejecutar encargos:
+
+1. **Settings → Agents → «Open agents as»**: pon Claude (y Codex) en **Terminal** («Set all to Terminal»). Internamente queda `nativeChatProviders = { claude: false, codex: false }`.
+2. **Settings → Agents → «Agent Permissions»**: elige el modo de permisos de los trabajadores.
+   - «Ask for approval» (`ask`): cada comando pide aprobación; la etapa no termina sola. No sirve para la cola.
+   - «Accept edits» (`accept-edits`): aprueba ediciones, pero sigue preguntando por los comandos Bash de verificación.
+   - «Approve for me» (`auto`), **recomendado**: un clasificador aprueba o deniega cada comando. Con la [plantilla de permisos](#permisos-de-los-trabajadores-claude) los comandos simples pasan; los encadenados pueden denegarse.
+   - «Full access» (`full-access`): ejecuta todo sin diálogo. La lista `deny` del checkout es la única barrera; úsalo solo con checkouts de prueba.
+
+Al arrancar con `CENTRO_ORCA_AGENT=claude`, el panel lee en modo solo lectura la configuración de Orca (`~/.config/orca/profiles/<perfil>/profile-state.db`, dominio `settings`) y avisa por consola si Claude se abrirá como chat o si el modo de permisos es `ask`. El resultado está en `settings.orcaPreflight` de `/api/state`. Si la configuración no se puede leer, avisa de que hay que comprobarlo a mano; nunca la modifica.
+
 ## Permisos de los trabajadores Claude
 
 Claude Code lee `.claude/settings.local.json` del checkout en el que trabaja. La plantilla [ejemplos/claude-settings.local.example.json](../ejemplos/claude-settings.local.example.json) permite lo que necesita un trabajador de la cola y deniega lo que el contrato prohíbe. Cópiala al checkout aislado de cada proyecto de prueba y sustituye los marcadores; el panel no la aplica automáticamente a checkouts ajenos.
