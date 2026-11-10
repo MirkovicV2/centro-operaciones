@@ -42,6 +42,18 @@ Abre [el panel local](http://127.0.0.1:4187) y deja esa terminal abierta. Puedes
 
 Comprueba la conexión con `curl -fsS http://127.0.0.1:4187/api/coordinators`. Si la Run o el propietario no coinciden, revisa esos datos en la terminal del coordinador. Conserva el lanzamiento con `CENTRO_ORCA_AGENT=claude npm start`. El valor selecciona Claude para los trabajadores que lanza el panel y para la preparación indicada al coordinador. Los trabajadores usan el modelo configurado en Claude Code. Sin esa variable, el panel usa Codex. La recuperación desde archivos de sesión privados es específica de Codex. Claude usa la entrega y la transcripción nativas de Orca.
 
+## Niveles por rol: modelo y esfuerzo
+
+Cada rol tiene un nivel (`ligero`, `estandar`, `profundo`) que cada agente traduce a `--model/--effort` de `worker-start`. Sin configuración, Codex recibe exactamente los flags de siempre y Claude no recibe ninguno (usa el modelo de su instalación).
+
+| Rol | Nivel por defecto | Codex (defecto) | Claude (defecto) |
+| --- | --- | --- | --- |
+| planificador | profundo | `gpt-6-luna` / `high` | sin flags |
+| ux, desarrollador, qa, revisor | estandar | `gpt-6.1-sol` / `medium` | sin flags |
+| (cualquiera) | ligero | `gpt-6.1-sol` / `low` | sin flags |
+
+Para cambiar niveles o definir flags de Claude, copia [ejemplos/orca-launch-levels.example.json](../ejemplos/orca-launch-levels.example.json) a `data/orca-launch-levels.json` (no versionado). Solo se aplican las entradas que escribas; un archivo inválido detiene el despacho con el error `launch_levels_invalid` en lugar de lanzar con flags adivinados. El nivel usado queda en `jobs[].workflow.steps[].launchLevel`.
+
 ## Prueba en dos pasos
 
 1. En **Peticiones → Nueva consulta → Preguntar al coordinador**, envía «Resume qué dice Obsidian sobre el color principal del Proyecto de prueba». Mira **Peticiones** para ver el aviso, las fuentes y la respuesta. Esta opción abre una consulta.

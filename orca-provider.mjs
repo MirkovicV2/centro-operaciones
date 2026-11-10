@@ -27,6 +27,58 @@ const ROLES = {
   revisor: { name: 'revisor', stageKey: 'reviewer', label: 'Revisión de código', model: 'gpt-6.1-sol', effort: 'medium' },
 };
 
+// 4: launch levels per role, translated per agent into --model/--effort. The
+// defaults reproduce today's Codex flags exactly; Claude receives no flags unless
+// data/orca-launch-levels.json defines them. The file is optional and local.
+export const LAUNCH_LEVELS = ['ligero', 'estandar', 'profundo'];
+export const DEFAULT_LAUNCH_LEVELS = Object.freeze({
+  roles: Object.freeze({ planificador: 'profundo', ux: 'estandar', desarrollador: 'estandar', qa: 'estandar', revisor: 'estandar' }),
+  agents: Object.freeze({
+    codex: Object.freeze({ ligero: { model: 'gpt-6.1-sol', effort: 'low' }, estandar: { model: 'gpt-6.1-sol', effort: 'medium' }, profundo: { model: 'gpt-6-luna', effort: 'high' } }),
+    claude: Object.freeze({}),
+  }),
+});
+const LAUNCH_LEVELS_FILE = 'orca-launch-levels.json';
+const flagValue = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,100}$/.test(value);
+export function normalizeLaunchLevels(value) {
+  const fail = message => { throw new ProviderError('launch_levels_invalid', `data/${LAUNCH_LEVELS_FILE}: ${message}`, { uncertain: false }); };
+  if (value === null || value === undefined) return DEFAULT_LAUNCH_LEVELS;
+  if (typeof value !== 'object' || Array.isArray(value)) fail('debe ser un objeto con roles y agents.');
+  const roles = { ...DEFAULT_LAUNCH_LEVELS.roles };
+  for (const [role, level] of Object.entries(value.roles ?? {})) {
+    if (!ROLES[role]) fail(`rol desconocido ${role}.`);
+    if (!LAUNCH_LEVELS.includes(level)) fail(`nivel desconocido ${level} para ${role}; usa ${LAUNCH_LEVELS.join(', ')}.`);
+    roles[role] = level;
+  }
+  const agents = { codex: { ...DEFAULT_LAUNCH_LEVELS.agents.codex }, claude: {} };
+  for (const [agent, table] of Object.entries(value.agents ?? {})) {
+    if (!agents[agent]) fail(`agente desconocido ${agent}; usa codex o claude.`);
+    if (!table || typeof table !== 'object' || Array.isArray(table)) fail(`la tabla de ${agent} debe ser un objeto por nivel.`);
+    for (const [level, flags] of Object.entries(table)) {
+      if (!LAUNCH_LEVELS.includes(level)) fail(`nivel desconocido ${level} en ${agent}.`);
+      if (flags === null) { delete agents[agent][level]; continue; }
+      if (!flags || typeof flags !== 'object' || (flags.model !== undefined && !flagValue(flags.model)) || (flags.effort !== undefined && !flagValue(flags.effort))
+        || (flags.model === undefined && flags.effort === undefined)) fail(`${agent}.${level} necesita model y/o effort con caracteres [A-Za-z0-9._:-].`);
+      agents[agent][level] = { ...(flags.model !== undefined ? { model: flags.model } : {}), ...(flags.effort !== undefined ? { effort: flags.effort } : {}) };
+    }
+  }
+  return { roles, agents };
+}
+export async function readLaunchLevels(root) {
+  let raw;
+  try { raw = await fs.readFile(path.join(root, 'data', LAUNCH_LEVELS_FILE), 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return DEFAULT_LAUNCH_LEVELS; throw error; }
+  let value;
+  try { value = JSON.parse(raw); } catch { throw new ProviderError('launch_levels_invalid', `data/${LAUNCH_LEVELS_FILE}: JSON ilegible.`, { uncertain: false }); }
+  return normalizeLaunchLevels(value);
+}
+export function launchFlags(roleName, agent, levels = DEFAULT_LAUNCH_LEVELS) {
+  const level = levels.roles?.[roleName] ?? DEFAULT_LAUNCH_LEVELS.roles[roleName];
+  const flags = levels.agents?.[agent]?.[level];
+  if (!flags) return [];
+  return [...(flags.model ? ['--model', flags.model] : []), ...(flags.effort ? ['--effort', flags.effort] : [])];
+}
+
 function compactName(value, limit) {
   const text = String(value ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
   if (text.length <= limit) return text;
@@ -335,7 +387,9 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const retry = savedStep?.retryOf;
     // Jobs predating agent selection always started with Codex.
     const orcaAgent = retry ? retry.orcaAgent ?? 'codex' : configuredOrcaAgent();
-    const launchPreferences = orcaAgent === 'codex' ? ['--model', role.model, '--effort', role.effort] : [];
+    const launchLevels = await readLaunchLevels(ctx.root);
+    const launchPreferences = launchFlags(roleKey, orcaAgent, launchLevels);
+    const launchLevel = launchLevels.roles[roleKey];
     if (retry && !['failed', 'cancelled', 'abandoned'].includes(retry.dispatchStatus)
       && !(role.stageKey === 'developer' && isStoppedDeveloperRetry(job, savedStep))) {
       throw new ProviderError('orca_retry_invalid', 'El intento anterior no permite un retry automático.', { uncertain: true });
@@ -347,7 +401,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
     const brief = retry ? null : dispatchBrief(specArtifact, specIdentity);
-    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
+    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
     try {

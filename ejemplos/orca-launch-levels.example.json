@@ -1,0 +1,22 @@
+{
+  "_comentario": "Copia este archivo a data/orca-launch-levels.json (no versionado). Niveles por rol: ligero, estandar, profundo. Cada agente traduce el nivel a --model/--effort de worker-start. Sin este archivo, Codex usa exactamente los valores actuales y Claude no recibe flags.",
+  "roles": {
+    "planificador": "profundo",
+    "ux": "estandar",
+    "desarrollador": "estandar",
+    "qa": "ligero",
+    "revisor": "estandar"
+  },
+  "agents": {
+    "codex": {
+      "ligero": { "model": "gpt-6.1-sol", "effort": "low" },
+      "estandar": { "model": "gpt-6.1-sol", "effort": "medium" },
+      "profundo": { "model": "gpt-6-luna", "effort": "high" }
+    },
+    "claude": {
+      "ligero": { "model": "haiku" },
+      "estandar": { "model": "sonnet" },
+      "profundo": { "model": "opus", "effort": "high" }
+    }
+  }
+}
