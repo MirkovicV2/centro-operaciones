@@ -22,8 +22,8 @@ export const criterionId = text => 'crit_' + createHash('sha256').update(canonic
 export const acceptanceCriteriaIds = acceptance => (acceptance ?? []).map(criterion => ({ id: criterionId(criterion), criterion }));
 export function matchesCriterion(item, criterion) {
   if (!object(item) || typeof criterion !== 'string') return false;
-  if (typeof item.criterionId === 'string' && item.criterionId.trim()) return item.criterionId.trim() === criterionId(criterion);
-  return canonicalCriterion(item.criterion) === canonicalCriterion(criterion);
+  return canonicalCriterion(item.criterion) === canonicalCriterion(criterion)
+    && (item.criterionId === undefined || item.criterionId === criterionId(criterion));
 }
 const nonempty = (value, max = 12000) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
 const strings = (value, limit = 50) => Array.isArray(value) && value.length <= limit && value.every(item => nonempty(item, 4000));
@@ -210,7 +210,7 @@ export function deliveryInstructions(job, stage, runId) {
     'taskId y dispatchId deben ser los de TU asignación Orca, nunca inventados ni tomados de otra etapa.',
     'outcome: completed|needs_input|blocked|failed; scope: complete|partial; summary: resumen; approval: approved|blocked|not_applicable. Si QA o Revisión rechazan el producto, usa outcome:blocked y approval:blocked aunque el informe esté completo.',
     'acceptance:[{criterion,criterionId,status:passed|failed|unverified,evidence}], evidence:[referencias o comprobaciones], questions:[{id,text,required,decisionKey}], decisions:[{key,value}]. Usa arrays vacíos cuando no correspondan.',
-    ...(job.contract?.acceptance?.length ? ['CRITERIOS DEL CONTRATO CON ID ESTABLE: ' + JSON.stringify(acceptanceCriteriaIds(job.contract.acceptance)) + '. En acceptance copia criterionId tal cual o el texto del criterio; el motor compara el texto sin distinguir tildes, mayúsculas ni espacios, pero no reinterpreta criterios distintos.'] : []),
+    ...(job.contract?.acceptance?.length ? ['CRITERIOS DEL CONTRATO CON ID ESTABLE: ' + JSON.stringify(acceptanceCriteriaIds(job.contract.acceptance)) + '. En acceptance copia el texto de cada criterio. Si incluyes criterionId, debe corresponder a ese mismo texto. El motor compara el texto sin distinguir tildes, mayúsculas ni espacios.'] : []),
     'Cada decisions[].value debe ser una cadena de texto. Los criterios de producto ya están en el contrato vigente. Referéncialos en texto sin volver a copiar el array dentro de decisions.',
     'La aceptación corresponde a TU etapa: outcome:completed y scope:complete acreditan que TU etapa terminó, no el cierre global del job. No atribuyas una implementación o prueba futura a UX. QA/Revisión solo aprueban con criterios comprobados y evidencia.',
     ...(job.contract?.acceptanceScope === 'product' ? [
