@@ -59,7 +59,11 @@ Para cambiar niveles o definir flags de Claude, copia [ejemplos/orca-launch-leve
 1. En **Peticiones → Nueva consulta → Preguntar al coordinador**, envía «Resume qué dice Obsidian sobre el color principal del Proyecto de prueba». Mira **Peticiones** para ver el aviso, las fuentes y la respuesta. Esta opción abre una consulta.
 2. Para ejecutar etapas, registra un proyecto de prueba con su checkout Git independiente bajo `workspaces/`, rama de trabajo y rama base. En **Trabajos → Nuevo trabajo**, selecciona el proyecto y pide un cambio pequeño con un criterio verificable. Comprueba el destino que muestra el panel y activa autoejecución solo para la empresa de prueba. Para probar preparación desde cero, usa una **idea sin proyecto** con autorización explícita para crear el destino y envíala al coordinador.
 
-Para probar publicación, instala [GitHub CLI](https://cli.github.com/) y autentícate con tu propia cuenta. Autoriza el alcance y el repositorio de prueba explícitamente. Para QA Android en Ubuntu, prepara el SDK y un emulador local si el encargo lo exige. El lanzador de AVD incluido para Windows es específico de esa instalación.
+Para probar publicación, instala [GitHub CLI](https://cli.github.com/) y autentícate con tu propia cuenta. Autoriza el alcance y el repositorio de prueba explícitamente.
+
+### Versión de GitHub CLI
+
+La integración lee campos de PR (`baseRefOid`, `headRepositoryOwner`, `mergeCommit`…) que el `gh` 2.46.0 de los repositorios de Ubuntu no conoce («Unknown JSON field»). La 2.103.3 del repositorio oficial funciona; la versión mínima exacta no se ha determinado. Antes de integrar, el panel comprueba sin red la lista de campos de `gh pr list --json` y bloquea la integración con un mensaje accionable si falta alguno. Instala `gh` desde el repositorio oficial siguiendo [la guía de instalación en Linux](https://github.com/cli/cli/blob/trunk/docs/install_linux.md) (requiere `sudo`: alta del keyring y de `/etc/apt/sources.list.d/github-cli.list`, `apt update`, `apt install gh`) y comprueba `gh --version` y `gh pr list --json 2>&1 | grep baseRefOid`. Para QA Android en Ubuntu, prepara el SDK y un emulador local si el encargo lo exige. El lanzador de AVD incluido para Windows es específico de esa instalación.
 
 ## Documentación del flujo
 

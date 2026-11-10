@@ -264,6 +264,32 @@ export async function captureIntegrationSnapshot(workspace) {
   return diffFingerprint(await run(['status', '--porcelain=v1', '-z']), await run(['diff', '--binary', 'HEAD']), await run(['diff', '--cached', '--binary']), await untrackedFingerprint(workspace, run));
 }
 
+// 28 (F13): the integration reads PR fields that older gh builds do not know
+// (Ubuntu's gh 2.46.0 rejects baseRefOid; 2.103.3 from the official GitHub CLI
+// repository works; the exact minimum was not determined offline). The typed error
+// keeps the generic job code so the integration recovery paths still apply.
+export const GH_REQUIRED_PR_FIELDS = Object.freeze(['number', 'url', 'state', 'headRefOid', 'baseRefOid', 'headRefName', 'baseRefName', 'isCrossRepository', 'headRepository', 'headRepositoryOwner', 'mergedAt', 'mergeCommit']);
+export const GH_INSTALL_HINT = 'Instala GitHub CLI desde el repositorio oficial (https://github.com/cli/cli/blob/trunk/docs/install_linux.md) y comprueba gh --version; la versión 2.103.3 funciona y la 2.46.0 de Ubuntu no.';
+const ghError = (cause, message, details = {}) => Object.assign(new Error(message), { code: 'github_integration_needs_attention', safeMessage: message, uncertain: false, details: { cause, ...details } });
+const decode = value => Buffer.isBuffer(value) ? value.toString('utf8') : String(value ?? '');
+
+/** Offline capability check: `gh pr list --json` without fields lists the supported fields (stderr, exit 1). */
+export async function ghCapabilityPreflight({ executeCommand = exec, cwd, timeoutMs = 15_000 } = {}) {
+  const run = async args => {
+    try { const result = await executeCommand('gh', args, { cwd, env: safeEnv(), encoding: null, windowsHide: true, shell: false, timeout: timeoutMs, maxBuffer: 1_000_000 }); return { ok: true, text: decode(result.stdout) + decode(result.stderr) }; }
+    catch (error) { return { ok: false, text: decode(error?.stdout) + decode(error?.stderr), reason: error?.code }; }
+  };
+  const versionRun = await run(['--version']);
+  const version = /gh version (\d+\.\d+\.\d+)/.exec(versionRun.text)?.[1] ?? null;
+  if (!versionRun.ok || !version) throw ghError('gh_missing', `GitHub CLI (gh) no está disponible o no responde a --version. ${GH_INSTALL_HINT}`, { reason: typeof versionRun.reason === 'string' ? versionRun.reason : undefined });
+  const listing = await run(['pr', 'list', '--json']);
+  const fields = listing.text.split(/\r?\n/).map(line => line.trim()).filter(line => /^[a-zA-Z]+$/.test(line));
+  if (!fields.length) throw ghError('gh_capability_unknown', `gh ${version} no enumeró los campos JSON de pr list; comprueba la instalación. ${GH_INSTALL_HINT}`, { version });
+  const missing = GH_REQUIRED_PR_FIELDS.filter(field => !fields.includes(field));
+  if (missing.length) throw ghError('gh_version_unsupported', `gh ${version} no admite los campos ${missing.join(', ')} que usa la integración. ${GH_INSTALL_HINT}`, { version, missing: missing.join(',') });
+  return { version, fields: fields.length };
+}
+
 export function createIntegrationCommandAdapters({ signal, executeCommand = exec, timeoutMs = 30_000 } = {}) {
   const invoke = async (exe, args, cwd) => {
     const binary = exe === 'git' && ['status', 'diff', 'ls-files'].includes(args[0]);
@@ -274,11 +300,17 @@ export function createIntegrationCommandAdapters({ signal, executeCommand = exec
       // trimming them changes porcelain columns, NUL paths and diff endings.
       return binary ? bytes(stdout) : bytes(stdout).toString('utf8').trim();
     }
-    catch { throw new Error(`${exe} falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar.`); }
+    catch (error) {
+      const unknownField = /Unknown JSON field:?\s*"?([A-Za-z]+)"?/.exec(decode(error?.stderr));
+      if (exe === 'gh' && unknownField) throw ghError('gh_version_unsupported', `gh no admite el campo JSON ${unknownField[1]} que usa la integración. ${GH_INSTALL_HINT}`, { missing: unknownField[1] });
+      throw new Error(`${exe} falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar.`);
+    }
   };
   return { git: (args, cwd) => invoke('git', args, cwd), gh: (args, cwd) => invoke('gh', args, cwd) };
 }
 
-export async function integrateGitHubDefault(job, ctx, { executeCommand = exec, ...options } = {}) {
+// The capability preflight runs with the real gh. Injected command fakes skip it unless they pass their own preflight.
+export async function integrateGitHubDefault(job, ctx, { executeCommand = exec, preflight = executeCommand === exec ? ghCapabilityPreflight : null, ...options } = {}) {
+  if (preflight && job?.autoIntent?.eligible === true && job.autoIntent.receiptId && job.state !== 'cancelled') await preflight({ executeCommand, cwd: job.workspace });
   return integrateGitHub(job, ctx, { ...createIntegrationCommandAdapters({ signal: ctx.signal, executeCommand }), ...options });
 }
