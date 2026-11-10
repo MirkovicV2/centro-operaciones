@@ -121,7 +121,8 @@ export async function syncQualityHandoffs(root, { resume = resumeCoordinatedDisp
     const resuming = ['verified', 'lock_released'].includes(recovery?.phase);
     const observationError = resuming ? recovery.error : job.error?.code;
     const unread = settledOrcaObservation(job, observationError);
-    const observationPending = unread && (resuming || (job.state === 'needs_attention'
+    // An interruption needs an operator review before its first resume.
+    const observationPending = unread && (resuming || (observationError !== 'interrupted' && job.state === 'needs_attention'
       && !job.livenessRecoveryHistory?.some(item => item.dispatchId === unread.dispatchId && item.error === observationError)));
     const checksPending = (job.state === 'needs_attention' || resuming)
       && recoverableChecksTimeout(job, automation.integrations?.[receipt?.id], resuming ? recovery.originalError : job.error?.code);

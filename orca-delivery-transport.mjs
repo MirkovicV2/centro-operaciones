@@ -43,10 +43,23 @@ export async function verifyUnicodeDeliveryTransport(root, job, step, { command,
   const inbox = await command(['orchestration', 'inbox', '--terminal', `run:${identity.runId}`, '--limit', '100', '--full']);
   const receipt = matchingCompletion(inbox.messages, identity, { strict: true });
   if (!receipt?.messageId || receipt.text !== originalReport.text) throw fail('El recibo original no coincide con la evidencia guardada.');
+  // 30 (D5): the stored report may validate under the current criteria rules (ids,
+  // accents, case, spacing). Then nothing was lost in transport and no agent-specific
+  // session archive is needed; the exact receipt and the saved artifact are the proof.
+  const acceptance = job.contract?.acceptance || [];
+  let revalidated = null;
+  try { revalidated = parseDelivery(originalReport.text, { ...identity, acceptance }, { required: true }); } catch { /* genuine damage: continue with the archive */ }
+  if (revalidated && deliveryApproved(revalidated)) {
+    const proof = { kind: 'criteria_normalized', jobId: identity.jobId, jobAttempt: identity.jobAttempt, stage: identity.stage,
+      runId: identity.runId, taskId: identity.taskId, dispatchId: identity.dispatchId, originalArtifactSha256: step.artifact.sha256,
+      receiptMessageId: receipt.messageId, receiptSha256: hash(receipt.text), transcriptSourceIdentity: 'stage-report:' + step.artifact.sha256,
+      transcriptSha256: hash(originalReport.text), deliverySha256: hash(JSON.stringify(revalidated)) };
+    return { text: originalReport.text, delivery: revalidated, proof, sourceMessageId: receipt.messageId, provenance: { kind: 'criteria_normalized', artifact: step.artifact.path } };
+  }
   const reader = readArchive || (await import('./orca-native-archive.mjs')).readVerifiedArchivedFinal;
   const archived = await reader(identity, { command, shown });
   if (!archived?.sourceIdentity || !archived.messageId || archived.sha256 !== hash(archived.text || '')) throw fail('El archivo nativo no conserva su identidad y huella.');
-  const delivery = validateUnicodeDeliveryRepair(receipt.text, archived.text, { ...identity, acceptance: job.contract?.acceptance || [] });
+  const delivery = validateUnicodeDeliveryRepair(receipt.text, archived.text, { ...identity, acceptance });
   const proof = { kind: 'unicode_loss', jobId: identity.jobId, jobAttempt: identity.jobAttempt, stage: identity.stage,
     runId: identity.runId, taskId: identity.taskId, dispatchId: identity.dispatchId, originalArtifactSha256: step.artifact.sha256,
     receiptMessageId: receipt.messageId, receiptSha256: hash(receipt.text), transcriptSourceIdentity: archived.sourceIdentity,

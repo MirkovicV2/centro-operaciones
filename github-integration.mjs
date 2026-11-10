@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { githubRepository } from './project-destination.mjs';
+import { githubRepository, sameRepository } from './project-destination.mjs';
+import { excerpt } from './redaction.mjs';
 
 const sha = value => /^[a-f0-9]{40,64}$/i.test(String(value || ''));
 const branchOk = value => typeof value === 'string' && value.length > 0 && !value.includes('..') && !/[\\\x00\r\n]/.test(value) && !value.startsWith('-');
@@ -35,8 +36,15 @@ function addField(hash, value) {
 
 // `git` and `gh` are injected command adapters. Tests use deterministic fakes;
 // production calls are only reached from the explicitly eligible auto-run path.
+// 17, revised with the owner: pending checks are awaited on the same PR and commit without a global
+// limit (checksTimeoutMs = null, as before 17). A caller may still pass a bound up to this maximum.
+// Distinct states: waiting, no_checks (no check ever registers) and no_permission (checks unreadable).
+export const DEFAULT_CHECKS_TIMEOUT_MS = 900_000;
+// Checks can register minutes after the push; only a PR still without any check after
+// this grace is reported as no_checks (before the generic timeout, with a clearer action).
+export const DEFAULT_NO_CHECKS_GRACE_MS = 600_000;
 export async function integrateGitHub(job, ctx, { git, gh, persist = async () => {}, previous = null, now = () => new Date().toISOString(),
-  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = null, checksIntervalMs = 15_000 } = {}) {
+  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = null, checksIntervalMs = 15_000, noChecksGraceMs = DEFAULT_NO_CHECKS_GRACE_MS } = {}) {
   const intent = job.autoIntent;
   if (!intent || intent.eligible !== true || !intent.receiptId || job.state === 'cancelled') return { status: 'skipped', reason: 'not_eligible' };
   const dest = job.destination || {};
@@ -46,8 +54,10 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (!dest.repository || !branchOk(job.branch) || !branchOk(dest.baseBranch)) throw new Error('Configura repositorio y ramas fuente/base existentes antes de integrar.');
   if (!git || !gh) throw new Error('Adaptadores de GitHub no configurados; necesita revisión.');
   if (checksTimeoutMs !== null && (!Number.isFinite(checksTimeoutMs) || checksTimeoutMs < 0 || checksTimeoutMs > 900_000)
-    || !Number.isFinite(checksIntervalMs) || checksIntervalMs < 1 || checksIntervalMs > 30_000) throw new Error('Límites de espera de checks inválidos.');
-  if (previous && ['jobId', 'receiptId', 'repository', 'sourceBranch', 'baseBranch'].some(key => previous[key] !== ({ jobId: job.id, receiptId: intent.receiptId, repository: dest.repository, sourceBranch: job.branch, baseBranch: dest.baseBranch })[key])) throw new Error('El registro de integración pertenece a otro encargo o destino.');
+    || !Number.isFinite(checksIntervalMs) || checksIntervalMs < 1 || checksIntervalMs > 30_000
+    || noChecksGraceMs !== null && (!Number.isFinite(noChecksGraceMs) || noChecksGraceMs < 0)) throw new Error('Límites de espera de checks inválidos.');
+  if (previous && (['jobId', 'receiptId', 'sourceBranch', 'baseBranch'].some(key => previous[key] !== ({ jobId: job.id, receiptId: intent.receiptId, sourceBranch: job.branch, baseBranch: dest.baseBranch })[key])
+    || !sameRepository(previous.repository, dest.repository))) throw new Error('El registro de integración pertenece a otro encargo o destino.');
   if (previous?.commitSha && (!/^[a-f0-9]{64}$/i.test(previous.manifest || '') || previous.manifest !== job.integrationSnapshot)) throw new Error('Falta el manifest original del commit aprobado; no se sustituye por otro snapshot.');
   if (previous?.phase === 'complete') return previous;
   if (previous?.status === 'needs_attention' && !['commit_confirmed', 'push_intent', 'push_confirmed', 'pr_intent', 'pr_confirmed', 'checks_pending', 'merge_intent'].includes(previous.phase)) throw new Error('Integración previa requiere revisión manual; no se repetirá a ciegas.');
@@ -63,7 +73,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   const g = args => { checkAbort(); return git(args, workspace); }, h = args => { checkAbort(); return gh(args, workspace); };
   const repo = githubRepository(`https://github.com/${dest.repository}`);
   const origin = githubRepository(await g(['remote', 'get-url', 'origin']));
-  if (repo.toLowerCase() !== origin.toLowerCase()) throw new Error('Origin GitHub y mapping confirmado no coinciden.');
+  if (!sameRepository(repo, origin)) throw new Error('Origin GitHub y mapping confirmado no coinciden.');
   const branch = (await g(['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim();
   if (branch !== job.branch) throw new Error('Branch activa no coincide con la fuente confirmada.');
   if ((await g(['check-ref-format', '--branch', job.branch])).trim() !== job.branch || (await g(['check-ref-format', '--branch', dest.baseBranch])).trim() !== dest.baseBranch) throw new Error('Rama fuente/base inválida.');
@@ -98,6 +108,11 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (!sha(base) || !sha(remoteHead) || (remoteHead !== job.destination?.remoteSha && !reconciledPush) || (base !== job.destination?.baseSha && !reconciledBase)) throw new Error('Baseline remoto divergente o desactualizado.');
   const behind = (await g(['rev-list', '--count', `HEAD..${remoteHead}`])).trim();
   if (behind !== '0') throw new Error('La rama remota diverge del checkout; sincroniza y revisa manualmente.');
+  // A partial view of Actions runs cannot verify the complete set of PR checks.
+  if (job.branch !== dest.baseBranch && !record.prNumber) {
+    try { await h(['api', '--method', 'GET', `repos/${repo}/commits/${base}/check-runs`, '-f', 'per_page=1']); }
+    catch (error) { throw checksPermissionDenied(error) ? checksUnreadable(repo) : error; }
+  }
   const existing = await h(['pr', 'list', '--repo', repo, '--head', job.branch, '--base', dest.baseBranch, '--state', 'open', '--limit', '100', '--json', pullRequestIdentityFields]);
   const prs = sameRepositoryPullRequests(JSON.parse(existing || '[]'), repo, job.branch, dest.baseBranch);
   if (job.branch !== dest.baseBranch && prs.length > 1) throw new Error('Más de una PR abierta para head/base; requiere revisión.');
@@ -159,9 +174,16 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   }
   if (pr.headRefOid !== head) throw new Error('La PR abierta apunta a un commit diferente del aprobado.');
   await save('pr_confirmed', { prNumber: pr.number, prUrl: pr.url, commitSha: head });
+  const readChecks = async () => {
+    try {
+      const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
+      return { detail, checks: detail.statusCheckRollup };
+    } catch (error) {
+      throw checksPermissionDenied(error) ? checksUnreadable(repo) : error;
+    }
+  };
   const checkReadiness = async () => {
-    const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
-    const checks = detail.statusCheckRollup;
+    const { detail, checks } = await readChecks();
     const summary = Array.isArray(checks) ? checks.slice(0, 80).map(check => ({ name: String(check?.name || check?.context || '').slice(0, 160), status: String(check?.status || '').slice(0, 40), conclusion: String(check?.conclusion || '').slice(0, 40) })) : [];
     let failure = detail.state !== 'OPEN' ? 'La PR dejó de estar abierta.'
       : detail.headRefOid !== head || detail.baseRefOid !== base ? 'La PR cambió de commit fuente o base; requiere nueva revisión.'
@@ -172,11 +194,17 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
     return { ready, failure, checks: summary, mergeable: detail.mergeable };
   };
   const deadline = checksTimeoutMs === null ? Infinity : clock() + checksTimeoutMs;
+  const noChecksAt = noChecksGraceMs === null ? Infinity : clock() + noChecksGraceMs;
   let lastChecks;
   const waitUntilReady = async () => {
     for (;;) {
       checkAbort();
-      const result = await checkReadiness();
+      let result;
+      try { result = await checkReadiness(); }
+      catch (error) {
+        if (error.code === 'github_checks_unreadable') await save('checks_pending', { prNumber: pr.number, prUrl: pr.url, checkState: 'no_permission', checkedAt: now(), error: error.message });
+        throw error;
+      }
       checkAbort();
       if (result.ready) {
         record.checks = result.checks;
@@ -185,16 +213,21 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
         delete record.waitTimedOut;
         return;
       }
+      // A mergeable PR still without a single registered check after the grace has no CI to wait for.
+      const noChecks = !result.failure && result.mergeable === 'MERGEABLE' && result.checks.length === 0 && clock() >= noChecksAt && clock() < deadline;
       const signature = JSON.stringify(result);
-      if (signature !== lastChecks || result.failure || clock() >= deadline) {
+      if (signature !== lastChecks || result.failure || noChecks || clock() >= deadline) {
         lastChecks = signature;
         await save('checks_pending', { prNumber: pr.number, prUrl: pr.url, checks: result.checks,
-          checkState: result.failure ? 'failed' : 'waiting', checkedAt: now(),
-          ...(result.failure ? { error: result.failure } : {}), ...(clock() >= deadline ? { waitTimedOut: true } : {}) });
+          checkState: result.failure ? 'failed' : noChecks ? 'no_checks' : 'waiting', checkedAt: now(),
+          ...(result.failure ? { error: result.failure } : noChecks ? { error: 'La PR no tiene checks registrados.' } : {}), ...(clock() >= deadline ? { waitTimedOut: true } : {}) });
       }
       if (result.failure) throw Object.assign(new Error(`PR pendiente de revisión: ${result.failure}`), { code: 'github_checks_blocked' });
+      if (noChecks) throw Object.assign(new Error(`La PR ${pr.url} no tiene checks registrados: configura CI en la rama base o revisa y fusiona manualmente; la integración no fusiona sin checks aprobados.`), { code: 'github_no_checks' });
       if (clock() >= deadline) throw Object.assign(new Error('PR pendiente de checks al agotar la espera acotada; conserva esta PR para revisión.'), { code: 'github_checks_timeout' });
-      await wait(Math.min(checksIntervalMs, deadline - clock()), ctx.signal);
+      // Wake at the no_checks grace only while it is still ahead; afterwards poll at the normal interval
+      // (a past grace used to collapse the wait to 1 ms and poll GitHub in a tight loop).
+      await wait(Math.min(checksIntervalMs, deadline - clock(), noChecksAt > clock() ? noChecksAt - clock() : Infinity), ctx.signal);
     }
   };
   await waitUntilReady();
@@ -264,6 +297,44 @@ export async function captureIntegrationSnapshot(workspace) {
   return diffFingerprint(await run(['status', '--porcelain=v1', '-z']), await run(['diff', '--binary', 'HEAD']), await run(['diff', '--cached', '--binary']), await untrackedFingerprint(workspace, run));
 }
 
+// 28 (F13): the integration reads PR fields that older gh builds do not know
+// (Ubuntu's gh 2.46.0 rejects baseRefOid; 2.103.3 from the official GitHub CLI
+// repository works; the exact minimum was not determined offline). The typed error
+// keeps the generic job code so the integration recovery paths still apply.
+export const GH_REQUIRED_PR_FIELDS = Object.freeze(['number', 'url', 'state', 'headRefOid', 'baseRefOid', 'headRefName', 'baseRefName', 'isCrossRepository', 'headRepository', 'headRepositoryOwner', 'mergedAt', 'mergeCommit']);
+export const GH_INSTALL_HINT = 'Instala GitHub CLI desde el repositorio oficial (https://github.com/cli/cli/blob/trunk/docs/install_linux.md) y comprueba gh --version; la versión 2.103.3 funciona y la 2.46.0 de Ubuntu no.';
+const ghError = (cause, message, details = {}) => Object.assign(new Error(message), { code: 'github_integration_needs_attention', safeMessage: message, uncertain: false, details: { cause, ...details } });
+const decode = value => Buffer.isBuffer(value) ? value.toString('utf8') : String(value ?? '');
+
+/** Offline capability check: `gh pr list --json` without fields lists the supported fields (stderr, exit 1). */
+export async function ghCapabilityPreflight({ executeCommand = exec, cwd, timeoutMs = 15_000 } = {}) {
+  const run = async args => {
+    try { const result = await executeCommand('gh', args, { cwd, env: safeEnv(), encoding: null, windowsHide: true, shell: false, timeout: timeoutMs, maxBuffer: 1_000_000 }); return { ok: true, text: decode(result.stdout) + decode(result.stderr) }; }
+    catch (error) { return { ok: false, text: decode(error?.stdout) + decode(error?.stderr), reason: error?.code }; }
+  };
+  const versionRun = await run(['--version']);
+  const version = /gh version (\d+\.\d+\.\d+)/.exec(versionRun.text)?.[1] ?? null;
+  if (!versionRun.ok || !version) throw ghError('gh_missing', `GitHub CLI (gh) no está disponible o no responde a --version. ${GH_INSTALL_HINT}`, { reason: typeof versionRun.reason === 'string' ? versionRun.reason : undefined });
+  const listing = await run(['pr', 'list', '--json']);
+  const fields = listing.text.split(/\r?\n/).map(line => line.trim()).filter(line => /^[a-zA-Z]+$/.test(line));
+  if (!fields.length) throw ghError('gh_capability_unknown', `gh ${version} no enumeró los campos JSON de pr list; comprueba la instalación. ${GH_INSTALL_HINT}`, { version });
+  const missing = GH_REQUIRED_PR_FIELDS.filter(field => !fields.includes(field));
+  if (missing.length) throw ghError('gh_version_unsupported', `gh ${version} no admite los campos ${missing.join(', ')} que usa la integración. ${GH_INSTALL_HINT}`, { version, missing: missing.join(',') });
+  return { version, fields: fields.length };
+}
+
+// 38: the permission error of statusCheckRollup with a fine-grained token (check runs need the Checks
+// permission, which fine-grained tokens do not offer). Any other failure keeps its own error.
+export function checksPermissionDenied(error) {
+  const text = [error?.message, error?.details?.stderr].filter(Boolean).join(' ');
+  return /Resource not accessible by (personal access token|integration)/i.test(text);
+}
+
+function checksUnreadable(repo) {
+  return Object.assign(new Error(`La credencial de gh no puede comprobar todos los checks de ${repo}. Usa una sesión de gh con acceso a los checks de la PR y reanuda la integración.`),
+    { code: 'github_checks_unreadable' });
+}
+
 export function createIntegrationCommandAdapters({ signal, executeCommand = exec, timeoutMs = 30_000 } = {}) {
   const invoke = async (exe, args, cwd) => {
     const binary = exe === 'git' && ['status', 'diff', 'ls-files'].includes(args[0]);
@@ -274,11 +345,24 @@ export function createIntegrationCommandAdapters({ signal, executeCommand = exec
       // trimming them changes porcelain columns, NUL paths and diff endings.
       return binary ? bytes(stdout) : bytes(stdout).toString('utf8').trim();
     }
-    catch { throw new Error(`${exe} falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar.`); }
+    catch (error) {
+      const unknownField = /Unknown JSON field:?\s*"?([A-Za-z]+)"?/.exec(decode(error?.stderr));
+      if (exe === 'gh' && unknownField) throw ghError('gh_version_unsupported', `gh no admite el campo JSON ${unknownField[1]} que usa la integración. ${GH_INSTALL_HINT}`, { missing: unknownField[1] });
+      // 39: keep what failed (subcommand, exit code or signal, bounded and redacted stderr) instead of a
+      // bare generic message. The outcome stays uncertain: the remote must still be checked before continuing.
+      const command = [exe, ...args.slice(0, exe === 'gh' ? 2 : 1).filter(arg => /^[a-z][a-z-]{0,30}$/.test(arg))].join(' ');
+      const exit = Number.isInteger(error?.code) ? `salida ${error.code}` : error?.signal ? `señal ${error.signal}` : typeof error?.code === 'string' ? error.code : 'sin código';
+      const stderr = excerpt(decode(error?.stderr), 300);
+      const message = `${exe} falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar. (${command}: ${exit}${stderr ? ` · ${stderr}` : ''})`;
+      throw Object.assign(new Error(message), { code: 'github_integration_needs_attention', safeMessage: message,
+        details: { cause: 'command_failed', command, exit, ...(stderr ? { stderr } : {}) } });
+    }
   };
   return { git: (args, cwd) => invoke('git', args, cwd), gh: (args, cwd) => invoke('gh', args, cwd) };
 }
 
-export async function integrateGitHubDefault(job, ctx, { executeCommand = exec, ...options } = {}) {
+// The capability preflight runs with the real gh. Injected command fakes skip it unless they pass their own preflight.
+export async function integrateGitHubDefault(job, ctx, { executeCommand = exec, preflight = executeCommand === exec ? ghCapabilityPreflight : null, ...options } = {}) {
+  if (preflight && job?.autoIntent?.eligible === true && job.autoIntent.receiptId && job.state !== 'cancelled') await preflight({ executeCommand, cwd: job.workspace });
   return integrateGitHub(job, ctx, { ...createIntegrationCommandAdapters({ signal: ctx.signal, executeCommand }), ...options });
 }

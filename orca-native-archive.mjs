@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { IDENTIFIERS, parseDelivery } from './workflow-contract.mjs';
+import { orcaUserDataDir } from './local-tools.mjs';
 
 const execute = promisify(execFile);
 const MAX_SESSION_BYTES = 32 * 1024 * 1024;
@@ -127,10 +128,18 @@ async function boundedSession(filePath, sessionRoot) {
   } finally { await handle.close(); }
 }
 
+// 3: Orca keeps orchestration.db under the platform's user data directory. Windows
+// keeps its historical APPDATA default; Linux follows XDG (verified on Ubuntu 26.10:
+// ~/.config/orca/orchestration.db); macOS uses Application Support (not verified here).
+export function defaultOrcaDatabasePath({ platform = process.platform, env = process.env, home = os.homedir() } = {}) {
+  const directory = orcaUserDataDir({ platform, env, home });
+  return (platform === 'win32' ? path.win32 : path.posix).join(directory, 'orchestration.db');
+}
+
 /** Recover one completed, exact archived Codex final message; never searches sessions or changes ORCA. */
 export async function readVerifiedArchivedFinal(identity, {
   command, shown,
-  databasePath = path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'orca', 'orchestration.db'),
+  databasePath = defaultOrcaDatabasePath(),
   sessionRoot = path.join(os.homedir(), '.codex', 'sessions'),
 } = {}) {
   try {

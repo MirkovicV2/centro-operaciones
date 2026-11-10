@@ -1,8 +1,11 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as wait } from 'node:timers/promises';
 import { replaceLocalFile } from './atomic-file.mjs';
+import { containsSecret } from './redaction.mjs';
+import { sameRepository } from './repository-name.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { normalizeJobContract, validateContinuation, validateDelivery, IDENTIFIERS } from './workflow-contract.mjs';
 import { jobCoordination } from './coordination.mjs';
@@ -34,6 +37,10 @@ const emptyState = () => ({ schema: 1, revision: 0, jobs: [], budget: { limitUsd
 const dir = root => path.join(root, 'data');
 const ledger = root => path.join(dir(root), 'events.jsonl');
 const stamp = () => new Date().toISOString();
+// 7: who acts. The panel and the CLI run their work inside actorContext.run({ actor, role });
+// ledger events and new jobs record the actor when present. Old entries simply lack it.
+export const actorContext = new AsyncLocalStorage();
+export const currentActor = () => { const actor = actorContext.getStore()?.actor; return typeof actor === 'string' && actor.trim() ? actor.trim().slice(0, 200) : undefined; };
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
 const applyEvent = (state, event) => {
   if (event.revision !== state.revision + 1 || event.schema !== 1 || !event.patch) throw new QueueError('Registro de eventos inconsistente: requiere revisión manual.', 'ledger_corrupt');
@@ -82,7 +89,8 @@ function commit(root, state, type, patch = {}, details = {}) {
   return pending;
 }
 async function writeCommit(root, state, type, patch = {}, details = {}) {
-  const event = { schema: 1, revision: state.revision + 1, at: stamp(), type, details, patch };
+  const actor = currentActor();
+  const event = { schema: 1, revision: state.revision + 1, at: stamp(), type, details, patch, ...(actor ? { actor } : {}) };
   const handle = await fs.open(ledger(root), 'a');
   try { await handle.writeFile(JSON.stringify(event) + '\n'); await handle.sync(); } finally { await handle.close(); }
   applyEvent(state, event);
@@ -238,7 +246,7 @@ export function validateSpec(spec) {
   if (!['analysis', 'code'].includes(spec.kind)) throw new QueueError('kind debe ser analysis o code.');
   if (!spec.title || spec.title.length > 160) throw new QueueError('El título debe tener entre 1 y 160 caracteres.');
   if (!spec.prompt || Buffer.byteLength(spec.prompt, 'utf8') > 12_000) throw new QueueError('La instrucción debe tener entre 1 y 12.000 bytes.');
-  if (/\bsk-[A-Za-z0-9_-]{12,}/.test(spec.prompt + spec.title) || ['OPENAI_API_KEY', 'CODEX_API_KEY'].some(name => process.env[name] && (spec.prompt + spec.title).includes(process.env[name]))) throw new QueueError('No guardes claves en títulos o instrucciones; usa solo variables de entorno.');
+  if (containsSecret(spec.prompt + spec.title)) throw new QueueError('No guardes claves en títulos o instrucciones; usa solo variables de entorno.');
   attemptLimit(spec);
   if (!Number.isInteger(spec.timeoutMs ?? 180_000) || (spec.timeoutMs ?? 180_000) < 10 || (spec.timeoutMs ?? 180_000) > 1_800_000) throw new QueueError('timeoutMs debe estar entre 10 y 1.800.000.');
   if (!Number.isFinite(spec.maxUsd ?? 0.1) || (spec.maxUsd ?? 0.1) <= 0) throw new QueueError('maxUsd debe ser positivo.');
@@ -258,7 +266,8 @@ export async function addJob(root, spec) {
     const provider = spec.provider ?? 'orca';
     const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true);
     const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
-      ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0 };
+      ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0,
+      ...(currentActor() ? { actor: currentActor() } : {}) };
     job.contract = contract;
     if (spec.coordination) job.coordination = jobCoordination(spec.coordination, spec);
     if (continuation) job.continuation = continuation;
@@ -764,6 +773,17 @@ export async function setBudget(root, patch) {
   });
 }
 
+// 2 + 15: typed errors may carry details for the operator. Only bounded primitives
+// reach the ledger; the message itself still comes from a typed safeMessage.
+export function boundedErrorDetails(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return {};
+  const entries = Object.entries(details)
+    .filter(([key, value]) => /^[a-zA-Z0-9_]{1,40}$/.test(key) && ['string', 'number', 'boolean'].includes(typeof value) && value !== '')
+    .slice(0, 20)
+    .map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 600) : value]);
+  return entries.length ? { details: Object.fromEntries(entries) } : {};
+}
+
 export function elapsedAttemptMs(job) {
   const segments = (job.attemptHistory ?? []).filter(item => item.attempt === job.attempts);
   if (!segments.length || segments.some(item => !Number.isFinite(item.elapsedMs) || item.elapsedMs < 0)) throw new QueueError('Falta evidencia del tiempo consumido por este intento.', 'resume_elapsed_unknown');
@@ -779,7 +799,7 @@ export function assertCommittedIntegrationRecord(job, record) {
   const validation = record?.validation, steps = integrationValidationSteps(job);
   const developer = steps.find(item => item.stage === 'developer');
   if (!record || !['pr_intent', 'pr_confirmed', 'checks_pending', 'merge_intent'].includes(record.phase)
-    || record.jobId !== job.id || record.receiptId !== job.autoIntent?.receiptId || record.repository !== job.destination?.repository
+    || record.jobId !== job.id || record.receiptId !== job.autoIntent?.receiptId || !sameRepository(record.repository, job.destination?.repository)
     || record.sourceBranch !== job.branch || record.baseBranch !== job.destination?.baseBranch || record.sourceBranch === record.baseBranch
     || !/^[a-f0-9]{40,64}$/.test(record.commitSha || '') || !/^[a-f0-9]{64}$/.test(record.manifest || '')
     || record.remoteBaseSha !== job.destination?.baseSha || record.baseline !== job.destination?.sha
@@ -804,7 +824,7 @@ export function assertIntegrationReconcileProof(job, recovery, proof) {
   const record = recovery.originalIntegrationRecord;
   assertCommittedIntegrationRecord(job, record);
   if (!proof || proof.kind !== 'committed_integration' || recovery.integrationRecordHash !== recoveryFingerprint(record)
-    || ['jobId', 'receiptId', 'commitSha', 'manifest', 'phase', 'repository', 'sourceBranch', 'baseBranch'].some(key => proof[key] !== record[key])
+    || ['jobId', 'receiptId', 'commitSha', 'manifest', 'phase', 'sourceBranch', 'baseBranch'].some(key => proof[key] !== record[key]) || !sameRepository(proof.repository, record.repository)
     || proof.baseSha !== record.remoteBaseSha || proof.prBaseSha !== record.remoteBaseSha || proof.prHeadSha !== record.commitSha
     || !Number.isInteger(proof.prNumber) || proof.prNumber < 1 || record.prNumber && proof.prNumber !== record.prNumber
     || typeof proof.prUrl !== 'string' || proof.prUrl.toLowerCase() !== `https://github.com/${record.repository}/pull/${proof.prNumber}`.toLowerCase()
@@ -919,6 +939,8 @@ export function assertIntegrationValidationProof(recovery, proof) {
 }
 
 function validationResetStages(recovery) {
+  // 29: an effect-free integration failure over the exact approved snapshot resumes only the integration.
+  if (recovery.integrationOnly) return ['integration'];
   if (recovery.qualityAction?.type === 'correction') return ['developer', 'qa', 'reviewer', 'integration'];
   return recovery.stage === 'reviewer' ? ['reviewer', 'integration'] : ['qa', 'reviewer', 'integration'];
 }
@@ -930,7 +952,8 @@ function assertIntegrationValidationResume(job, recovery) {
     || recovery.originalError !== (recovery.stage === 'integration' ? 'github_integration_needs_attention' : 'delivery_incomplete')
     || recovery.jobId !== job.id || recovery.receiptId !== job.autoIntent?.receiptId || recovery.attempt !== job.attempts
     || recovery.runId !== job.workflow?.runId || recovery.observedState !== 'succeeded' || recovery.liveness !== 'exited'
-    || job.validationCycle !== recovery.id || recovery.queuedWorkflowHash !== recoveryFingerprint(job.workflow)
+    || (recovery.integrationOnly ? (job.validationCycle ?? null) !== (recovery.keepValidationCycle ?? null) : job.validationCycle !== recovery.id)
+    || recovery.queuedWorkflowHash !== recoveryFingerprint(job.workflow)
     || job.workflow.currentStage !== resetStages[0]
     || resetStages.some(key => {
       const step = job.workflow.steps.find(item => item.key === key); return !step || step.status !== 'queued' || step.taskId || step.dispatchId || step.delivery || step.artifact;
@@ -949,7 +972,7 @@ export async function queueIntegrationValidationResume(root, id, recovery) {
       : previous?.error?.code === 'github_integration_needs_attention' && previous.workflow?.currentStage === 'integration'
         && integration?.status === 'blocked' && integration.error === 'integration_needs_attention';
     if (previous?.state !== 'needs_attention' || !recoverable
-      || (recovery.stage === 'integration' && previous.validationCycle) || previous.reservedUsd !== 0 || recovery.originalWorkflowHash !== recoveryFingerprint(previous.workflow)
+      || (recovery.stage === 'integration' && !recovery.integrationOnly && previous.validationCycle) || previous.reservedUsd !== 0 || recovery.originalWorkflowHash !== recoveryFingerprint(previous.workflow)
       || recoveryFingerprint(integrationValidationSteps(previous, recovery.stage, recovery.qualityAction)) !== recoveryFingerprint(recovery.originalSteps)) {
       throw new QueueError('Solo se revalida una vez la integración sin manifiesto original.', 'integration_recovery_invalid');
     }
@@ -960,12 +983,14 @@ export async function queueIntegrationValidationResume(root, id, recovery) {
         ? { key: step.key, label: step.label, ...(step.profile ? { profile: step.profile } : {}), status: 'queued', validationCycle: recovery.id,
           ...(step.key === 'developer' || step.key === recovery.stage && recovery.stage !== 'integration'
             ? { predecessorTaskId: recovery.originalSteps.find(item => item.stage === step.key).taskId } : {}) } : step) };
-    const marker = { ...recovery, phase: 'ready', queuedAt: stamp(), queuedWorkflowHash: recoveryFingerprint(workflow) };
+    const marker = { ...recovery, phase: 'ready', queuedAt: stamp(), queuedWorkflowHash: recoveryFingerprint(workflow),
+      ...(recovery.integrationOnly ? { keepValidationCycle: previous.validationCycle ?? null } : {}) };
     const answers = recovery.qualityAction?.answers ?? [];
     const qualityAnswers = [...(previous.qualityAnswers || []), ...answers.map(answer => ({ ...answer,
       ...(recovery.stage === 'reviewer' ? { reviewerDispatchId: recovery.qualityAction.dispatchId } : { qaDispatchId: recovery.qualityAction.dispatchId }),
       candidateSnapshot: recovery.integrationValidation.candidateSnapshot }))];
-    const job = { ...previous, state: 'queued', error: null, nextAttemptAt: null, validationCycle: recovery.id, livenessResume: marker, workflow,
+    const job = { ...previous, state: 'queued', error: null, nextAttemptAt: null, livenessResume: marker, workflow,
+      ...(recovery.integrationOnly ? {} : { validationCycle: recovery.id }),
       ...(answers.length ? { qualityAnswers } : {}),
       workflowHistory: [...(previous.workflowHistory || []), { ...previous.workflow, attempt: previous.attempts, savedAt: stamp(), recoveryId: recovery.id, originalWorkflowHash: recovery.originalWorkflowHash }],
       livenessRecoveryHistory: [...(previous.livenessRecoveryHistory || []), marker] };
@@ -1002,7 +1027,7 @@ export function assertDeliveryTransportProof(job, proof) {
     return Object.fromEntries(fields.map(key => [key, proof[key]]));
   }
   const hashes = ['originalArtifactSha256', 'receiptSha256', 'transcriptSha256', 'deliverySha256'];
-  if (!isDeliveryTransportCheckpoint(job) || proof?.kind !== 'unicode_loss'
+  if (!isDeliveryTransportCheckpoint(job) || !['unicode_loss', 'criteria_normalized'].includes(proof?.kind)
     || proof.jobId !== job.id || proof.jobAttempt !== step.taskInputAttempt || proof.stage !== step.key
     || proof.runId !== job.workflow.runId || proof.runId !== step.runId || proof.taskId !== step.taskId || proof.dispatchId !== step.dispatchId
     || hashes.some(key => !/^[a-f0-9]{64}$/i.test(proof[key] || '')) || proof.originalArtifactSha256 !== step.artifact.sha256
@@ -1023,6 +1048,9 @@ export function settledOrcaObservation(job, code = job?.error?.code) {
   if (code === 'delivery_invalid' && ['qa', 'reviewer'].includes(step.key) && step.status === 'blocked' && step.error === code
     && step.dispatchSettled === true && step.dispatchStatus === 'completed' && step.artifact && !step.delivery) return step;
   if (step.artifact) return null;
+  // An executor interruption leaves the exact dispatch of Development, QA or Revisión blocked; recovery
+  // observes that same dispatch in the same attempt (D3; QA and Revisión also keep the sealed validation).
+  if (code === 'interrupted' && ['developer', 'qa', 'reviewer'].includes(step.key) && step.status === 'blocked' && step.error === code) return step;
   if (code === 'orca_response_too_large' && step.dispatchStatus === 'awaiting_exit'
     && (step.status === 'running' && !step.error || step.status === 'blocked' && step.error === code)) return step;
   if (code === 'orca_dispatch_status_unknown' && step.status === 'blocked' && step.dispatchStatus === 'unknown'
@@ -1396,10 +1424,26 @@ export async function completeReviewedCodeJob(root, id, { confirm = false, evide
   });
 }
 
+// Records the interrupted segment so a same-attempt recovery can bound the time
+// it already consumed. The segment ends at detection on purpose: while the panel
+// is down the Orca worker keeps running and consuming the attempt, so the job's
+// last persisted event is only a lower bound and would let a resume exceed
+// timeoutMs. Detection is the correct upper bound, not merely a prudent one.
+function interruptedSegment(job, finishedAt) {
+  const resumed = job.livenessResume?.phase === 'consumed' && job.livenessResume.attempt === job.attempts;
+  const startedAt = resumed ? job.livenessResume.consumedAt : job.startedAt;
+  const elapsedMs = Date.parse(finishedAt) - Date.parse(startedAt);
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return [];
+  return [{ attempt: job.attempts, startedAt, finishedAt, elapsedMs, outcome: 'needs_attention', error: 'interrupted',
+    ...(resumed ? { recoveryId: job.livenessResume.id } : {}) }];
+}
+
 export async function recoverRunning(root, state, business) {
+  const finishedAt = stamp();
   const jobs = state.jobs.filter(j => j.state === 'running' && (!business || j.business === business)).map(j => ({
     ...j,
     state: 'needs_attention',
+    attemptHistory: [...(j.attemptHistory ?? []), ...interruptedSegment(j, finishedAt)],
     ...(j.workflow ? {
       workflow: {
         ...j.workflow,
@@ -1412,7 +1456,7 @@ export async function recoverRunning(root, state, business) {
     } : {}),
     orphanRisk: true,
     error: { code: 'interrupted', message: 'Ejecución interrumpida: comprueba el dispatch guardado antes de reanudar.' },
-    finishedAt: stamp(),
+    finishedAt,
   }));
   if (jobs.length) await commit(root, state, 'interrupted_jobs_recovered', { jobs });
 }
@@ -1636,7 +1680,8 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
           }
           // Automatic retries are only permitted for errors known to have rejected work.
           const retry = error.retryable === true && error.uncertain !== true && job.attempts < job.maxAttempts;
-          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), nextAttemptAt: retry ? new Date(clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null, error: { code: error.code || 'worker_error', message: error.safeMessage || 'El ejecutor falló; revisa el trabajo y su resultado antes de continuar.' } };
+          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), nextAttemptAt: retry ? new Date(clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null,
+            error: { code: error.code || 'worker_error', message: error.safeMessage || 'El ejecutor falló; revisa el trabajo y su resultado antes de continuar.', ...boundedErrorDetails(error.details) } };
           job = { ...job, ...(error.partialResult ? { result: error.partialResult } : {}),
             attemptHistory: [...(job.attemptHistory ?? []), { attempt: job.attempts, startedAt: segmentStartedAt, finishedAt: job.finishedAt, elapsedMs: Date.now() - attemptStarted, outcome: job.state, ...(sameAttempt ? { recoveryId: sameAttemptRecoveryId } : {}), promptChars: job.prompt.length, error: job.error.code,
               metrics: error.metrics ?? error.partialResult?.metrics ?? (job.workflow?.steps ?? []).filter(step => step.attempt === job.attempts && step.metrics).map(step => step.metrics).sort((a, b) => (b.orcaCliCalls ?? 0) - (a.orcaCliCalls ?? 0))[0] ?? null }],

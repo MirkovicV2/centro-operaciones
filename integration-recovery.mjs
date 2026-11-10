@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { githubRepository } from './project-destination.mjs';
+import { githubRepository, sameRepository } from './project-destination.mjs';
 import { createIntegrationCommandAdapters, pullRequestIdentityFields, sameRepositoryPullRequest, sameRepositoryPullRequests } from './github-integration.mjs';
 
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40,64}$/i.test(value);
@@ -30,7 +30,7 @@ export async function inspectCommittedIntegration(root, job, record, { git, gh }
   const destination = job.destination ?? {};
   assert(job.autoIntent?.eligible === true && job.autoIntent.receiptId && job.state !== 'cancelled'
     && record?.jobId === job.id && record.receiptId === job.autoIntent.receiptId
-    && record.repository === destination.repository && record.sourceBranch === job.branch && record.baseBranch === destination.baseBranch
+    && sameRepository(record.repository, destination.repository) && record.sourceBranch === job.branch && record.baseBranch === destination.baseBranch
     && branch(job.branch) && branch(destination.baseBranch) && job.branch !== destination.baseBranch
     && ['pr_intent', 'pr_confirmed', 'checks_pending', 'merge_intent'].includes(record.phase)
     && sha(record.commitSha) && sha(record.remoteBaseSha) && /^[a-f0-9]{64}$/i.test(record.manifest ?? '')
@@ -39,9 +39,9 @@ export async function inspectCommittedIntegration(root, job, record, { git, gh }
   assert(destination.workspace === workspace && destination.branch === job.branch
     && destination.baseSha === record.remoteBaseSha, 'El destino original no coincide con la integración registrada.');
   const repository = githubRepository('https://github.com/' + record.repository);
-  assert(repository && repository === record.repository, 'Repositorio de recuperación inválido.');
+  assert(repository && sameRepository(repository, record.repository), 'Repositorio de recuperación inválido.');
   const g = args => git(args, workspace), h = args => gh(args, workspace);
-  assert(githubRepository(text(await g(['remote', 'get-url', 'origin'])))?.toLowerCase() === repository.toLowerCase(), 'Origin cambió desde la integración registrada.');
+  assert(sameRepository(githubRepository(text(await g(['remote', 'get-url', 'origin']))), repository), 'Origin cambió desde la integración registrada.');
   assert(text(await g(['symbolic-ref', '--quiet', '--short', 'HEAD'])) === job.branch, 'La rama activa cambió desde la integración registrada.');
   assert(text(await g(['check-ref-format', '--branch', job.branch])) === job.branch
     && text(await g(['check-ref-format', '--branch', destination.baseBranch])) === destination.baseBranch, 'Las ramas registradas no son válidas.');
@@ -68,4 +68,49 @@ export async function inspectCommittedIntegration(root, job, record, { git, gh }
     manifest: record.manifest, phase: record.phase, repository, sourceBranch: job.branch, baseBranch: destination.baseBranch,
     baseSha: record.remoteBaseSha, prNumber: pr.number, prUrl: pr.url, prHeadSha: pr.headRefOid, prBaseSha: pr.baseRefOid,
     prState: pr.state, ...(merged ? { mergeSha: pr.mergeCommit.oid } : {}) };
+}
+
+const EFFECT_KEYS = ['manifest', 'commitSha', 'prNumber', 'prUrl', 'mergeSha', 'pushedAt', 'mergedAt'];
+const PRE_EFFECT_PHASES = [undefined, 'validation_pending', 'validation_approved'];
+
+/** A failed integration record that never reached a durable effect intent. Pure; no I/O. */
+// `closed`: the job is cancelled and reviewed, so a record left mid-validation (QA or Revisión
+// stopped before the integration step) is final too and may release the checkout.
+export function effectFreeIntegrationRecord(record, history = [], jobId = record?.jobId, { closed = false } = {}) {
+  const statuses = closed ? ['needs_attention', 'validating', 'validated'] : ['needs_attention'];
+  return Boolean(record) && statuses.includes(record.status) && PRE_EFFECT_PHASES.includes(record.phase)
+    && EFFECT_KEYS.every(key => record[key] == null)
+    && !history.some(item => item?.jobId === jobId && item.type === 'github_integration' && !PRE_EFFECT_PHASES.includes(item.phase));
+}
+
+/** Confirm with the remote that a pre-effect integration failure left no commit, push or PR. Read-only. */
+export async function inspectEffectFreeIntegration(root, job, record, { git, gh, history = [] } = {}) {
+  const defaults = createIntegrationCommandAdapters();
+  git ??= defaults.git; gh ??= defaults.gh;
+  const closed = job?.state === 'cancelled' && Boolean(job.reviewedAt) && !job.orphanRisk;
+  assert(effectFreeIntegrationRecord(record, history, job?.id, { closed }), 'El registro de integración no acredita un fallo anterior a cualquier efecto.');
+  const destination = job?.destination ?? {};
+  const workspace = path.resolve(job?.workspace || '');
+  assert(path.isAbsolute(job?.workspace || '') && record.jobId === job.id && sameRepository(record.repository, destination.repository)
+    && record.sourceBranch === job.branch && record.baseBranch === destination.baseBranch
+    && branch(job.branch) && branch(destination.baseBranch) && sha(destination.sha) && sha(destination.remoteSha) && sha(destination.baseSha),
+  'El destino registrado no permite comprobar la ausencia de efectos.');
+  const repository = githubRepository('https://github.com/' + record.repository);
+  const g = args => git(args, workspace), h = args => gh(args, workspace);
+  assert(sameRepository(githubRepository(text(await g(['remote', 'get-url', 'origin']))), repository), 'Origin cambió desde la integración registrada.');
+  const head = text(await g(['rev-parse', 'HEAD']));
+  assert(head === destination.sha, 'El checkout tiene un commit posterior al baseline aprobado; revisa antes de continuar.');
+  const remoteSource = text(await g(['ls-remote', '--exit-code', '--heads', 'origin', job.branch])).split(/\s+/)[0];
+  assert(remoteSource === destination.remoteSha, 'La rama remota cambió desde el baseline; no se descarta un push.');
+  const remoteBase = text(await g(['ls-remote', '--exit-code', '--heads', 'origin', destination.baseBranch])).split(/\s+/)[0];
+  assert(remoteBase === destination.baseSha, 'La rama base remota cambió desde el baseline; revisa antes de continuar.');
+  let openPullRequests = 0;
+  if (job.branch !== destination.baseBranch) {
+    const listing = JSON.parse(text(await h(['pr', 'list', '--repo', repository, '--head', job.branch, '--base', destination.baseBranch,
+      '--state', 'open', '--limit', '100', '--json', pullRequestIdentityFields])) || '[]');
+    openPullRequests = sameRepositoryPullRequests(listing, repository, job.branch, destination.baseBranch).length;
+    assert(openPullRequests === 0, 'Existe una PR abierta para esta rama; la integración no fue inocua.');
+  }
+  return { kind: 'effect_free_integration', jobId: job.id, receiptId: record.receiptId, phase: record.phase ?? null,
+    repository, sourceBranch: job.branch, baseBranch: destination.baseBranch, headSha: head, remoteSourceSha: remoteSource, remoteBaseSha: remoteBase, openPullRequests };
 }

@@ -1,10 +1,12 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { addJob, executionTimeoutMs, loadState as loadQueue } from '../queue.mjs';
 import { safeMarkdownText, writeAnswerNote, writeIdeaNote, writeMessageNote } from './knowledge.mjs';
 import { inspectDestination } from '../../project-destination.mjs';
-import { githubRepository } from '../../project-destination.mjs';
+import { githubRepository, sameRepository } from '../../project-destination.mjs';
 import { classification, withIdeaLock, linkedJobs, ideaBusy } from './idea-model.mjs';
 import { withInboxLock } from './inbox-lock.mjs';
 import * as queueEngine from '../queue.mjs';
@@ -178,7 +180,29 @@ export async function createProject(root, name, business) {
   });
 }
 
-export async function updateProject(root, id, changes) {
+// 14: read-only remote check when a project is saved. Never throws; the project is
+// saved either way and the result (or the warning) is stored for the operator.
+export async function verifyProjectRemote(workspace, repository, branch, { execute = promisify(execFile) } = {}) {
+  const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' };
+  for (const key of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CONFIG.*|SSH.*|ASKPASS)$/i.test(key)) delete env[key];
+  const git = async args => (await execute('git', args, { cwd: workspace, encoding: 'utf8', windowsHide: true, shell: false, timeout: 10_000, env, maxBuffer: 64_000 })).stdout.trim();
+  const result = { verified: false, repository, branch, checkedAt: new Date().toISOString() };
+  let origin;
+  try { origin = await git(['remote', 'get-url', 'origin']); } catch { return { ...result, warning: 'El checkout no tiene remoto origin; configúralo antes de integrar.' }; }
+  let originRepository;
+  try { originRepository = githubRepository(origin); } catch { return { ...result, warning: 'El origin del checkout no es un repositorio GitHub HTTPS o SSH.' }; }
+  if (!sameRepository(originRepository, repository)) return { ...result, origin: originRepository, warning: `El origin del checkout (${originRepository}) no coincide con el repositorio configurado (${repository}).` };
+  if (!branch) return { ...result, origin: originRepository, warning: 'Sin rama observada en el checkout; no se puede comparar con el remoto.' };
+  let local, remote;
+  try { local = await git(['rev-parse', '--verify', 'HEAD']); } catch { return { ...result, origin: originRepository, warning: 'No se pudo leer el HEAD del checkout.' }; }
+  try { remote = (await git(['ls-remote', '--exit-code', '--heads', 'origin', `refs/heads/${branch}`])).split(/\s+/)[0]; }
+  catch { return { ...result, origin: originRepository, localSha: local, warning: `No se pudo consultar origin/${branch}: sin red, sin permisos o la rama no existe en el remoto.` }; }
+  if (!/^[a-f0-9]{40,64}$/i.test(remote || '')) return { ...result, origin: originRepository, localSha: local, warning: `La rama ${branch} no existe en origin.` };
+  if (remote !== local) return { ...result, origin: originRepository, localSha: local, remoteSha: remote, warning: `El SHA local (${local.slice(0, 7)}) no coincide con origin/${branch} (${remote.slice(0, 7)}); sincroniza antes de integrar.` };
+  return { ...result, verified: true, origin: originRepository, localSha: local, remoteSha: remote };
+}
+
+export async function updateProject(root, id, changes, { verifyRemote = verifyProjectRemote } = {}) {
   const repository = changes.repository !== undefined && changes.repository.trim() ? githubRepository(`https://github.com/${changes.repository.trim()}`) : '';
   const baseBranch = changes.baseBranch !== undefined ? String(changes.baseBranch).trim() : undefined;
   if (baseBranch !== undefined && baseBranch && (baseBranch.includes('..') || /[\\\x00\r\n]/.test(baseBranch) || baseBranch.startsWith('-'))) throw new Error('Rama base inválida.');
@@ -190,12 +214,25 @@ export async function updateProject(root, id, changes) {
       destination = await inspectDestination(root, checkout, String(changes.branch || ''));
     }
   }
+  // Remote check with the values this save leaves in place (new or existing checkout and repository).
+  const existing = (await loadDashboardState(root)).projects.find(item => item.id === id);
+  if (!existing) throw new Error('No encuentro ese proyecto.');
+  const effectiveCheckout = checkout !== undefined ? checkout : existing.checkout;
+  const effectiveRepository = changes.repository !== undefined ? repository : existing.repository;
+  let remote = null;
+  if (effectiveCheckout && effectiveRepository && (checkout !== undefined || changes.repository !== undefined)) {
+    const workspace = destination?.workspace ?? path.resolve(root, effectiveCheckout);
+    const branch = destination?.branch ?? existing.branch ?? '';
+    remote = await verifyRemote(workspace, effectiveRepository, branch).catch(error => ({ verified: false, repository: effectiveRepository, branch, checkedAt: new Date().toISOString(), warning: `No se pudo verificar el remoto: ${error.code || 'error'}.` }));
+  }
   return changeDashboardState(root, state => {
     const project = state.projects.find(item => item.id === id);
     if (!project) throw new Error('No encuentro ese proyecto.');
     if (changes.repository !== undefined) project.repository = repository;
     if (baseBranch !== undefined) project.baseBranch = baseBranch;
     if (checkout !== undefined) { project.checkout = checkout; project.branch = destination?.branch || ''; project.destinationCheckedAt = destination?.checkedAt || null; }
+    if (remote) project.remote = remote;
+    else if ((checkout !== undefined || changes.repository !== undefined) && !(effectiveCheckout && effectiveRepository)) delete project.remote;
     if (changes.stageIndex !== undefined) {
       const stageIndex = Number(changes.stageIndex);
       if (!Number.isInteger(stageIndex) || stageIndex < 0 || stageIndex >= project.stages.length) throw new Error('Elige una etapa válida.');

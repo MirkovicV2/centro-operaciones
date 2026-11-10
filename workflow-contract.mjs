@@ -10,6 +10,21 @@ export class ContractError extends Error {
   constructor(message, code = 'delivery_invalid') { super(message); this.code = code; this.safeMessage = message; this.uncertain = true; }
 }
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
+
+// 30: criteria compare by meaning, not by bytes. A reviewer writing without
+// accents, in another case or with different spacing still names the same
+// criterion. Combining marks are stripped after NFD; the result is NFC.
+export function canonicalCriterion(text) {
+  return String(text ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+// Stable id derived from the canonical text, so contracts stored without ids keep working.
+export const criterionId = text => 'crit_' + createHash('sha256').update(canonicalCriterion(text)).digest('hex').slice(0, 16);
+export const acceptanceCriteriaIds = acceptance => (acceptance ?? []).map(criterion => ({ id: criterionId(criterion), criterion }));
+export function matchesCriterion(item, criterion) {
+  if (!object(item) || typeof criterion !== 'string') return false;
+  return canonicalCriterion(item.criterion) === canonicalCriterion(criterion)
+    && (item.criterionId === undefined || item.criterionId === criterionId(criterion));
+}
 const nonempty = (value, max = 12000) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
 const strings = (value, limit = 50) => Array.isArray(value) && value.length <= limit && value.every(item => nonempty(item, 4000));
 
@@ -133,6 +148,7 @@ export function validateDelivery(value, expected = {}, { requireUxAcceptanceArra
   if (!['completed', 'needs_input', 'blocked', 'failed'].includes(value.outcome) || !['complete', 'partial'].includes(value.scope)
     || !nonempty(value.summary) || !strings(value.evidence) || !Array.isArray(value.acceptance) || value.acceptance.length > 100
     || !value.acceptance.every(item => object(item) && nonempty(item.criterion, 2000)
+      && (item.criterionId === undefined || /^crit_[a-f0-9]{16}$/.test(item.criterionId))
       && ['passed', 'failed', 'unverified'].includes(item.status) && typeof item.evidence === 'string' && item.evidence.length <= 4000)
     || !Array.isArray(value.questions) || value.questions.length > 30
     || !value.questions.every(item => object(item) && /^[a-zA-Z0-9_-]{1,100}$/.test(item.id ?? '') && nonempty(item.text, 4000)
@@ -153,9 +169,8 @@ export function validateDelivery(value, expected = {}, { requireUxAcceptanceArra
     throw new ContractError('QA/Revisión completadas necesitan una aprobación explícita con evidencia.');
   }
   if (value.outcome === 'completed' && value.scope === 'complete' && ['planner', 'qa', 'reviewer'].includes(value.stage)) {
-    const canonical = text => text.trim().replace(/\s+/g, ' ');
     for (const criterion of expected.acceptance ?? []) {
-      if (!value.acceptance.some(item => canonical(item.criterion) === canonical(criterion) && item.status === 'passed' && item.evidence.trim())) {
+      if (!value.acceptance.some(item => matchesCriterion(item, criterion) && item.status === 'passed' && item.evidence.trim())) {
         throw new ContractError('La entrega omite un criterio obligatorio del encargo: ' + criterion, 'delivery_acceptance_missing');
       }
     }
@@ -180,7 +195,7 @@ export function parseDelivery(text, expected, { required = false, requireUxAccep
   if (preserveExplicitBlock && ['qa', 'reviewer'].includes(expected?.stage) && value?.outcome === 'completed'
     && value.scope === 'complete' && value.approval === 'blocked' && Array.isArray(value.acceptance)
     && value.acceptance.some(item => item?.status === 'failed' && typeof item.evidence === 'string' && item.evidence.trim()
-      && expected.acceptance?.includes(item.criterion))) value = { ...value, outcome: 'blocked' };
+      && expected.acceptance?.some(criterion => matchesCriterion(item, criterion)))) value = { ...value, outcome: 'blocked' };
   const contractual = blocks.length || required || (object(value) && ('jobId' in value || 'dispatchId' in value || 'approval' in value));
   if (value !== undefined && contractual) return validateDelivery(value, expected, { requireUxAcceptanceArray });
   if (required) throw new ContractError('Falta la entrega estructurada; conserva la evidencia y solicita revisión.', 'delivery_missing');
@@ -194,7 +209,8 @@ export function deliveryInstructions(job, stage, runId) {
     'Campos obligatorios: version:1, jobId:' + JSON.stringify(job.id) + ', jobAttempt:' + job.attempts + ', stage:' + JSON.stringify(stage) + ', runId:' + JSON.stringify(runId) + '.',
     'taskId y dispatchId deben ser los de TU asignación Orca, nunca inventados ni tomados de otra etapa.',
     'outcome: completed|needs_input|blocked|failed; scope: complete|partial; summary: resumen; approval: approved|blocked|not_applicable. Si QA o Revisión rechazan el producto, usa outcome:blocked y approval:blocked aunque el informe esté completo.',
-    'acceptance:[{criterion,status:passed|failed|unverified,evidence}], evidence:[referencias o comprobaciones], questions:[{id,text,required,decisionKey}], decisions:[{key,value}]. Usa arrays vacíos cuando no correspondan.',
+    'acceptance:[{criterion,criterionId,status:passed|failed|unverified,evidence}], evidence:[referencias o comprobaciones], questions:[{id,text,required,decisionKey}], decisions:[{key,value}]. Usa arrays vacíos cuando no correspondan.',
+    ...(job.contract?.acceptance?.length ? ['CRITERIOS DEL CONTRATO CON ID ESTABLE: ' + JSON.stringify(acceptanceCriteriaIds(job.contract.acceptance)) + '. En acceptance copia el texto de cada criterio. Si incluyes criterionId, debe corresponder a ese mismo texto. El motor compara el texto sin distinguir tildes, mayúsculas ni espacios.'] : []),
     'Cada decisions[].value debe ser una cadena de texto. Los criterios de producto ya están en el contrato vigente. Referéncialos en texto sin volver a copiar el array dentro de decisions.',
     'La aceptación corresponde a TU etapa: outcome:completed y scope:complete acreditan que TU etapa terminó, no el cierre global del job. No atribuyas una implementación o prueba futura a UX. QA/Revisión solo aprueban con criterios comprobados y evidencia.',
     ...(job.contract?.acceptanceScope === 'product' ? [

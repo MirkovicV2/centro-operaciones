@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { sameRepository } from '../repository-name.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { loadDashboardState } from './agency-assistant/dashboard-state.mjs';
@@ -186,7 +187,7 @@ function integrationFor(job, automation, receipts) {
   const receipt = receipts.find(item => item.id === job.autoIntent?.receiptId && item.jobId === job.id);
   const record = automation.integrations?.[job.autoIntent?.receiptId];
   if (!job.autoIntent?.eligible || !receipt?.eligible || !record || record.jobId !== job.id || record.receiptId !== receipt.id
-    || record.repository !== job.destination?.repository || record.sourceBranch !== job.branch || record.baseBranch !== job.destination?.baseBranch) return null;
+    || !sameRepository(record.repository, job.destination?.repository) || record.sourceBranch !== job.branch || record.baseBranch !== job.destination?.baseBranch) return null;
   return record;
 }
 const published = record => record?.phase === 'complete' && record.status === 'completed' && isSha(record.commitSha)

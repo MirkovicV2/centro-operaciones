@@ -7,7 +7,8 @@ import { createHash } from 'node:crypto';
 import { projectMemory } from './project-memory.mjs';
 import { resolveOperationsRoot } from './operations-root.mjs';
 import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
-import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
+import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, settledQaRevalidation, stoppedDeveloperCheckpoint, actorContext } from './queue.mjs';
+import { parseTailscaleAccess, assertRoleAllows } from './access-control.mjs';
 import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt } from '../auto-run.mjs';
 import { createWorker } from '../providers.mjs';
 import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
@@ -48,18 +49,18 @@ const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const QUEUE_ROOT = resolveOperationsRoot(APP_ROOT);
 const coordinatorHealth = createCoordinatorHealth(QUEUE_ROOT);
 const PORT = Number(process.env.CENTRO_OPERATIONS_PORT || 4187);
+// 7: { hostname, login } (one admin) or { hostname, users: [{ login, role }] } with roles admin, ejecutar, revisar.
 const tailscaleAccess = await fs.readFile(path.join(APP_ROOT, 'data', 'tailscale-access.json'), 'utf8')
-  .then(content => {
-    const { hostname, login } = JSON.parse(content);
-    if (!/^(?:[a-z0-9-]+\.){2,}ts\.net$/.test(hostname) || typeof login !== 'string' || !login.trim()) {
-      throw new Error('Configuración de acceso Tailscale inválida.');
-    }
-    return { hostname, login };
-  })
+  .then(content => parseTailscaleAccess(content))
   .catch(error => {
-    if (error.code !== 'ENOENT') console.warn('Acceso Tailscale desactivado: revisa la configuración local.');
+    if (error.code !== 'ENOENT') console.warn(`Acceso Tailscale desactivado: ${error.message}`);
     return null;
   });
+// 25: with Claude, Orca must open workers as Terminal. Read-only check; the panel only warns.
+import { configuredOrcaAgent } from '../local-tools.mjs';
+import { inspectOrcaAgentSettings } from '../orca-settings.mjs';
+const orcaPreflight = await inspectOrcaAgentSettings({ agent: configuredOrcaAgent() }).catch(error => ({ available: false, reason: error.code || 'orca_settings_error', surface: 'unknown', permissionMode: null, warnings: [] }));
+for (const warning of configuredOrcaAgent() === 'claude' ? orcaPreflight.warnings : []) console.warn(`Preflight de Orca: ${warning}`);
 const runtime = Object.freeze({
   pid: process.pid,
   startupAt: new Date().toISOString(),
@@ -84,24 +85,28 @@ function send(response, status, body, contentType = 'application/json; charset=u
   response.end(contentType.startsWith('application/json') ? JSON.stringify(body) : body);
 }
 
+// Returns the principal: { actor, role }. Local requests act as admin; Tailscale
+// requests must come from a listed account (unlisted → 403) and carry its role.
 function assertLocalRequest(request, tailscale = null) {
   const authority = String(request.headers.host || '').toLowerCase();
   const host = authority.split(':')[0];
   const { origin } = request.headers;
   const forwardedHost = request.headers['x-forwarded-host'];
   if (forwardedHost !== undefined || request.headers['tailscale-user-login'] !== undefined || request.headers['tailscale-funnel-request'] !== undefined) {
+    const login = request.headers['tailscale-user-login'];
+    const users = tailscale?.users ?? (tailscale?.login ? new Map([[tailscale.login, 'admin']]) : new Map());
     if (!tailscale || request.socket?.remoteAddress !== '127.0.0.1'
       || (authority !== tailscale.hostname && authority !== `${tailscale.hostname}:443`)
       || String(forwardedHost).toLowerCase() !== authority
       || request.headers['x-forwarded-proto'] !== 'https'
       || request.headers['tailscale-funnel-request'] !== undefined
-      || request.headers['tailscale-user-login'] !== tailscale.login) {
-      throw Object.assign(new Error('Acceso restringido a la cuenta autorizada en Tailscale.'), { status: 403 });
+      || typeof login !== 'string' || !users.has(login)) {
+      throw Object.assign(new Error('Acceso restringido a las cuentas autorizadas en Tailscale.'), { status: 403 });
     }
     if ((request.method !== 'GET' || origin !== undefined) && origin !== `https://${tailscale.hostname}`) {
       throw Object.assign(new Error('Origen de petición no permitido.'), { status: 403 });
     }
-    return;
+    return { actor: login, role: users.get(login) };
   }
   if (!['127.0.0.1', 'localhost'].includes(host)) throw new Error('El panel solo acepta conexiones locales.');
   if (origin) {
@@ -110,6 +115,7 @@ function assertLocalRequest(request, tailscale = null) {
       throw new Error('Origen de petición no permitido.');
     }
   }
+  return { actor: 'local', role: 'admin' };
 }
 
 async function readJson(request, maxBytes = 32_000) {
@@ -176,7 +182,7 @@ async function dashboardData() {
     messages: inbox.messages.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
     exportedCount: Object.keys(inbox.exportedJobs).length,
     automation,
-    settings: { vaultPath: config.vaultPath, queueRoot: QUEUE_ROOT, autoRun: false, telegram: isBotRunning, runtime },
+    settings: { vaultPath: config.vaultPath, queueRoot: QUEUE_ROOT, autoRun: false, telegram: isBotRunning, runtime, orcaAgent: configuredOrcaAgent(), orcaPreflight },
   };
 }
 
@@ -369,9 +375,12 @@ async function handleApi(request, response, url, tailscale = null) {
 
 const server = http.createServer(async (request, response) => {
   try {
-    assertLocalRequest(request, tailscaleAccess);
+    const principal = assertLocalRequest(request, tailscaleAccess);
     const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
-    if (url.pathname.startsWith('/api/')) return await handleApi(request, response, url, tailscaleAccess);
+    if (url.pathname.startsWith('/api/')) {
+      assertRoleAllows(principal.role, request.method, url.pathname);
+      return await actorContext.run(principal, () => handleApi(request, response, url, tailscaleAccess));
+    }
     if (request.method !== 'GET') return send(response, 405, 'Método no permitido.', 'text/plain; charset=utf-8');
     const relative = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\//, '');
     const contentTypes = {

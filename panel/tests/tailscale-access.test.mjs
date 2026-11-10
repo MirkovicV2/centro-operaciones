@@ -44,3 +44,15 @@ test('Tailscale blocks cross-origin writes and preserves localhost CLI access', 
   assert.doesNotThrow(() => authorize(request('POST', { host: '127.0.0.1:4187' }), access));
   assert.throws(() => authorize(request('POST', { host: '127.0.0.1:4187', origin: 'https://outside.example' }), access), /Origen/);
 });
+
+test('Tailscale with several accounts: listed users receive their role, unlisted accounts get 403, legacy stays admin', () => {
+  // The vm realm has its own Object prototype; compare plain values.
+  const plain = value => JSON.parse(JSON.stringify(value));
+  const shared = { hostname, login, users: new Map([[login, 'admin'], ['peer@example.test', 'ejecutar'], ['reviewer@example.test', 'revisar']]) };
+  assert.deepEqual(plain(authorize(request('GET', proxy), shared)), { actor: login, role: 'admin' });
+  assert.deepEqual(plain(authorize(request('GET', { ...proxy, 'tailscale-user-login': 'reviewer@example.test' }), shared)), { actor: 'reviewer@example.test', role: 'revisar' });
+  assert.deepEqual(plain(authorize(request('POST', { ...proxy, 'tailscale-user-login': 'peer@example.test', origin: `https://${hostname}` }), shared)), { actor: 'peer@example.test', role: 'ejecutar' });
+  assert.throws(() => authorize(request('GET', { ...proxy, 'tailscale-user-login': 'stranger@example.test' }), shared), { status: 403 });
+  assert.deepEqual(plain(authorize(request('GET', proxy), access)), { actor: login, role: 'admin' });
+  assert.deepEqual(plain(authorize(request('POST', { host: '127.0.0.1:4187' }), access)), { actor: 'local', role: 'admin' });
+});

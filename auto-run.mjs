@@ -3,10 +3,12 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { QUEUE_BUSINESSES, addJob, loadState, runQueue, recoverDashboardQueue, retryJob, validateSpec, acquireLock, acquireLedgerLock, releaseLock, queueKnownLivenessResume, elapsedAttemptMs, executionTimeExhausted, isEffectFreeLivenessPreflight, isSameAttemptRecoveryMode, deliveryTransportError, assertDeliveryTransportProof, recoveryFingerprint, integrationValidationSteps, assertIntegrationValidationProof, queueIntegrationValidationResume, assertCommittedIntegrationRecord, assertIntegrationReconcileProof, queueIntegrationReconcileResume } from './queue.mjs';
 import { verifyGitHubDestination } from './project-destination.mjs';
+import { sameRepository } from './repository-name.mjs';
 import { captureIntegrationSnapshot } from './github-integration.mjs';
-import { inspectCommittedIntegration } from './integration-recovery.mjs';
+import { inspectCommittedIntegration, inspectEffectFreeIntegration, effectFreeIntegrationRecord } from './integration-recovery.mjs';
 import { replaceLocalFile } from './atomic-file.mjs';
 import { assertQualityAction, queueContractRevisionRetry, recoverableChecksTimeout, uxReturnSource, developerDecisionSource, stageDecisionSource, isPartialStageResume, settledOrcaObservation, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
+import { currentActor } from './queue.mjs';
 import { createContractRevision, assertContractRevisionCheckpoint, assertContractRevisionProof, contractRevisionHash, originalContractRevisionJob } from './contract-revision.mjs';
 
 const location = root => path.join(path.resolve(root), 'data', 'auto-run.json');
@@ -77,7 +79,7 @@ async function writeChange(root, action) {
     await lock.close(); await fs.unlink(`${file}.lock`);
   }
 }
-function audit(state, type, detail) { state.history.push({ at: now(), type, ...detail }); }
+function audit(state, type, detail) { const actor = currentActor(); state.history.push({ at: now(), type, ...(actor ? { actor } : {}), ...detail }); }
 export async function setAutoRun(root, business, enabled, { confirm = false } = {}) {
   businessCheck(business);
   if (!confirm || typeof enabled !== 'boolean') throw new Error('Confirma explícitamente activar o pausar esta empresa.');
@@ -274,10 +276,19 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
               if (sameAttempt) {
                 if (entry.dispatchRecovery?.phase !== 'ready' || entry.dispatchRecovery.id !== job.livenessResume.id) throw new Error('La recuperación ya se consumió o cambió antes de admitirla.');
                 assertRecoveryCheckpoint(job, entry.dispatchRecovery);
+                if (entry.dispatchRecovery.integrationRecordHash && entry.dispatchRecovery.mode === 'same_attempt_liveness'
+                  && recoveryFingerprint(current.integrations?.[entry.id]) !== entry.dispatchRecovery.integrationRecordHash) {
+                  throw new Error('La validación sellada cambió antes de reanudar la etapa de calidad.');
+                }
                 if (entry.dispatchRecovery.mode === 'same_attempt_integration_validation') {
                   const record = current.integrations?.[entry.id];
-                  if (record?.phase !== 'validation_pending' || record.integrationRecoveryId !== entry.dispatchRecovery.id
-                    || record.validationCandidateSnapshot !== entry.dispatchRecovery.integrationValidation.candidateSnapshot) throw new Error('El registro de nueva validación no coincide con su recibo.');
+                  const candidate = entry.dispatchRecovery.integrationValidation.candidateSnapshot;
+                  // 29: an integration-only resume keeps the sealed, approved validation of this exact snapshot.
+                  const kept = entry.dispatchRecovery.integrationOnly
+                    ? record?.phase === 'validation_approved' && record.status === 'validated' && record.integrationRecoveryId === entry.dispatchRecovery.id
+                      && record.validation?.snapshot === candidate && record.validation.approvals?.qa && record.validation.approvals?.reviewer
+                    : record?.phase === 'validation_pending' && record.integrationRecoveryId === entry.dispatchRecovery.id && record.validationCandidateSnapshot === candidate;
+                  if (!kept) throw new Error('El registro de nueva validación no coincide con su recibo.');
                 }
                 if (entry.dispatchRecovery.mode === 'same_attempt_integration_reconcile'
                   && recoveryFingerprint(current.integrations?.[entry.id]) !== entry.dispatchRecovery.integrationRecordHash) throw new Error('El registro de integración cambió en la admisión.');
@@ -380,7 +391,7 @@ export async function reviewAutoReceipt(root, id, { confirm = false } = {}) {
 
 // A collision before admission did not consume an attempt. Keep the original
 // job and receipt and only clear a previous owner's lock with positive proof.
-export async function retryCheckoutAdmission(root, id, { confirm = false, inspectWorker } = {}) {
+export async function retryCheckoutAdmission(root, id, { confirm = false, inspectWorker, inspectIntegrationEffects = inspectEffectFreeIntegration } = {}) {
   if (!confirm || typeof inspectWorker !== 'function') throw new Error('Confirma la revisión del checkout.');
   root = path.resolve(root);
   const queueLock = await acquireLock(root);
@@ -417,11 +428,16 @@ export async function retryCheckoutAdmission(root, id, { confirm = false, inspec
         owner = JSON.parse(raw);
         const previous = jobs.find(item => item.id === owner?.jobId);
         const oldReceipt = state.receipts.find(item => item.id === owner?.receiptId);
+        // A pre-effect integration failure (29/F14) may still release the checkout once the remote confirms no commit, push or PR.
+        const oldIntegration = state.integrations?.[oldReceipt?.id];
         if (!previous || previous.workspace !== workspace || previous.state !== 'cancelled' || !previous.reviewedAt || previous.orphanRisk
           || previous.autoIntent?.receiptId !== oldReceipt?.id || oldReceipt?.jobId !== previous.id || oldReceipt.status !== 'reviewed'
-          || (owner.attempt != null && owner.attempt !== previous.attempts) || state.integrations?.[oldReceipt.id]
+          || (owner.attempt != null && owner.attempt !== previous.attempts) || (oldIntegration && !effectFreeIntegrationRecord(oldIntegration, state.history, previous.id, { closed: true }))
           || !Number.isInteger(owner.pid) || owner.pid <= 0) throw new Error('El bloqueo no pertenece a un encargo cancelado y revisado de este checkout.');
+        // 24 (F12): this process wrote the lock while running the previous job. That job
+        // is now cancelled and reviewed, so no executor of this process can still own it.
         const assertPidExited = () => {
+          if (owner.pid === process.pid) return;
           try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') return; throw error; }
           throw new Error('El proceso que reservó el checkout sigue activo.');
         };
@@ -432,6 +448,7 @@ export async function retryCheckoutAdmission(root, id, { confirm = false, inspec
           throw new Error('El encargo anterior tiene etapas sin identificar o aún activas.');
         }
         for (const step of dispatched) await inspectWorker(root, workspace, step);
+        if (oldIntegration) owner = { ...owner, integrationEffects: await inspectIntegrationEffects(root, previous, oldIntegration, { history: state.history }) };
         assertPidExited();
         if (await fs.readFile(file, 'utf8') !== raw) throw new Error('El propietario del bloqueo cambió durante la revisión.');
         await fs.unlink(file);
@@ -447,7 +464,7 @@ export async function retryCheckoutAdmission(root, id, { confirm = false, inspec
 
 function assertRecoveryDestination(expected, observed) {
   const keys = ['workspace', 'branch', 'repository', 'baseBranch', 'sha', 'remoteSha', 'baseSha'];
-  if (keys.some(key => !expected?.[key] || observed?.[key] !== expected[key])
+  if (keys.some(key => !expected?.[key] || (key === 'repository' ? !sameRepository(observed?.[key], expected[key]) : observed?.[key] !== expected[key]))
     || !['sha', 'remoteSha', 'baseSha'].every(key => /^[a-f0-9]{40,64}$/i.test(expected[key]))
     || expected.sha !== expected.remoteSha) throw new Error('El destino observado diverge del checkout, ramas o SHA originales; no se autoriza otro baseline.');
 }
@@ -524,17 +541,17 @@ async function rearmUnstartedPartial(root, receiptId) {
 
 // Resume a positively observed native worker, never infer non-execution from an
 // unknown state. The callback must query Orca; HTTP callers cannot supply proof.
-export function recoverKnownDispatchReceipt(root, jobId, { confirm = false, inspectDispatch, verify = verifyGitHubDestination, captureSnapshot = captureIntegrationSnapshot, qualityAction, uxHandoff, developerDecision, stageDecision } = {}) {
+export function recoverKnownDispatchReceipt(root, jobId, { confirm = false, inspectDispatch, verify = verifyGitHubDestination, captureSnapshot = captureIntegrationSnapshot, inspectIntegrationEffects = inspectEffectFreeIntegration, qualityAction, uxHandoff, developerDecision, stageDecision } = {}) {
   if (!confirm || typeof inspectDispatch !== 'function') return Promise.reject(new Error('Confirma la recuperación y consulta nativamente el dispatch exacto antes de reanudar.'));
   root = path.resolve(root);
   const key = `${root}:${jobId}`;
   if (dispatchRecoveries.has(key)) return dispatchRecoveries.get(key);
-  const pending = recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, captureSnapshot, qualityAction, uxHandoff, developerDecision, stageDecision }).finally(() => dispatchRecoveries.delete(key));
+  const pending = recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, captureSnapshot, inspectIntegrationEffects, qualityAction, uxHandoff, developerDecision, stageDecision }).finally(() => dispatchRecoveries.delete(key));
   dispatchRecoveries.set(key, pending);
   return pending;
 }
 
-async function recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, captureSnapshot, qualityAction, uxHandoff, developerDecision, stageDecision }) {
+async function recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, captureSnapshot, inspectIntegrationEffects, qualityAction, uxHandoff, developerDecision, stageDecision }) {
   const initial = (await loadState(root)).jobs.find(item => item.id === jobId);
   const integration = (await readAutoRun(root)).integrations?.[initial?.autoIntent?.receiptId];
   if ((initial?.error?.code === 'github_integration_needs_attention' && integration?.commitSha || recoverableChecksTimeout(initial, integration))
@@ -543,7 +560,7 @@ async function recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, 
   }
   if (qualityAction || settledQaRevalidation(initial) || initial?.error?.code === 'github_integration_needs_attention' || initial?.livenessResume?.mode === 'same_attempt_integration_validation'
     && ['ready', 'verified', 'lock_released'].includes(initial.livenessResume.phase)) {
-    return recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, verify, qualityAction });
+    return recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, verify, qualityAction, inspectIntegrationEffects });
   }
   let queueLock, recoveryId, candidate;
   try {
@@ -596,7 +613,7 @@ async function recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, 
       if (!job || (job.kind !== 'code' && !decidedStep) || !receipt?.eligible || !job.autoIntent?.eligible || receipt.id !== job.autoIntent.receiptId
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec?.kind !== job.kind
         || job.kind === 'code' && (receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-          || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch)
+          || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch)
         || !['needs_attention', 'retrying'].includes(receipt.status)
         || !(job.state === 'needs_attention' || resuming && job.state === 'queued') || (!sameAttempt && job.attempts >= job.maxAttempts)
         || !preservesDispatch || !/^run_[A-Za-z0-9_-]{6,80}$/.test(stage.runId || '')
@@ -642,6 +659,20 @@ async function recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, 
       if (job.kind === 'code') {
         const destination = await verify(root, job, { requireClean: recovery.stage === 'ux' && !decidedStep });
         assertRecoveryDestination(recovery.destination, destination);
+      }
+      // D3 for QA and Revisión: the interrupted quality stage resumes over the exact candidate that the
+      // sealed pre-QA validation recorded; a changed record or checkout refuses before releasing the lock.
+      if (observation && observationError === 'interrupted' && ['qa', 'reviewer'].includes(recovery.stage) && job.autoIntent?.eligible === true) {
+        const saved = integrationRecord?.validation, developer = job.workflow.steps.find(item => item.key === 'developer');
+        if (integrationRecord?.phase !== 'validation_pending' || integrationRecord.status !== 'validating' || integrationRecord.commitSha || integrationRecord.manifest
+          || !/^[a-f0-9]{64}$/.test(saved?.snapshot || '') || saved.approvals || saved.jobId !== job.id || saved.receiptId !== receipt.id
+          || saved.attempt !== job.attempts || saved.runId !== job.workflow.runId || saved.cycleId !== (job.validationCycle || `attempt-${job.attempts}`)
+          || saved.developerTaskId !== developer?.taskId || saved.developerDispatchId !== developer?.dispatchId || saved.developerArtifactSha256 !== developer?.artifact?.sha256
+          || resuming && recoveryFingerprint(integrationRecord) !== prior.integrationRecordHash) {
+          throw new Error('La validación sellada antes de QA no corresponde a la etapa interrumpida; no se reanuda.');
+        }
+        if (await captureSnapshot(job.workspace) !== saved.snapshot) throw new Error('Los archivos cambiaron desde la validación sellada antes de QA.');
+        recovery.integrationRecordHash = recoveryFingerprint(integrationRecord);
       }
       if (job.kind === 'code' && (uxReturn || decidedStep)) {
         const snapshot = await captureSnapshot(job.workspace);
@@ -728,7 +759,7 @@ async function recoverIntegrationReconcileOnce(root, jobId, { inspectDispatch })
       const step = job?.workflow?.steps?.find(item => item.key === 'integration');
       if (!job || job.kind !== 'code' || !receipt?.eligible || !job.autoIntent?.eligible || job.autoIntent.receiptId !== receipt.id
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-        || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
+        || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
         || !['needs_attention', 'retrying'].includes(receipt.status) || !['needs_attention', ...(resuming ? ['queued'] : [])].includes(job.state)
         || !resuming && job.error?.code !== 'github_integration_needs_attention' && !recoverableChecksTimeout(job, record) || job.workflow?.currentStage !== 'integration'
         || step?.status !== 'blocked' || step.error !== 'integration_needs_attention' || record?.status !== 'needs_attention') {
@@ -781,7 +812,7 @@ async function recoverIntegrationReconcileOnce(root, jobId, { inspectDispatch })
   } finally { if (queueLock) await releaseLock(queueLock); }
 }
 
-async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, verify, qualityAction }) {
+async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, verify, qualityAction, inspectIntegrationEffects = inspectEffectFreeIntegration }) {
   let queueLock;
   try {
     queueLock = await acquireLedgerLock(root, 2000);
@@ -816,8 +847,9 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
       if (action && job?.state === 'needs_attention') assertQualityAction(job, action);
       const scope = resuming ? prior.stage : action ? job.workflow.currentStage : settledQaRevalidation(job) ? 'qa' : 'integration';
       if (qualityAction && scope === 'integration') throw new Error('El informe de calidad ya no está vigente.');
+      // A job that already consumed a validation cycle may still resume only the integration (29); a new revalidation is refused below.
       const integrationBlocked = job?.error?.code === 'github_integration_needs_attention' && job.workflow?.currentStage === 'integration'
-        && step?.status === 'blocked' && step.error === 'integration_needs_attention' && !job.validationCycle;
+        && step?.status === 'blocked' && step.error === 'integration_needs_attention';
       const previousValidation = record?.validation;
       const developer = job?.workflow?.steps?.find(item => item.key === 'developer');
       const recordEligible = scope !== 'integration' ? job && receipt && record?.phase === 'validation_pending' && record.status === 'validating'
@@ -828,23 +860,29 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
         && previousValidation.developerTaskId === developer?.taskId && previousValidation.developerDispatchId === developer?.dispatchId
         && previousValidation.developerArtifactSha256 === developer?.artifact?.sha256
         && previousValidation.workspace === job.workspace && previousValidation.branch === job.branch
-        : record?.status === 'needs_attention' && record.error === 'El diff actual no coincide con la revisión aprobada.'
-          && record.phase === undefined && record.validation === undefined;
+        : record?.status === 'needs_attention' && (record.error === 'El diff actual no coincide con la revisión aprobada.'
+          && record.phase === undefined && record.validation === undefined
+          // 29: a failure after the files were sealed (validation_pending/approved) but before any effect intent.
+          || record.phase !== undefined && effectFreeIntegrationRecord(record, state.history, job?.id));
+      const preEffectFailure = scope === 'integration' && record?.phase !== undefined;
       if (!job || job.kind !== 'code' || !receipt?.eligible || !job.autoIntent?.eligible || job.autoIntent.receiptId !== receipt.id
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-        || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
+        || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
         || !['needs_attention', 'retrying'].includes(receipt.status) || !['needs_attention', ...(resuming ? ['queued'] : [])].includes(job.state)
         || !resuming && scope === 'integration' && !integrationBlocked
         || !recordEligible || record.jobId !== job.id || record.receiptId !== receipt.id
         || ['manifest', 'commitSha', 'prNumber', 'prUrl', 'mergeSha', 'pushedAt', 'mergedAt'].some(key => record[key] !== undefined)
         || state.history.some(item => item.jobId === job.id && item.type === 'github_integration' && item.phase
-          && (scope === 'integration' || item.phase !== 'validation_pending'))) {
+          && (scope === 'integration' ? !['validation_pending', 'validation_approved'].includes(item.phase) : item.phase !== 'validation_pending'))) {
         throw new Error('La integración no acredita un único fallo previo a efectos y sin manifiesto durable.');
       }
+      // The remote must confirm the failure was inert before the same attempt revalidates and integrates again.
+      const integrationEffects = preEffectFailure && !resuming ? await inspectIntegrationEffects(root, job, record, { history: state.history }) : resuming ? prior.integrationEffects : undefined;
+      if (preEffectFailure && integrationEffects?.kind !== 'effect_free_integration') throw new Error('No se pudo confirmar con el remoto que la integración fallida no tuvo efectos.');
       const recovery = resuming ? prior : { id: recoveryFingerprint({ jobId, receiptId: receipt.id, workflow: job.workflow, record, qualityAction: action }),
         mode: 'same_attempt_integration_validation', jobId, receiptId: receipt.id, attempt: job.attempts, stage: scope, runId: job.workflow.runId,
         originalError: job.error.code, originalWorkflowHash: recoveryFingerprint(job.workflow), integrationRecordHash: recoveryFingerprint(record),
-        ...(action ? { qualityAction: action } : {}),
+        ...(action ? { qualityAction: action } : {}), ...(integrationEffects ? { integrationEffects } : {}),
         originalSteps: integrationValidationSteps(job, scope, action), originalIntegrationRecord: structuredClone(record), destination: structuredClone(job.destination),
         elapsedMs: elapsedAttemptMs(job), timeoutMs: job.timeoutMs, createdAt: now() };
       if (recovery.elapsedMs !== elapsedAttemptMs(job) || executionTimeExhausted(job, recovery.elapsedMs) || recovery.timeoutMs !== job.timeoutMs
@@ -855,6 +893,15 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
       if (observed?.state !== 'succeeded' || observed.liveness !== 'exited' || observed.runId !== recovery.runId) throw new Error('Las etapas originales no acreditan cierre nativo exacto.');
       const proof = assertIntegrationValidationProof(recovery, observed.integrationValidation);
       if (scope !== 'integration' && proof.candidateSnapshot !== previousValidation.snapshot) throw new Error('Los archivos cambiaron desde el QA anterior.');
+      // 29: resume only the integration when (a) the checkout snapshot is exactly the one QA and
+      // Revisión approved, (b) the remote confirmed no commit, push or PR and (c) the remote base
+      // branch was verifiable. Otherwise QA and Revisión are revalidated on the current files.
+      const approvedSnapshot = record?.phase === 'validation_approved' && previousValidation?.approvals && /^[a-f0-9]{64}$/.test(previousValidation.snapshot || '') ? previousValidation.snapshot : null;
+      const integrationOnly = preEffectFailure && Boolean(approvedSnapshot) && proof.candidateSnapshot === approvedSnapshot
+        && /^[a-f0-9]{40,64}$/i.test(integrationEffects?.remoteBaseSha || '') && integrationEffects.remoteBaseSha === job.destination?.baseSha;
+      if (resuming ? Boolean(prior.integrationOnly) !== integrationOnly : false) throw new Error('El candidato cambió respecto a la huella aprobada durante la recuperación.');
+      if (!resuming && integrationOnly) recovery.integrationOnly = true;
+      if (!resuming && scope === 'integration' && !integrationOnly && job.validationCycle) throw new Error('Solo se revalida una vez la integración sin manifiesto original.');
       if (resuming && recoveryFingerprint(proof) !== recoveryFingerprint(recovery.integrationValidation)) throw new Error('El candidato cambió durante la recuperación de integración.');
       assertRecoveryDestination(recovery.destination, await verify(root, job, { requireClean: false }));
       const checkoutLock = await recoveryCheckoutLock(root, job, receipt.id, recovery.attempt, { allowMissing: Boolean(resuming && prior.lockOwner) });
@@ -897,10 +944,14 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
       if (receipt.dispatchRecovery?.id !== recovery.id || recoveryFingerprint(state.integrations[receiptId]) !== recovery.integrationRecordHash) throw new Error('El recibo o registro de integración cambió.');
       receipt.dispatchRecovery = { ...queued.livenessResume, phase: 'ready', updatedAt: now() };
       receipt.integrationRecoveryHistory = [...(receipt.integrationRecoveryHistory || []), { recoveryId: recovery.id, at: now(), originalRecord: recovery.originalIntegrationRecord }];
-      state.integrations[receiptId] = { jobId, receiptId, repository: job.destination.repository, sourceBranch: job.branch, baseBranch: job.destination.baseBranch,
-        phase: 'validation_pending', status: 'validation_pending', integrationRecoveryId: recovery.id, validationCandidateSnapshot: recovery.integrationValidation.candidateSnapshot, updatedAt: now() };
+      state.integrations[receiptId] = recovery.integrationOnly
+        // The sealed validation and its approvals stay; only the failure is cleared so the integration preflight runs again.
+        ? { ...state.integrations[receiptId], status: 'validated', needsAttention: false, error: null, integrationRecoveryId: recovery.id, updatedAt: now() }
+        : { jobId, receiptId, repository: job.destination.repository, sourceBranch: job.branch, baseBranch: job.destination.baseBranch,
+          phase: 'validation_pending', status: 'validation_pending', integrationRecoveryId: recovery.id, validationCandidateSnapshot: recovery.integrationValidation.candidateSnapshot, updatedAt: now() };
       receipt.status = 'pending'; receipt.retryAuthorizedAttempt = job.attempts; receipt.updatedAt = now();
-      receipt.reason = recovery.qualityAction?.type === 'correction' ? 'Corrección de Desarrollo encolada con hallazgos de QA.'
+      receipt.reason = recovery.integrationOnly ? 'Integración reanudada sobre la huella aprobada por QA y Revisión; no se repiten esas etapas.'
+        : recovery.qualityAction?.type === 'correction' ? 'Corrección de Desarrollo encolada con hallazgos de QA.'
         : recovery.qualityAction?.type === 'answer' ? 'QA reanudado con las respuestas guardadas del panel.'
           : 'Nueva validación QA y revisión sobre candidato fijo; conserva el mismo intento y el historial.';
       audit(state, 'integration_validation_ready', { jobId, receiptId, recoveryId: recovery.id, attempt: job.attempts }); return queued;
@@ -934,7 +985,7 @@ async function reviseJobAcceptanceOnce(root, jobId, { productAcceptance, reason,
       const record = state.integrations?.[receipt?.id], prior = receipt?.contractRevision;
       if (!job || !receipt?.eligible || !job.autoIntent?.eligible || receipt.id !== job.autoIntent.receiptId
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-        || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
+        || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
         || receipt.dispatchRecovery?.phase === 'ready') throw new Error('El recibo no corresponde al contrato y destino originales.');
       const resuming = prior && ['verified', 'lock_released'].includes(prior.phase);
       const replay = prior?.phase === 'ready' && receipt.status === 'pending' && job.state === 'queued';

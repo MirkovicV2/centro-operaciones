@@ -19,7 +19,7 @@ Aplicación web local para ver la cola, capturar ideas, responder preguntas de l
 3. En PowerShell, instala el arranque automático de Windows:
 
    ```powershell
-   Set-Location -LiteralPath 'C:\Users\brank\Documents\ChatGPT\Proyectos Dani\CentroOperaciones\workspaces\agency-assistant'
+   Set-Location -LiteralPath '<RUTA_DEL_CENTRO_DE_OPERACIONES>\workspaces\agency-assistant'
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\agency-assistant\install-windows-autostart.ps1
    ```
 

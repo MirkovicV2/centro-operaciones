@@ -50,6 +50,56 @@ test('unverifiable, absent resources and closed-looking terminals alone never pr
   assert.equal(normalizeWorkerStatus(nativeStatus({ state: 'start_unknown', exited: false, exact: false })).liveness, 'unverifiable');
 });
 
+// 23 (D2): Orca 1.4.253 runs Claude as a structured chat worker when agents open as Chat.
+// worker-show then returns terminal: null; the exact observation plus the released resource prove the exit.
+function structuredStatus({ exited = true, exact = true, verdict, released = true, owner = identity.dispatchId } = {}) {
+  const handle = 'structworker_native001', worktreeId = 'c372c5e2::/home/user/dev/centro/workspaces/sandbox';
+  return {
+    dispatch: { id: identity.dispatchId, taskId: identity.taskId, task_id: identity.taskId, runId: identity.runId, assigneeHandle: handle, status: exited ? 'completed' : 'dispatched' },
+    worker: { dispatchId: identity.dispatchId, state: exited ? 'succeeded' : 'running', stage: exited ? 'settled' : 'dispatch_input', agentTerminalHandle: handle, worktreeId },
+    projection: { id: identity.dispatchId, ...identity, stage: { worker: exited ? 'succeeded' : 'running', dispatch: exited ? 'completed' : 'dispatched' },
+      outcome: exited ? 'succeeded' : 'in_progress', liveness: { verdict: verdict ?? (exited ? 'exited' : 'live'), source: 'resource_release' }, workspace: { id: worktreeId } },
+    terminal: null,
+    observation: { status: exited ? 'exited' : 'live', exactWorker: exact, addressable: false },
+    terminalResource: { id: 'wtr_native001', ownershipState: released ? 'released' : 'owned', releaseState: released ? 'released' : 'not_requested',
+      terminalHandle: handle, worktreeId, originDispatchId: owner, ownerDispatchId: owner },
+    autoReleaseAt: null,
+  };
+}
+
+test('a structured worker without terminal proves its exit through the exact observation and the released resource', () => {
+  const result = normalizeWorkerStatus(structuredStatus());
+  checkWorkerIdentity(result, identity, { strict: true });
+  assert.equal(result.state, 'succeeded');
+  assert.equal(result.liveness, 'exited');
+  assert.equal(result.exitEvidence, 'native_exact_observation');
+  assert.equal(result.surface, 'structured');
+  assert.equal(result.terminal, 'structworker_native001');
+  assert.equal(result.workspace, '/home/user/dev/centro/workspaces/sandbox');
+  // Terminal workers keep their terminal-based proof and path.
+  assert.equal(normalizeWorkerStatus(nativeStatus()).surface, undefined);
+  assert.equal(normalizeWorkerStatus(nativeStatus()).workspace, 'C:/isolated/native');
+});
+
+test('a structured worker that is live, not exactly observed, unreleased or owned by another dispatch never proves exit', () => {
+  const live = normalizeWorkerStatus(structuredStatus({ exited: false }));
+  assert.equal(live.liveness, 'live'); assert.equal(live.exitEvidence, null); assert.equal(live.workspace, undefined);
+  for (const [label, value] of [
+    ['inexact observation', structuredStatus({ exact: false })],
+    ['projection still unverifiable', structuredStatus({ verdict: 'unverifiable' })],
+    ['resource not released', structuredStatus({ released: false })],
+    ['resource of another dispatch', structuredStatus({ owner: 'ctx_other0001' })],
+    ['resource missing', { ...structuredStatus(), terminalResource: null }],
+    ['resource handle of another worker', { ...structuredStatus(), terminalResource: { ...structuredStatus().terminalResource, terminalHandle: 'structworker_other' } }],
+  ]) {
+    const result = normalizeWorkerStatus(value);
+    assert.equal(result.liveness, 'unverifiable', label); assert.equal(result.exitEvidence, null, label); assert.equal(result.surface, undefined, label);
+  }
+  // A live projection verdict with an exited observation is not accepted as exit either.
+  const contradictory = normalizeWorkerStatus(structuredStatus({ verdict: 'live' }));
+  assert.notEqual(contradictory.liveness, 'exited'); assert.equal(contradictory.exitEvidence, null);
+});
+
 test('full native conflicting IDs, states, terminal or workspace are rejected', () => {
   for (const [section, key, value] of [
     ['dispatch', 'runId', 'run_foreign001'], ['dispatch', 'task_id', 'task_foreign001'], ['worker', 'dispatchId', 'ctx_foreign001'],

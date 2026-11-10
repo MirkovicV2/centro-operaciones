@@ -42,12 +42,54 @@ Abre [el panel local](http://127.0.0.1:4187) y deja esa terminal abierta. Puedes
 
 Comprueba la conexión con `curl -fsS http://127.0.0.1:4187/api/coordinators`. Si la Run o el propietario no coinciden, revisa esos datos en la terminal del coordinador. Conserva el lanzamiento con `CENTRO_ORCA_AGENT=claude npm start`. El valor selecciona Claude para los trabajadores que lanza el panel y para la preparación indicada al coordinador. Los trabajadores usan el modelo configurado en Claude Code. Sin esa variable, el panel usa Codex. La recuperación desde archivos de sesión privados es específica de Codex. Claude usa la entrega y la transcripción nativas de Orca.
 
+## Abrir los agentes Claude como Terminal
+
+Orca 1.4.253 abre por defecto los agentes nuevos como **sesión de chat** (`agentDefaultSurface: chat`). Un trabajador así (`structworker_…`) no tiene terminal: la cola no puede observar su salida en vivo y en la prueba E2E solo las etapas con trabajadores de **Terminal** cerraron con normalidad. Antes de ejecutar encargos:
+
+1. **Settings → Agents → «Open agents as»**: pon Claude (y Codex) en **Terminal** («Set all to Terminal»). Internamente queda `nativeChatProviders = { claude: false, codex: false }`.
+2. **Settings → Agents → «Agent Permissions»**: elige el modo de permisos de los trabajadores.
+   - «Ask for approval» (`ask`): cada comando pide aprobación; la etapa no termina sola. No sirve para la cola.
+   - «Accept edits» (`accept-edits`): aprueba ediciones, pero sigue preguntando por los comandos Bash de verificación.
+   - «Approve for me» (`auto`), **recomendado**: un clasificador aprueba o deniega cada comando. Con la [plantilla de permisos](#permisos-de-los-trabajadores-claude) los comandos simples pasan; los encadenados pueden denegarse.
+   - «Full access» (`full-access`): ejecuta todo sin diálogo. La lista `deny` del checkout es la única barrera; úsalo solo con checkouts de prueba.
+
+Al arrancar con `CENTRO_ORCA_AGENT=claude`, el panel lee en modo solo lectura la configuración de Orca (`~/.config/orca/profiles/<perfil>/profile-state.db`, dominio `settings`) y avisa por consola si Claude se abrirá como chat o si el modo de permisos es `ask`. El resultado está en `settings.orcaPreflight` de `/api/state`. Si la configuración no se puede leer, avisa de que hay que comprobarlo a mano; nunca la modifica.
+
+## Permisos de los trabajadores Claude
+
+Claude Code lee `.claude/settings.local.json` del checkout en el que trabaja. La plantilla [ejemplos/claude-settings.local.example.json](../ejemplos/claude-settings.local.example.json) permite lo que necesita un trabajador de la cola y deniega lo que el contrato prohíbe. Cópiala al checkout aislado de cada proyecto de prueba y sustituye los marcadores; el panel no la aplica automáticamente a checkouts ajenos.
+
+| Permitido | Denegado |
+| --- | --- |
+| Leer su encargo en `data/dispatch-specs/**` y los informes en `data/stage-reports/**` | `git push`, `git commit`, `gh`, `sudo`, `rm`, `wget` |
+| `sha256sum`, `wc -c`, `npm test`, `node --test`, `git status`, `git diff`; lectura con la herramienta Read solo en las rutas permitidas | `curl` a otros hosts y a `localhost` (solo `127.0.0.1:<PUERTO>`); `cat` y `ls`, que leerían cualquier ruta |
+| `curl -X POST http://127.0.0.1:<PUERTO>/api/jobs/*/context` | Escribir en `data/` y `.artifacts/` del centro |
+| `orca orchestration send --type worker_done`, `ask`, `dispatch-show` | `worker-start`, `run-create`, `task-create`, `dispatch`, `worker-stop`, `coordinator-start`, `worktree`, `agent`, `terminal`, `repo` |
+
+Las reglas `Bash(...)` solo reconocen comandos simples. Por eso el brief pide a los trabajadores un comando por llamada, sin `;`, `&&`, `|`, variables ni `cd` (por ejemplo `sha256sum <ruta>` y la lectura del encargo con la herramienta Read), y una única llamada `curl` para la consulta de contexto. En la prueba E2E los comandos encadenados con `cd …; cat …` fueron los que provocaron diálogos de aprobación o denegaciones del modo automático.
+
+## Niveles por rol: modelo y esfuerzo
+
+Cada rol tiene un nivel (`ligero`, `estandar`, `profundo`) que cada agente traduce a `--model/--effort` de `worker-start`. Sin configuración, Codex recibe exactamente los flags de siempre y Claude no recibe ninguno (usa el modelo de su instalación).
+
+| Rol | Nivel por defecto | Codex (defecto) | Claude (defecto) |
+| --- | --- | --- | --- |
+| planificador | profundo | `gpt-6-luna` / `high` | sin flags |
+| ux, desarrollador, qa, revisor | estandar | `gpt-6.1-sol` / `medium` | sin flags |
+| (cualquiera) | ligero | `gpt-6.1-sol` / `low` | sin flags |
+
+Para cambiar niveles o definir flags de Claude, copia [ejemplos/orca-launch-levels.example.json](../ejemplos/orca-launch-levels.example.json) a `data/orca-launch-levels.json` (no versionado). Solo se aplican las entradas que escribas; un archivo inválido detiene el despacho con el error `launch_levels_invalid` en lugar de lanzar con flags adivinados. El nivel usado queda en `jobs[].workflow.steps[].launchLevel`.
+
 ## Prueba en dos pasos
 
 1. En **Peticiones → Nueva consulta → Preguntar al coordinador**, envía «Resume qué dice Obsidian sobre el color principal del Proyecto de prueba». Mira **Peticiones** para ver el aviso, las fuentes y la respuesta. Esta opción abre una consulta.
 2. Para ejecutar etapas, registra un proyecto de prueba con su checkout Git independiente bajo `workspaces/`, rama de trabajo y rama base. En **Trabajos → Nuevo trabajo**, selecciona el proyecto y pide un cambio pequeño con un criterio verificable. Comprueba el destino que muestra el panel y activa autoejecución solo para la empresa de prueba. Para probar preparación desde cero, usa una **idea sin proyecto** con autorización explícita para crear el destino y envíala al coordinador.
 
-Para probar publicación, instala [GitHub CLI](https://cli.github.com/) y autentícate con tu propia cuenta. Autoriza el alcance y el repositorio de prueba explícitamente. Para QA Android en Ubuntu, prepara el SDK y un emulador local si el encargo lo exige. El lanzador de AVD incluido para Windows es específico de esa instalación.
+Para probar publicación, instala [GitHub CLI](https://cli.github.com/) y autentícate con tu propia cuenta. Autoriza el alcance y el repositorio de prueba explícitamente.
+
+### Versión de GitHub CLI
+
+La integración lee campos de PR (`baseRefOid`, `headRepositoryOwner`, `mergeCommit`…) que el `gh` 2.46.0 de los repositorios de Ubuntu no conoce («Unknown JSON field»). La 2.103.3 del repositorio oficial funciona; la versión mínima exacta no se ha determinado. Antes de integrar, el panel comprueba sin red la lista de campos de `gh pr list --json` y bloquea la integración con un mensaje accionable si falta alguno. Instala `gh` desde el repositorio oficial siguiendo [la guía de instalación en Linux](https://github.com/cli/cli/blob/trunk/docs/install_linux.md) (requiere `sudo`: alta del keyring y de `/etc/apt/sources.list.d/github-cli.list`, `apt update`, `apt install gh`) y comprueba `gh --version` y `gh pr list --json 2>&1 | grep baseRefOid`. Para QA Android en Ubuntu, prepara el SDK y un emulador local si el encargo lo exige. El lanzador de AVD incluido para Windows es específico de esa instalación.
 
 ## Documentación del flujo
 

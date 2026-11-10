@@ -44,6 +44,7 @@ function simulatedRemote(f, { sourceSha = f.baseline, stopAtPrList = false } = {
     assert.equal(options.encoding, null, 'the actual adapter requests undecoded stdout');
     if (exe === 'gh') {
       if (args[0] === 'api' && args[1] === 'user') return { stdout: Buffer.from('fixture\n') };
+      if (args[0] === 'api' && String(args[3]).endsWith('/check-runs')) return { stdout: Buffer.from('{"total_count":0,"check_runs":[]}') };
       if (args[0] === 'pr' && args[1] === 'list') {
         if (stopAtPrList) throw stop;
         return { stdout: Buffer.from('  []\n') };

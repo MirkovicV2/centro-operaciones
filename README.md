@@ -22,9 +22,9 @@ En una terminal de esta carpeta:
 .\centro.cmd run
 ```
 
-`run` solo muestra una simulación. Para ejecutar expresamente la cola, usa `run --execute`. No hay tareas programadas ni ejecución al abrir la carpeta. Como máximo se procesan cinco trabajos por llamada (ajustable entre 1 y 20). Los encargos nuevos de Orca tienen cinco intentos por defecto y carecen de límite de duración por defecto. En otros proveedores el valor por defecto sigue siendo dos. El máximo configurable es cinco. Una pregunta respondida al trabajador que sigue activo conserva su intento.
+`run` solo muestra una simulación. Para ejecutar expresamente la cola, usa `run --execute`. Con el panel abierto en el puerto configurado (`CENTRO_OPERATIONS_PORT`, 4187 por defecto) la CLI no ejecuta: Orca admite un único consumidor por Run y rechazaría el `worker-start` con `consumer_fenced`; la CLI lo detecta antes de despachar (`panel_active`). Ejecuta desde el panel o ciérralo antes. No hay tareas programadas ni ejecución al abrir la carpeta. Como máximo se procesan cinco trabajos por llamada (ajustable entre 1 y 20). Los encargos nuevos de Orca tienen cinco intentos por defecto y carecen de límite de duración por defecto. En otros proveedores el valor por defecto sigue siendo dos. El máximo configurable es cinco. Una pregunta respondida al trabajador que sigue activo conserva su intento.
 
-Por defecto, las tareas usan Orca y los perfiles existentes de `.codex/agents/`. Los análisis pasan por `planificador`; los trabajos de código siguen el pipeline secuencial `ux` → `desarrollador` → `qa` → `revisor`. Dentro de cada encargo actúa un perfil a la vez. Los estados, resúmenes y dispatches de cada etapa quedan en `jobs[].workflow` para mostrarlos en el panel. La primera ejecución registra en Orca la carpeta de análisis o el checkout aislado.
+Por defecto, las tareas usan Orca y los perfiles existentes de `.codex/agents/`. El modelo y el esfuerzo de cada rol se derivan de su nivel (`ligero`, `estandar`, `profundo`); sin `data/orca-launch-levels.json` se usan los valores actuales de Codex (tabla en [docs/UBUNTU_CLAUDE.md](docs/UBUNTU_CLAUDE.md)). Los análisis pasan por `planificador`; los trabajos de código siguen el pipeline secuencial `ux` → `desarrollador` → `qa` → `revisor`. Dentro de cada encargo actúa un perfil a la vez. Los estados, resúmenes y dispatches de cada etapa quedan en `jobs[].workflow` para mostrarlos en el panel. La primera ejecución registra en Orca la carpeta de análisis o el checkout aislado.
 
 ```powershell
 .\centro.cmd add --business games --kind analysis --title "Propuesta de juego" --prompt-file ".\ejemplos\videojuegos.txt" --id idea-juego
@@ -88,6 +88,19 @@ Este proceso vive **solo en este PC**, que debe permanecer encendido y conectado
 
 `PAUSAR.cmd` crea el archivo de pausa. El script separado `mantener-activo.ps1` puede impedir temporalmente la suspensión durante ocho horas mientras Orca está abierto, permitiendo apagar la pantalla; libera esa petición al salir o detectar `data\PAUSE`. No cambia permanentemente la configuración de energía de Windows. El vigilante por sí mismo no modifica la suspensión.
 
+## Acceso para dos personas por Tailscale
+
+El panel escucha solo en `127.0.0.1`. Para compartirlo con otra persona, publica el puerto con Tailscale Serve (HTTPS, sin Funnel) y crea `data/tailscale-access.json` (no versionado). El formato antiguo con una sola cuenta sigue valiendo (`{ "hostname": "equipo.tailnet.ts.net", "login": "cuenta@ejemplo.test" }`, que actúa como `admin`). Para varias cuentas:
+
+```json
+{ "hostname": "equipo.tailnet.ts.net", "users": [
+  { "login": "duenyo@ejemplo.test", "role": "admin" },
+  { "login": "colega@ejemplo.test", "role": "ejecutar" },
+  { "login": "revisor@ejemplo.test", "role": "revisar" } ] }
+```
+
+Una cuenta no listada recibe 403. `revisar` solo consulta; `ejecutar` puede lanzar, reintentar, aprobar y cerrar encargos pero no cambiar la configuración, la autoejecución ni los proyectos; `admin` puede todo. Cada evento del ledger, cada encargo nuevo y cada entrada del historial de autoejecución guardan `actor` (la cuenta de Tailscale, `local` desde este equipo o `cli:<usuario>` desde la CLI). Los registros anteriores no tienen ese campo y el panel los muestra como «desconocido»; el ledger no se reescribe.
+
 ## Verificar sin consumo
 
 ```powershell
@@ -95,7 +108,9 @@ npm test
 npm run metrics
 ```
 
-Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace. `centro.cmd` usa el Node 24 portable existente si está disponible y, en su defecto, `node` del sistema.
+Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace.
+
+Las suites de navegador (`panel/tests/*.browser.mjs`) necesitan Playwright con Chromium. Este repositorio no lo declara como dependencia: `npm run test:browser` las ejecuta cuando `PLAYWRIGHT_MODULE` apunta a `playwright/index.mjs` de un checkout que ya lo tenga (o existe el checkout histórico `workspaces/portfolio-motion`), y las omite con un aviso y salida 0 cuando no. El flujo de CI de Ubuntu llama a ese script, de modo que hoy las omite; para ejecutarlas en CI haría falta instalar Playwright y sus navegadores en el runner (propuesta en `PROPUESTA.md`). `centro.cmd` usa el Node 24 portable del perfil del propietario (`%USERPROFILE%\Documents\Proyectos\FlechaTrampa\.tools\…`) si existe y, en su defecto, `node` del sistema; otra ruta se fija en `centro.local.cmd` (no versionado, ejemplo en `ejemplos/centro.local.example.cmd`).
 
 ## Retirar falsos éxitos de código
 
@@ -140,7 +155,7 @@ El panel tiene un ejecutor por empresa. Cada uno admite un solo trabajo y ejecut
 
 En jobs elegibles de código, tras UX → Desarrollo → QA → Revisión se muestra `Integración GitHub`. Solo usa el recibo creado al confirmar con autoRun activo; los envíos manuales y anteriores no se integran. El proyecto debe tener repositorio, checkout, rama fuente y rama base configurados explícitamente; sin rama base la integración queda bloqueada para revisión. La acción terminal es commit/push confirmado para misma rama, o PR/checks/merge confirmado para ramas distintas. Cada intención queda guardada antes del efecto; los resultados ambiguos pasan a revisión y no se repiten a ciegas. No hay garantía exactly-once, ni se publican APK o workflows. Consulta el preflight, estados, pruebas simuladas y validaciones remotas pendientes en [GITHUB_INTEGRATION.md](GITHUB_INTEGRATION.md).
 
-Para código del panel, configura `propietario/repositorio` GitHub, rama base y un checkout independiente relativo bajo `workspaces`, ya situado en su rama fuente existente. Antes del inicio se verifica origin, ramas y SHA local/remoto mediante Git de solo consulta; después de las cuatro aprobaciones, solo un recibo autoelegible puede ejecutar la integración Git/`gh` descrita arriba. No se despachan workflows de Actions, ni se crean checkouts, ramas o remotes. La verificación vuelve a ejecutarse en el comienzo del job. El bloqueo `.git/centro-executor.lock` excluye otros ejecutores automáticos del checkout y se conserva ante incertidumbre: revisa el proceso propietario y los efectos antes de retirarlo manualmente.
+Para código del panel, configura `propietario/repositorio` GitHub, rama base y un checkout independiente relativo bajo `workspaces`, ya situado en su rama fuente existente. Al guardar el proyecto, el panel comprueba en modo lectura que el `origin` del checkout es ese repositorio y que la rama observada coincide con su SHA remoto; si no puede (sin red, sin remoto, divergencia), guarda igualmente y muestra el aviso en la ficha del proyecto. Antes del inicio se verifica origin, ramas y SHA local/remoto mediante Git de solo consulta; después de las cuatro aprobaciones, solo un recibo autoelegible puede ejecutar la integración Git/`gh` descrita arriba. No se despachan workflows de Actions, ni se crean checkouts, ramas o remotes. La verificación vuelve a ejecutarse en el comienzo del job. El bloqueo `.git/centro-executor.lock` excluye otros ejecutores automáticos del checkout y se conserva ante incertidumbre: revisa el proceso propietario y los efectos antes de retirarlo manualmente.
 
 Consulta recibos, historial, etapa y dispatch en Trabajos. Tras revisar y resolver el job, se puede cerrar su recibo sin reejecutarlo. El reintento de un job sigue siendo manual; desde la raíz usa `node cli.mjs run --execute --id IDENTIFICADOR` para seleccionar exclusivamente ese job. Nunca uses un drenado general para resolver un recibo individual. La función requiere que el panel y el PC sigan abiertos; no instala servicios ni inicio automático.
 
