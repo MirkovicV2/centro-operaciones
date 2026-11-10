@@ -169,9 +169,24 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   }
   if (pr.headRefOid !== head) throw new Error('La PR abierta apunta a un commit diferente del aprobado.');
   await save('pr_confirmed', { prNumber: pr.number, prUrl: pr.url, commitSha: head });
+  // 38: a fine-grained token cannot read check runs (statusCheckRollup answers «Resource not accessible»).
+  // Only then, and from then on for this record, the checks come from the Actions API for the exact head.
+  const readChecks = async () => {
+    if (record.checksSource !== 'actions') {
+      try {
+        const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
+        return { detail, checks: detail.statusCheckRollup };
+      } catch (error) {
+        if (!checksPermissionDenied(error)) throw error;
+        record.checksSource = 'actions';
+      }
+    }
+    const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,headRefOid,baseRefOid']));
+    const runs = JSON.parse(await h(['api', '--method', 'GET', `repos/${repo}/actions/runs`, '-f', `head_sha=${head}`, '-f', 'per_page=100']));
+    return { detail, checks: actionsRunsAsChecks(runs, head) };
+  };
   const checkReadiness = async () => {
-    const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
-    const checks = detail.statusCheckRollup;
+    const { detail, checks } = await readChecks();
     const summary = Array.isArray(checks) ? checks.slice(0, 80).map(check => ({ name: String(check?.name || check?.context || '').slice(0, 160), status: String(check?.status || '').slice(0, 40), conclusion: String(check?.conclusion || '').slice(0, 40) })) : [];
     let failure = detail.state !== 'OPEN' ? 'La PR dejó de estar abierta.'
       : detail.headRefOid !== head || detail.baseRefOid !== base ? 'La PR cambió de commit fuente o base; requiere nueva revisión.'
@@ -302,6 +317,32 @@ export async function ghCapabilityPreflight({ executeCommand = exec, cwd, timeou
   const missing = GH_REQUIRED_PR_FIELDS.filter(field => !fields.includes(field));
   if (missing.length) throw ghError('gh_version_unsupported', `gh ${version} no admite los campos ${missing.join(', ')} que usa la integración. ${GH_INSTALL_HINT}`, { version, missing: missing.join(',') });
   return { version, fields: fields.length };
+}
+
+// 38: the permission error of statusCheckRollup with a fine-grained token (check runs need the Checks
+// permission, which fine-grained tokens do not offer). Any other failure keeps its own error.
+export function checksPermissionDenied(error) {
+  const text = [error?.message, error?.details?.stderr].filter(Boolean).join(' ');
+  return /Resource not accessible by (personal access token|integration)/i.test(text);
+}
+
+// 38: GitHub Actions runs for the exact head, shaped like statusCheckRollup entries. Only the latest run of
+// each workflow and event counts (a new run replaces an older one); an incomplete listing fails closed.
+// Limitation: commit statuses and check runs from other CI apps are not visible through this API.
+export function actionsRunsAsChecks(listing, head) {
+  const runs = listing?.workflow_runs;
+  if (!Array.isArray(runs) || !Number.isInteger(listing.total_count) || listing.total_count !== runs.length || runs.length >= 100) {
+    throw new Error('La lista de ejecuciones de Actions está incompleta o limitada; revisa los checks a mano.');
+  }
+  const latest = new Map();
+  for (const run of runs) {
+    if (run?.head_sha !== head || !Number.isInteger(run.id) || run.workflow_id == null) continue;
+    const key = `${run.workflow_id}:${run.event}`;
+    if (!latest.has(key) || latest.get(key).id < run.id) latest.set(key, run);
+  }
+  return [...latest.values()].sort((a, b) => a.id - b.id).map(run => ({
+    name: String(run.name || run.workflow_id), status: String(run.status || '').toUpperCase(), conclusion: run.conclusion ? String(run.conclusion).toUpperCase() : '',
+  }));
 }
 
 export function createIntegrationCommandAdapters({ signal, executeCommand = exec, timeoutMs = 30_000 } = {}) {
