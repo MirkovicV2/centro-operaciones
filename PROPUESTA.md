@@ -70,10 +70,6 @@ Esta rama no te obliga a cambiar nada de cómo usas el Centro hoy. Lo que sigue 
 - **Tus datos**: todo campo nuevo es opcional y no se reescribe tu historial. Comprueba la rama sobre una copia de tu `data/` (ver «Antes de fusionar»).
 - **Volver atrás del todo**: la rama es independiente; si algo no te gusta, basta con no fusionarla o revertir el commit concreto (uno por mejora).
 
-- **34 (R15, pendiente de código)**: el adaptador de `gh` de la integración descarta stderr (solo tipa «Unknown JSON field»), así que un fallo real de `gh` queda como «gh falló o la respuesta fue ambigua». Propuesta: reutilizar `excerpt` y `DestinationError`/detalles acotados de las mejoras 2+15 en `createIntegrationCommandAdapters`.
-- **35 (R15, documentación y preflight)**: la integración lee `statusCheckRollup`; los check runs requieren el permiso Checks, que un PAT fine-grained no tiene, así que con `GH_TOKEN` fine-grained la integración se detiene tras crear la PR. Documentar que hace falta una sesión de `gh` (keyring) o un token con acceso a checks, y añadir al preflight de `gh` una lectura de checks de solo consulta.
-- **E2E del 10-11-2026 (encargo 9)**: UX → Desarrollo interrumpido y reanudado → QA → Revisión interrumpida y reanudada → Integración reconciliada → merge `b0b9cec` en el repo sandbox, en el intento 1 y con un dispatch por etapa. Evidencia en `.artifacts/e2e-evidencia/hallazgos-sesion3.md`.
-
 ## Decisiones para el dueño
 
 1. **Destino local para desarrollo (1)**: la vía coordinada exige un repositorio GitHub verificado incluso para encargos no elegibles para integración. Opción A: permitir `destination.kind: 'local'` (sin `origin`) para proyectos marcados como «solo desarrollo», bloqueando la integración. Opción B: mantener la exigencia y documentar que las pruebas usan un repo sandbox. Recomiendo A con bloqueo explícito de integración.
