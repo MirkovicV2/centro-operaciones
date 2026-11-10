@@ -508,6 +508,8 @@ function renderProjects(data) {
     });
     form.append(stageLabel, nextLabel, statusLabelEl, checkoutLabel, repositoryLabel, baseBranchLabel, save);
     card.append(el('p', 'microcopy', validity?.valid ? `Checkout válido: ${project.checkout} · Rama fuente observada: ${validity.branch} · Base: ${project.baseBranch || 'configuración pendiente'}` : 'Sin checkout válido. Solo checkouts independientes bajo workspaces/; se rechazan rutas externas, inexistentes, enlaces fuera del ámbito y Git compartido.'));
+    if (project.remote) card.append(el('p', 'microcopy', project.remote.verified ? `Remoto verificado al guardar: origin ${project.remote.origin} · ${project.remote.branch} en ${String(project.remote.remoteSha).slice(0, 7)}` : `Remoto sin verificar: ${project.remote.warning}`));
+    else if (project.checkout && project.repository) card.append(el('p', 'microcopy', 'Remoto pendiente de verificar: vuelve a guardar el proyecto para comprobar origin, rama y SHA.'));
     const draft = state.projectDrafts.get(project.id);
     if (draft) for (const [key, value] of Object.entries(draft)) if (form.elements[key]) form.elements[key].value = value;
     form.addEventListener('input', () => state.projectDrafts.set(project.id, Object.fromEntries(new FormData(form))));
