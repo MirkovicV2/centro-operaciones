@@ -91,6 +91,22 @@ function capturePanelDetails(...roots) {
   };
 }
 
+// Relative time for lists ("hace 12 min"); the full date stays in the title attribute and in detail views.
+function relativeTime(value) {
+  if (!value) return 'Sin fecha';
+  const date = new Date(value), minutes = Math.round((Date.now() - date.valueOf()) / 60000);
+  if (Number.isNaN(minutes)) return String(value);
+  if (minutes < 1) return 'ahora';
+  if (minutes < 60) return `hace ${minutes} min`;
+  if (minutes < 60 * 24) return `hace ${Math.round(minutes / 60)} h`;
+  if (minutes < 60 * 24 * 2) return 'ayer';
+  return formatDate(value);
+}
+function timeNode(value, className = 'overview-row-when') {
+  const node = el('time', className, relativeTime(value));
+  if (value) { node.dateTime = new Date(value).toISOString?.() || String(value); node.title = new Date(value).toLocaleString('es-ES'); }
+  return node;
+}
 function formatDate(value) {
   if (!value) return 'Sin fecha';
   const date = new Date(value);
@@ -247,7 +263,7 @@ function renderAttention(data) {
       row.setAttribute('aria-pressed', String(item === selected));
       const mark = el('span', 'overview-row-mark'); mark.setAttribute('aria-hidden', 'true');
       const text = el('span', 'overview-row-text');
-      text.append(el('span', 'overview-row-title', item.title), el('span', 'overview-row-reason', [item.label, item.context, item.at && formatDate(item.at)].filter(Boolean).join(' · ')));
+      text.append(el('span', 'overview-row-title', item.title), el('span', 'overview-row-reason', [item.label, item.context, item.at && relativeTime(item.at)].filter(Boolean).join(' · ')));
       row.append(mark, text);
       row.onclick = () => { state.attentionSelected = item.id; renderAttention(data); };
       list.append(row);
@@ -286,21 +302,22 @@ function lifecycle(job, report, integrationRecord) {
   const phase = (s, map) => map[s?.status] || ['wait', s ? (workflowStatusNames[s.status] || s.status) : 'Sin iniciar'];
   const exec = phase(dev, { succeeded: ['done', 'Terminada'], running: ['active', 'En curso'], blocked: ['fail', 'Detenida'], failed: ['fail', 'Falló'] });
   let rev;
-  if (v2) rev = v2.outcome === 'rejected' ? ['fail', 'Rechazada (Workflow V2)'] : v2.outcome === 'owner_pending' ? ['ok', 'Recomienda aceptar (Workflow V2)'] : ['unk', 'Workflow V2 · ' + (v2.status || 'sin estado')];
+  if (v2) rev = v2.outcome === 'approved' ? ['ok', 'Aprobada (Workflow V2)'] : v2.outcome === 'rejected' ? ['fail', 'Rechazada (Workflow V2)'] : v2.outcome === 'owner_pending' ? ['ok', 'Recomienda aceptar (Workflow V2)'] : ['unk', 'Workflow V2 · ' + (v2.status || 'sin estado')];
   else rev = phase(review, { succeeded: ['ok', 'Aprobada'], running: ['active', 'En curso'], blocked: ['fail', 'Rechazada'], failed: ['fail', 'Falló'] });
   const acceptance = v2
-    ? (v2.status === 'aprobado' ? ['ok', 'Aceptada por ti'] : ['wait', 'Pendiente de tu decisión en V2'])
-    : ['na', 'No aplica · el Centro integra tras su Revisión'];
+    ? (v2.outcome === 'approved' && v2.status === 'aprobado' ? ['ok', 'Aceptada por ti'] : ['wait', 'Pendiente de tu decisión en V2'])
+    : ['na', 'No aplica'];
   const integ = report?.integration;
   let integration;
-  if (!job.autoIntent?.eligible) integration = ['na', 'Manual · fuera del Centro'];
+  if (!job.autoIntent?.eligible) integration = ['na', 'Manual'];
   else if (!integrationRecord && !integ?.phase) integration = ['unk', 'Sin registro'];
   else if ((integrationRecord?.phase || integ?.phase) === 'complete') integration = ['ok', 'Integrada'];
+  else if (['blocked', 'failed'].includes(step('integration')?.status)) integration = ['fail', workflowStatusNames[step('integration').status]];
   else integration = ['active', integrationRecord?.phase || integ?.phase];
   const note = { exec: dev ? (dev.dispatchId ? `Dispatch ${dev.dispatchId}` : dev.label) : 'Sin etapa de ejecución',
     rev: review?.delivery?.findings?.length ? `${review.delivery.findings.length} hallazgos` : review ? review.label : 'Sin revisión todavía',
-    acc: v2 ? `Tarea ${v2.task || ''}` : 'Solo en proyectos gobernados por Workflow V2',
-    int: integrationRecord?.mergeSha ? `Merge ${integrationRecord.mergeSha.slice(0, 7)}` : integrationRecord?.prUrl ? 'PR abierta' : '' };
+    acc: v2 ? `Tarea ${v2.task || ''}` : 'El Centro integra tras su Revisión',
+    int: integrationRecord?.mergeSha ? `Merge ${integrationRecord.mergeSha.slice(0, 7)}` : integrationRecord?.prUrl ? 'PR abierta' : !job.autoIntent?.eligible ? 'Fuera del Centro' : '' };
   const level = (tone, exact) => tone === 'na' ? 'na' : tone === 'unk' || tone === 'wait' ? 'unknown' : exact ? 'observed' : 'reported';
   return [
     ['Ejecución', exec, note.exec, level(exec[0], dev?.dispatchId)],
@@ -312,7 +329,7 @@ function lifecycle(job, report, integrationRecord) {
 
 function renderRun(data) {
   const root = $('#run-page');
-  const job = (data.jobs || []).find(item => item.id === state.runId) || (state.raw?.jobs || []).find(item => item.id === state.runId);
+  const job = (data.jobs || []).find(item => item.id === state.runId);
   const report = (data.requestTraces || []).flatMap(trace => trace.reports || []).find(item => item.jobId === state.runId);
   const receipt = data.automation?.receipts?.find(item => item.jobId === state.runId);
   const integrationRecord = job?.autoIntent?.eligible ? data.automation?.integrations?.[job.autoIntent.receiptId] : null;
@@ -435,8 +452,71 @@ function renderRun(data) {
   const open = el('a', 'button secondary', 'Ver en la lista de Trabajos'); open.href = '#trabajos'; open.onclick = () => setTimeout(() => focusJob(job.id), 0);
   side.append(open);
 
-  root.append(main, side);
+  // Left pane, as in the mockup: every job of this business with its stage track; the open one is selected.
+  const list = el('nav', 'run-list'); list.setAttribute('aria-label', 'Trabajos');
+  const order = { needs_attention: 0, running: 1, queued: 2, retry_wait: 2, succeeded: 3, cancelled: 4 };
+  for (const item of [...(data.jobs || [])].sort((a, b) => (order[a.state] ?? 5) - (order[b.state] ?? 5) || String(b.createdAt).localeCompare(String(a.createdAt)))) {
+    const link = el('a', `run-list-item${item.id === job.id ? ' selected' : ''}`); link.href = `#trabajo/${encodeURIComponent(item.id)}`;
+    if (item.id === job.id) link.setAttribute('aria-current', 'page');
+    link.append(el('span', 'run-list-title', item.title));
+    const meta = el('span', 'run-list-meta'); meta.append(el('span', '', `#${item.id}`));
+    const track = stageTrack(item); if (track) meta.append(track);
+    link.append(meta, el('span', `run-list-state is-${item.state}`, statusNames[item.state] || item.state));
+    list.append(link);
+  }
+  root.append(list, main, side);
   restore();
+}
+
+// Historial e informes: closed jobs as a table, and the selected job's report (informe E) with provenance.
+function durationText(job) {
+  const start = Date.parse(job.startedAt || job.createdAt), end = Date.parse(job.finishedAt || '');
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return '—';
+  const minutes = Math.round((end - start) / 60000);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+function renderHistory(data) {
+  const root = $('#history-page');
+  const closed = (data.jobs || []).filter(job => ['succeeded', 'cancelled'].includes(job.state)).sort((a, b) => String(b.finishedAt || b.createdAt).localeCompare(String(a.finishedAt || a.createdAt)));
+  const reports = (data.requestTraces || []).flatMap(trace => trace.reports || []);
+  const selected = closed.find(job => job.id === state.historySelected) || closed[0];
+  const signature = JSON.stringify([closed, selected?.id, reports]);
+  if (root.dataset.signature === signature) return;
+  root.dataset.signature = signature;
+  root.replaceChildren();
+  const table = el('div', 'history-table'); table.setAttribute('role', 'table'); table.setAttribute('aria-label', 'Trabajos cerrados');
+  const head = el('div', 'history-row history-head'); head.setAttribute('role', 'row');
+  for (const label of ['Trabajo', 'Resultado', 'Duración', 'Modelos', 'Cerrado']) { const cell = el('span', '', label); cell.setAttribute('role', 'columnheader'); head.append(cell); }
+  table.append(head);
+  if (!closed.length) table.append(el('p', 'attention-empty', 'Los trabajos terminados o cancelados aparecerán aquí.'));
+  for (const job of closed) {
+    const row = el('button', `history-row${job === selected ? ' selected' : ''}`); row.type = 'button'; row.setAttribute('role', 'row');
+    row.setAttribute('aria-pressed', String(job === selected));
+    const title = el('span', 'history-title'); title.append(el('b', '', job.title), el('small', '', `${job.projectName || businessNames[job.business]} · #${job.id}`));
+    const models = [...new Set((job.workflow?.steps || []).map(step => step.launch?.model).filter(Boolean))].join(' · ') || 'No registrados';
+    row.append(title, el('span', '', ''), el('span', 'history-num', durationText(job)), el('span', 'history-models', models), timeNode(job.finishedAt, 'history-when'));
+    row.children[1].append(el('span', `request-state ${job.state === 'succeeded' ? 'is-done' : 'is-active'}`, statusNames[job.state] || job.state));
+    row.onclick = () => { state.historySelected = job.id; renderHistory(data); };
+    table.append(row);
+  }
+  const panel = el('aside', 'history-report'); panel.setAttribute('aria-label', 'Informe del trabajo');
+  if (selected) {
+    const report = reports.find(item => item.jobId === selected.id);
+    panel.append(el('p', 'run-kicker', `Informe · #${selected.id}`), el('h3', 'history-report-title', selected.title));
+    const facts = el('dl', 'history-facts');
+    const fact = (label, value, level) => { const dd = el('dd'); dd.append(el('span', '', value)); facts.append(el('dt', '', label), dd, provenance(level)); };
+    fact('Estado', statusNames[selected.state] || selected.state, 'observed');
+    for (const step of selected.workflow?.steps || []) fact(step.label, `${workflowStatusNames[step.status] || step.status}${step.launch?.model ? ` · ${step.launch.model}` : ''}`, step.dispatchId ? 'observed' : 'unknown');
+    for (const item of report?.criteria || []) fact('Criterio', `${item.criterion} · ${item.status === 'passed' ? 'cumple' : item.status === 'failed' ? 'no cumple' : 'sin verificar'}`, item.level);
+    if (report?.integration?.applies) for (const item of report.integration.facts) fact(item.label, item.value, item.level);
+    else if (selected.autoIntent?.eligible) fact('Integración', 'Sin registro', 'unknown');
+    else fact('Integración', 'Manual · fuera del Centro', 'na');
+    fact('Tokens y coste', 'Sin registro fiable', 'unknown');
+    panel.append(facts);
+    if (report) panel.append(el('p', 'run-totals', `${report.totals.observed} comprobados · ${report.totals.reported} declarados · ${report.totals.unknown} sin registro`));
+    const open = el('a', 'button secondary', 'Abrir la ficha'); open.href = `#trabajo/${encodeURIComponent(selected.id)}`; panel.append(open);
+  } else panel.append(el('p', 'attention-empty', 'Elige un trabajo para ver su informe.'));
+  root.append(table, panel);
 }
 
 function renderJobs(data) {
@@ -752,6 +832,7 @@ function renderProjects(data) {
     });
     card.append(stages);
 
+    if (project.nextAction) card.append(el('p', 'project-next', project.nextAction));
     card.append(el('div', 'project-activity', `${project.jobCount || 0} trabajos · ${project.openJobCount || 0} abiertos`));
     const latest = project.recentJobs || [];
     if (latest.length) {
@@ -835,7 +916,12 @@ function renderProjects(data) {
         await refresh();
       } catch (error) { notify(error.message, true); save.disabled = false; }
     });
-    card.append(form);
+    // As in the mockup the card reads as a row; editing lives in a disclosure that survives refreshes.
+    const edit = el('details', 'project-edit');
+    edit.open = state.openProjects?.has(project.id) || state.projectDrafts.has(project.id);
+    edit.addEventListener('toggle', () => { state.openProjects ||= new Set(); edit.open ? state.openProjects.add(project.id) : state.openProjects.delete(project.id); });
+    edit.append(el('summary', '', 'Editar etapa, siguiente paso y destino'), form);
+    card.append(edit);
     grid.append(card);
   }
 }
@@ -1291,6 +1377,7 @@ async function refresh() {
     ideaCheckoutHint();
     renderJobs(data);
     renderAttention(data);
+    renderHistory(data);
     if (state.visibleSection === 'trabajo' || location.hash.startsWith('#trabajo/')) renderRun(data);
     renderQuestions(data);
     window.RequestsView?.render(data, state.business);
@@ -1473,7 +1560,7 @@ function applyBusinessContext() {
 function showSection() {
   const [id = 'inicio', runId] = (location.hash.slice(1) || 'inicio').split('/');
   if (id === 'trabajo') { state.runId = decodeURIComponent(runId || ''); if (state.data) renderRun(state.data); }
-  const selected = ['inicio', 'trabajo', 'atencion', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
+  const selected = ['inicio', 'trabajo', 'atencion', 'historial', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
   if (state.visibleSection === selected) return;
   state.visibleSection = selected;
   const navSection = selected === 'trabajo' ? 'trabajos' : selected;
@@ -1558,9 +1645,42 @@ function renderOverviewCharts(traces) {
   $('#overview-status').replaceChildren(totals, overviewLegend(requestCounts, { ...overviewStatusLabels, done: 'Cerradas' }));
 }
 
+// Overview side rail, as in the mockup: each project with its stage, next action and active job, then the
+// latest events across requests. Only what /api/state already carries.
+function renderOverviewRail(data, traces) {
+  const projects = $('#overview-projects'); projects.replaceChildren();
+  const list = (data.projects || []).filter(project => project.status !== 'completed').slice(0, 6);
+  if (!list.length) projects.append(el('p', 'rail-empty', 'Sin proyectos en este negocio todavía.'));
+  for (const project of list) {
+    const card = el('a', 'rail-project'); card.href = '#proyectos';
+    const head = el('span', 'rail-project-head');
+    head.append(el('span', 'rail-mono', (project.name || '?').trim().charAt(0).toUpperCase()), el('b', '', project.name));
+    if (project.stage) head.append(el('span', 'rail-stage', project.stage));
+    card.append(head);
+    const active = data.jobs.find(job => job.projectId === project.id && ['running', 'needs_attention'].includes(job.state));
+    card.append(el('span', 'rail-line', active ? `#${active.id} · ${statusNames[active.state]}` : 'Sin trabajos activos'));
+    if (project.nextAction) card.append(el('span', 'rail-next', `Siguiente: ${project.nextAction}`));
+    const checkout = (data.checkouts || []).find(item => item.projectId === project.id);
+    const source = el('span', 'rail-source');
+    const mark = el('span', `pv pv-${project.checkout || checkout ? 'observed' : 'unknown'}`); mark.setAttribute('aria-hidden', 'true');
+    source.append(mark, project.checkout || checkout ? 'Checkout configurado' : 'Sin checkout');
+    card.append(source);
+    projects.append(card);
+  }
+  const feed = $('#overview-feed'); feed.replaceChildren();
+  const events = traces.flatMap(trace => (trace.events || []).map(event => ({ ...event, title: trace.title }))).filter(event => event.at).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 6);
+  if (!events.length) feed.append(el('li', 'rail-empty', 'La actividad aparecerá aquí.'));
+  for (const event of events) {
+    const li = el('li', '');
+    li.append(el('span', 'feed-text', `${event.label || event.kind || 'Evento'} · ${event.title || ''}`), timeNode(event.at, 'feed-time'));
+    feed.append(li);
+  }
+}
+
 function renderActionSummary(raw, data) {
   const traces = data.requestTraces.filter(trace => trace.status !== 'withdrawn');
   renderOverviewCharts(traces);
+  renderOverviewRail(data, traces);
   const metrics = $('#overview-metrics'); metrics.replaceChildren();
   const groups = [
     ['Requiere tu acción', [...data.jobs.filter(job => job.state === 'needs_attention').map(job => ({ title: job.title, reason: job.error?.message || 'Revisa la etapa y sus informes antes de continuar.', job, kind: 'attention' })), ...data.questions.filter(q => q.status === 'pending').map(q => ({ title: q.question, reason: 'Decisión pendiente', href: '#ideas', kind: 'question' }))]],
@@ -1602,7 +1722,7 @@ function renderActionSummary(raw, data) {
         const track = stageTrack(item.job);
         if (track) row.append(track);
         const when = item.job.finishedAt || item.job.startedAt || item.job.createdAt;
-        if (when) row.append(el('span', 'overview-row-when', formatDate(when)));
+        if (when) row.append(timeNode(when));
       }
       row.onclick = () => item.job ? openRun(item.job.id) : (location.hash = item.href);
       section.append(row);
@@ -1621,7 +1741,7 @@ function renderActionSummary(raw, data) {
       const text = el('span', 'overview-row-text');
       text.append(el('strong', 'overview-row-title', title), el('span', 'overview-row-reason', context !== title ? context : ''));
       const status = overviewTone(trace.status);
-      item.append(text, el('span', `request-state is-${status === 'pending' ? 'active' : status}`, trace.statusLabel || 'Pendiente'), el('span', 'overview-row-when', formatDate(trace.events?.at(-1)?.at)));
+      item.append(text, el('span', `request-state is-${status === 'pending' ? 'active' : status}`, trace.statusLabel || 'Pendiente'), timeNode(trace.events?.at(-1)?.at));
       list.append(item);
     }
     recent.append(list);

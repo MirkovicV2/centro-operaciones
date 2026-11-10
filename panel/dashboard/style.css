@@ -1172,3 +1172,132 @@ dialog::backdrop { background: rgba(20,20,24,.32); }
   #job-form:not([hidden]) { top: 12px; max-height: calc(100dvh - 100px); }
 }
 #job-form .form-footer span { font-size: 12px; line-height: 1.45; color: var(--soft); }
+
+/* Fidelidad a los mockups · armazón */
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.section-heading .eyebrow, .overview-intro .section-copy { display: none; }
+.section-heading-spaced { margin: 4px 0 18px; align-items: center; }
+.section-heading h2, .overview-intro h1 { margin: 0; font-size: 22px; font-weight: 640; letter-spacing: -.02em; }
+.section-heading .section-copy { margin-top: 4px; font-size: 13px; color: var(--soft); max-width: 720px; }
+.business-selector { margin: 0 4px 12px; }
+.business-selector select { height: 34px; min-height: 34px; font-weight: 600 !important; background-color: var(--surface) !important; }
+.brand { padding-bottom: 10px; }
+/* Bloqueos de cola: una franja fina; el detalle está en Atención y en la ficha. */
+#global-blockers:empty { display: none; }
+.blocker-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 8px 12px; margin-bottom: 14px; border-left-width: 3px; }
+.blocker-banner > b { font-size: 12.5px; }
+.blocker-item { display: flex; flex: 1 1 100%; align-items: center; gap: 12px; padding: 6px 0 0; margin: 0; border-top: 1px solid var(--amber-line); }
+.blocker-item p { margin: 0; font-size: 12.5px; }
+.blocker-item p + p { color: var(--soft); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blocker-item .button { min-height: 26px; padding: 0 10px; font-size: 12px; margin-left: auto; }
+/* Overview · columna de proyectos y actividad */
+.overview-rail { padding: 16px; background: var(--surface-inset); }
+.rail-project { display: grid; gap: 4px; padding: 12px; margin-bottom: 8px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); color: inherit; text-decoration: none; }
+.rail-project:hover { border-color: var(--line-strong); }
+.rail-project-head { display: flex; align-items: center; gap: 9px; font-size: 13.5px; }
+.rail-project-head b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-mono { width: 20px; height: 20px; border-radius: 6px; display: inline-grid; place-items: center; flex: none; background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 650; }
+.rail-stage { margin-left: auto; flex: none; font-size: 11.5px; color: var(--soft); }
+.rail-line, .rail-next { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.rail-next { color: var(--soft); }
+.rail-source { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 11.5px; color: var(--soft); }
+.rail-empty { margin: 0; font-size: 12.5px; color: var(--soft); list-style: none; }
+.overview-feed { list-style: none; margin: 0; padding: 0; }
+.overview-feed li { display: flex; gap: 10px; padding: 7px 0; font-size: 12px; color: var(--muted); }
+.overview-feed li::before { content: ''; width: 5px; height: 5px; margin-top: 6px; border-radius: 50%; flex: none; background: var(--soft); }
+.overview-feed .rail-empty::before { content: none; }
+.feed-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.feed-time { flex: none; color: var(--soft); }
+
+/* Ficha · lista de trabajos a la izquierda (como en el mockup). */
+.run-page { grid-template-columns: 250px minmax(0, 1fr) 280px; gap: 24px; }
+.run-list { display: grid; gap: 2px; align-content: start; position: sticky; top: 72px; max-height: calc(100dvh - 96px); overflow: auto; padding: 6px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-inset); }
+.run-list-item { display: grid; gap: 4px; padding: 9px 10px; border-radius: 8px; color: inherit; text-decoration: none; }
+.run-list-item:hover { background: var(--hover); }
+.run-list-item.selected { background: var(--sel); }
+.run-list-title { font-size: 13px; font-weight: 550; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-list-meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--soft); font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.run-list-meta .stage-track { margin-left: auto; }
+.run-list-state { font-size: 11.5px; color: var(--soft); }
+.run-list-state.is-needs_attention { color: var(--amber); } .run-list-state.is-running { color: var(--accent-strong); } .run-list-state.is-succeeded { color: var(--green); }
+@media (max-width: 1280px) { .run-page { grid-template-columns: 220px minmax(0, 1fr); } .run-side { grid-column: 2; } }
+@media (max-width: 1060px) { .run-page { grid-template-columns: minmax(0, 1fr); } .run-list { display: none; } .run-side { grid-column: auto; } }
+
+/* Historial e informes */
+.history-page { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 24px; align-items: start; }
+.history-table { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.history-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px 90px 150px 96px; gap: 14px; align-items: center; width: 100%; padding: 10px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; color: inherit; font: inherit; font-size: 13px; text-align: left; }
+.history-row:last-child { border-bottom: 0; }
+button.history-row { cursor: pointer; } button.history-row:hover { background: var(--hover); }
+.history-row.selected { background: var(--sel); }
+.history-head { padding-block: 9px; color: var(--soft); font-size: 12px; font-weight: 550; background: var(--surface-inset); }
+.history-title { display: grid; min-width: 0; }
+.history-title b { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-title small { color: var(--soft); font-size: 12px; }
+.history-num, .history-when { color: var(--muted); font-size: 12.5px; }
+.history-models { color: var(--muted); font-size: 12px; font-family: 'JetBrains Mono', ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-row .request-state { font-size: 11.5px; padding: 3px 9px; }
+.history-report { position: sticky; top: 72px; padding: 18px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-inset); }
+.history-report-title { margin: 6px 0 12px; font-size: 15px; font-weight: 620; line-height: 1.3; }
+.history-facts { display: grid; grid-template-columns: 110px minmax(0, 1fr) 10px; gap: 7px 10px; margin: 0; font-size: 12.5px; align-items: baseline; }
+.history-facts dt { color: var(--soft); } .history-facts dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.history-report .button { width: 100%; justify-content: center; margin-top: 14px; min-height: 34px; font-size: 13px; }
+@media (max-width: 1100px) { .history-page { grid-template-columns: minmax(0, 1fr); } .history-report { position: static; } }
+@media (max-width: 760px) { .history-row { grid-template-columns: minmax(0, 1fr) auto; } .history-row > :nth-child(n+3) { display: none; } }
+.history-facts { align-items: start; margin-bottom: 4px; }
+.history-facts .pv { margin-top: 5px; }
+.history-models { font-family: inherit; }
+.history-report .button, .run-side .button { display: flex; align-items: center; justify-content: center; width: 100%; box-sizing: border-box; text-decoration: none; }
+
+/* Proyectos como lista (mockup): fila con identidad, etapas, siguiente paso; edición plegada. */
+.project-workspace .projects-grid { grid-template-columns: minmax(0, 1fr); gap: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.projects-grid .project-card { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.4fr) auto; gap: 4px 20px; align-items: center; padding: 14px 18px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: none; }
+.projects-grid .project-card:last-child { border-bottom: 0; }
+.projects-grid .project-card-header { grid-column: 1; padding: 0; display: flex; align-items: center; gap: 10px; }
+.projects-grid .project-identity h3 { margin: 0; font-size: 14.5px; font-weight: 600; }
+.projects-grid .project-identity .eyebrow { display: none; }
+.projects-grid .project-card-header .badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; }
+.projects-grid .project-stages { grid-column: 2; grid-row: 1; padding: 0; overflow: auto; }
+.projects-grid .project-stage { padding: 3px 8px; font-size: 11.5px; }
+.projects-grid .project-next { grid-column: 2; margin: 0; font-size: 13px; color: var(--text); }
+.projects-grid .project-activity { grid-column: 3; grid-row: 1; margin: 0; font-size: 12px; color: var(--soft); font-family: inherit; white-space: nowrap; }
+.projects-grid .project-recent-jobs { display: none; }
+.projects-grid .microcopy { grid-column: 1 / -1; margin: 2px 0 0; font-size: 12px; color: var(--soft); }
+.projects-grid .project-edit { grid-column: 1 / -1; font-size: 13px; }
+.projects-grid .project-edit > summary { color: var(--accent-strong); font-size: 12.5px; padding: 4px 0; }
+.projects-grid .project-update-form { margin-top: 10px; border-top: 1px solid var(--line); }
+@media (max-width: 860px) { .projects-grid .project-card { grid-template-columns: minmax(0, 1fr); } .projects-grid .project-card > * { grid-column: 1 !important; grid-row: auto !important; } }
+
+/* Ideas (mockup): lo que te espera y lo guardado a la izquierda; captura rápida en una columna a la derecha. */
+.idea-layout { grid-template-columns: minmax(0, 1fr) 360px; }
+.idea-layout > .idea-form { order: 2; position: sticky; top: 72px; }
+.idea-layout > .idea-workspace-rail { order: 1; }
+.idea-form .idea-focus { padding: 8px; }
+.idea-form .idea-focus label { min-height: 36px; font-size: 13px !important; }
+.idea-actions { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 1060px) {
+  .idea-layout { grid-template-columns: minmax(0, 1fr); }
+  .idea-layout > .idea-form { order: 0; position: static; }
+}
+/* Conocimiento: el mapa ocupa la pantalla, Obsidian en una columna. */
+.knowledge-layout { grid-template-columns: minmax(0, 1fr) 300px; }
+@media (max-width: 1060px) { .knowledge-layout { grid-template-columns: minmax(0, 1fr); } }
+.graph-view, .graph-view svg, .empty-graph { min-height: 520px; height: 520px; }
+.graph-card { border-radius: 12px; }
+
+/* Campos a escala de escritorio; en móvil se mantienen 16 px y 44 px (evita el zoom de iOS y deja objetivos táctiles). */
+@media (min-width: 761px) {
+  input, select, textarea { font-size: 14px !important; min-height: 36px; padding: 7px 10px !important; }
+  textarea { min-height: 72px; }
+  label { font-size: 12.5px !important; }
+  .button, .text-button { min-height: 34px; font-size: 13px; }
+  .button { padding: 0 14px; }
+}
+.history-filters, #idea-filters { gap: 8px; }
+.idea-workspace-rail #idea-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.question-card h4, .question-card p, .question-text { font-size: 14px; color: var(--text); line-height: 1.5; }
+.question-meta { font-family: inherit; font-size: 12px; color: var(--soft); }
+.question-meta .pending { color: var(--amber); font-weight: 550; }
+.questions-panel h3, .vault-recent h3, .form-card h3 { font-size: 15px; font-weight: 620; }
+.form-card .eyebrow, .questions-panel .eyebrow, .vault-recent .eyebrow, .settings-card .eyebrow { display: none; }
+.projects-grid .project-card-header .badge { margin-left: 4px; }

@@ -55,6 +55,7 @@ try {
       await card.waitFor({ state: 'attached' });
       if (kind === 'base-absent') {
         await page.locator('.nav-link[href="#proyectos"]').click();
+        await page.locator('#proyectos .project-card details > summary').first().click();
         const field = page.locator('#proyectos input[name="baseBranch"]');
         await field.waitFor({ state: 'visible' });
         const described = await field.getAttribute('aria-describedby');

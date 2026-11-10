@@ -71,7 +71,7 @@ try {
     assert.ok(layout.controls.length > 0, `no visible history controls at ${width}px`);
     assert.equal(await historyRoot.locator('#history-list .job-card').count(), 1);
     assert.ok(layout.scrollWidth <= width, JSON.stringify(layout));
-    for (const control of layout.controls) { assert.ok(control.width > 0 && control.height >= 44, JSON.stringify(control)); assert.ok(control.left >= 0 && control.right <= width, JSON.stringify(control)); }
+    for (const control of layout.controls) { assert.ok(control.width > 0 && control.height >= (width <= 760 ? 44 : 36), JSON.stringify(control)); assert.ok(control.left >= 0 && control.right <= width, JSON.stringify(control)); }
     await page.addScriptTag({ content: axeSource });
     const audit = await auditRoot(historyRoot, ['color-contrast', 'select-name']);
     const targetViolations = audit.violations.flatMap(v => v.nodes.filter(n => n.target.some(t => /job-id|sidebar-note|updated-at|history-|project-status-filter/.test(t))).map(n => ({ rule:v.id, ...n })));
@@ -79,6 +79,7 @@ try {
     await page.screenshot({ path: fileURLToPath(new URL(`history-${width}.png`, output)), fullPage:true });
     await page.locator('.nav-link[href="#proyectos"]').click();
     await page.locator('#proyectos').waitFor({ state: 'visible' });
+    await page.locator('#proyectos .project-card details > summary').first().click();
     const projectRoot = await visibleRoot(page, '#proyectos', 'Proyectos', width);
     const projectControls = projectRoot.locator('input, select, button, textarea');
     assert.ok(await projectControls.count() > 0, `Proyectos has no controls at ${width}px`);
