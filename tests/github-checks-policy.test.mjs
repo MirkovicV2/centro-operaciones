@@ -86,3 +86,14 @@ test('a check that registers late is awaited and merged; pending checks are awai
   assert.equal(pending.state.records.at(-1).checkState, 'waiting'); assert.equal(pending.state.records.at(-1).waitTimedOut, true);
   assert.equal(pending.state.merges, 0);
 });
+
+test('a PR the owner merges by hand while the Centro waits for checks is recorded as integrated, without a second merge', async t => {
+  const f = await fixture(t);
+  // No CI: the owner merges during the wait.
+  f.options.wait = async ms => { f.advance(ms); f.state.merged = true; };
+  const record = await integrateGitHub(f.job, f.ctx, f.options);
+  assert.equal(record.phase, 'complete'); assert.equal(record.status, 'completed');
+  assert.equal(record.mergedBy, 'owner'); assert.equal(record.reconciled, true);
+  assert.equal(record.mergeSha, 'c'.repeat(40)); assert.equal(record.prNumber, 4);
+  assert.equal(f.state.merges, 0, 'the Centro never merges on top of the owner');
+});

@@ -1465,6 +1465,30 @@ export async function cancelQueuedJob(root, id, { confirm = false } = {}) {
   });
 }
 
+// The owner merged the PR by hand (e.g. a repository without CI) while the integration waited
+// for checks. The caller has already confirmed on GitHub that the PR with the approved commit is
+// merged; this only records the job as delivered. Nothing is dispatched or repeated.
+export async function settleOwnerMergedJob(root, id, integration, { confirm = false } = {}) {
+  if (!confirm) throw new QueueError('Confirma que la PR está fusionada con el commit aprobado; usa --confirm-reviewed.');
+  if (integration?.phase !== 'complete' || integration.mergedBy !== 'owner' || !/^[a-f0-9]{40,64}$/i.test(integration.mergeSha || ''))
+    throw new QueueError('Falta la integración reconciliada con el merge del owner.');
+  return mutate(root, async state => {
+    const previous = state.jobs.find(j => j.id === id);
+    if (!previous || previous.kind !== 'code' || !['needs_attention', 'queued'].includes(previous.state))
+      throw new QueueError('Solo se reconcilia un trabajo de código parado en la integración.');
+    const at = stamp();
+    const workflow = previous.workflow ? { ...previous.workflow, status: 'succeeded', currentStage: null, completedAt: at, updatedAt: at,
+      steps: previous.workflow.steps.map(step => step.key === 'integration'
+        ? { ...step, status: 'succeeded', error: null, summary: `PR #${integration.prNumber} fusionada por el owner · Merge ${integration.mergeSha}`, updatedAt: at }
+        : step) } : previous.workflow;
+    const job = { ...previous, state: 'succeeded', error: null, workflow, reservedUsd: 0, finishedAt: at,
+      result: { ...(previous.result || {}), provider: 'owner-merge-reconciled', integration, text: previous.result?.text || `Integrado: PR #${integration.prNumber} fusionada por el owner.` } };
+    const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - (previous.reservedUsd ?? 0)) };
+    await commit(root, state, 'owner_merge_reconciled', { jobs: [job], budget }, { jobId: id, prNumber: integration.prNumber, mergeSha: integration.mergeSha });
+    return job;
+  });
+}
+
 export async function retractFalseSuccess(root, id, { confirm = false } = {}) {
   if (!confirm) throw new QueueError('Comprueba la respuesta y el checkout; usa --confirm-reviewed para retirar el falso éxito.');
   return mutate(root, async state => {

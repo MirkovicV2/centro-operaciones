@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addJob, addJobStage, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, cancelQueuedJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError, actorContext } from './queue.mjs';
+import { reconcileOwnerMergedIntegration } from './auto-run.mjs';
 import { createWorker } from './providers.mjs';
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 import { readPipeline, previewPipeline, previewText } from './pipeline-config.mjs';
@@ -54,6 +55,7 @@ node cli.mjs attempt-limit --id IDENTIFICADOR --max-attempts 5
 node cli.mjs resolve --id IDENTIFICADOR --confirm-reviewed
 node cli.mjs cancel --id IDENTIFICADOR --confirm-reviewed   Solo trabajos en cola que no han arrancado nunca
 node cli.mjs retract --id IDENTIFICADOR --confirm-reviewed
+node cli.mjs reconcile-owner-merge --id IDENTIFICADOR --confirm-reviewed   La PR de integración la fusionaste tú: la comprueba en GitHub y cierra el trabajo como integrado
 node cli.mjs complete --id IDENTIFICADOR --evidence-file "informe.md" --confirm-reviewed
 node cli.mjs budget --usd LIMITE_TOTAL --model MODELO --input-per-million TARIFA --output-per-million TARIFA
 
@@ -284,6 +286,7 @@ async function main() {
     }
     case 'cancel': result = await cancelQueuedJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'resolve': result = await resolveJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'reconcile-owner-merge': result = await reconcileOwnerMergedIntegration(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'retract': result = await retractFalseSuccess(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'complete': {
       if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con el informe de entrega revisada.');

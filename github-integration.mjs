@@ -176,7 +176,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   await save('pr_confirmed', { prNumber: pr.number, prUrl: pr.url, commitSha: head });
   const readChecks = async () => {
     try {
-      const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
+      const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid,mergedAt,mergeCommit']));
       return { detail, checks: detail.statusCheckRollup };
     } catch (error) {
       throw checksPermissionDenied(error) ? checksUnreadable(repo) : error;
@@ -184,6 +184,10 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   };
   const checkReadiness = async () => {
     const { detail, checks } = await readChecks();
+    // The owner may merge the PR by hand while the Centro waits (no CI): exactly this commit, merged.
+    if (detail.state === 'MERGED' && detail.headRefOid === head && detail.mergedAt && sha(detail.mergeCommit?.oid)) {
+      return { mergedByOwner: { mergeSha: detail.mergeCommit.oid, mergedAt: detail.mergedAt } };
+    }
     const summary = Array.isArray(checks) ? checks.slice(0, 80).map(check => ({ name: String(check?.name || check?.context || '').slice(0, 160), status: String(check?.status || '').slice(0, 40), conclusion: String(check?.conclusion || '').slice(0, 40) })) : [];
     let failure = detail.state !== 'OPEN' ? 'La PR dejó de estar abierta.'
       : detail.headRefOid !== head || detail.baseRefOid !== base ? 'La PR cambió de commit fuente o base; requiere nueva revisión.'
@@ -206,6 +210,10 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
         throw error;
       }
       checkAbort();
+      if (result.mergedByOwner) {
+        await save('complete', { prNumber: pr.number, prUrl: pr.url, commitSha: head, ...result.mergedByOwner, reconciled: true, mergedBy: 'owner' });
+        return;
+      }
       if (result.ready) {
         record.checks = result.checks;
         record.checkState = 'passed';
@@ -231,9 +239,11 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
     }
   };
   await waitUntilReady();
+  if (record.phase === 'complete') return record;
   // Re-read immediately before the mutation; a newly queued check is awaited
   // within the same deadline, while a changed head/base or terminal failure blocks.
   await waitUntilReady();
+  if (record.phase === 'complete') return record;
   await save('merge_intent', { prNumber: pr.number, prUrl: pr.url });
   await h(['pr', 'merge', String(pr.number), '--repo', repo, '--merge', '--match-head-commit', head]);
   const merged = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergedAt,mergeCommit']));
