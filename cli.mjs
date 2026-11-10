@@ -5,7 +5,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addJob, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError, actorContext } from './queue.mjs';
+import { addJob, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, cancelQueuedJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError, actorContext } from './queue.mjs';
 import { createWorker } from './providers.mjs';
 import { ORCA_EXE } from './local-tools.mjs';
 import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
@@ -31,6 +31,7 @@ node cli.mjs reconcile-code --id IDENTIFICADOR --decision-file "decision.json" -
 node cli.mjs retry --id IDENTIFICADOR --confirm-reviewed
 node cli.mjs attempt-limit --id IDENTIFICADOR --max-attempts 5
 node cli.mjs resolve --id IDENTIFICADOR --confirm-reviewed
+node cli.mjs cancel --id IDENTIFICADOR --confirm-reviewed   Solo trabajos en cola que no han arrancado nunca
 node cli.mjs retract --id IDENTIFICADOR --confirm-reviewed
 node cli.mjs complete --id IDENTIFICADOR --evidence-file "informe.md" --confirm-reviewed
 node cli.mjs budget --usd LIMITE_TOTAL --model MODELO --input-per-million TARIFA --output-per-million TARIFA
@@ -213,6 +214,7 @@ async function main() {
       result = { id: job.id, state: job.state, attempts: job.attempts, maxAttempts: job.maxAttempts };
       break;
     }
+    case 'cancel': result = await cancelQueuedJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'resolve': result = await resolveJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'retract': result = await retractFalseSuccess(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'complete': {
