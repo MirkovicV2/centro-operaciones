@@ -764,6 +764,17 @@ export async function setBudget(root, patch) {
   });
 }
 
+// 2 + 15: typed errors may carry details for the operator. Only bounded primitives
+// reach the ledger; the message itself still comes from a typed safeMessage.
+export function boundedErrorDetails(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return {};
+  const entries = Object.entries(details)
+    .filter(([key, value]) => /^[a-zA-Z0-9_]{1,40}$/.test(key) && ['string', 'number', 'boolean'].includes(typeof value) && value !== '')
+    .slice(0, 20)
+    .map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 600) : value]);
+  return entries.length ? { details: Object.fromEntries(entries) } : {};
+}
+
 export function elapsedAttemptMs(job) {
   const segments = (job.attemptHistory ?? []).filter(item => item.attempt === job.attempts);
   if (!segments.length || segments.some(item => !Number.isFinite(item.elapsedMs) || item.elapsedMs < 0)) throw new QueueError('Falta evidencia del tiempo consumido por este intento.', 'resume_elapsed_unknown');
@@ -1673,7 +1684,8 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
           }
           // Automatic retries are only permitted for errors known to have rejected work.
           const retry = error.retryable === true && error.uncertain !== true && job.attempts < job.maxAttempts;
-          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), nextAttemptAt: retry ? new Date(clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null, error: { code: error.code || 'worker_error', message: error.safeMessage || 'El ejecutor falló; revisa el trabajo y su resultado antes de continuar.' } };
+          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), nextAttemptAt: retry ? new Date(clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null,
+            error: { code: error.code || 'worker_error', message: error.safeMessage || 'El ejecutor falló; revisa el trabajo y su resultado antes de continuar.', ...boundedErrorDetails(error.details) } };
           job = { ...job, ...(error.partialResult ? { result: error.partialResult } : {}),
             attemptHistory: [...(job.attemptHistory ?? []), { attempt: job.attempts, startedAt: segmentStartedAt, finishedAt: job.finishedAt, elapsedMs: Date.now() - attemptStarted, outcome: job.state, ...(sameAttempt ? { recoveryId: sameAttemptRecoveryId } : {}), promptChars: job.prompt.length, error: job.error.code,
               metrics: error.metrics ?? error.partialResult?.metrics ?? (job.workflow?.steps ?? []).filter(step => step.attempt === job.attempts && step.metrics).map(step => step.metrics).sort((a, b) => (b.orcaCliCalls ?? 0) - (a.orcaCliCalls ?? 0))[0] ?? null }],

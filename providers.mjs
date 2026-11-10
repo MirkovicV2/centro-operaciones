@@ -7,6 +7,7 @@ import { runOrca } from './orca-provider.mjs';
 import { measuredUsage } from './workflow-contract.mjs';
 
 import { CODEX_EXE } from './local-tools.mjs';
+import { redactSecrets } from './redaction.mjs';
 const CREDIT_CODES = new Set(['insufficient_quota', 'billing_hard_limit_reached', 'credits_exhausted', 'credit_balance_exhausted']);
 const LIMIT_BYTES = 256_000;
 
@@ -32,11 +33,7 @@ export function summarizeCodexUsage(turnUsages) {
     outputTokens: sumComplete('outputTokens'),
   };
 }
-function redact(value, env) {
-  let text = String(value ?? '');
-  for (const name of ['OPENAI_API_KEY', 'CODEX_API_KEY']) if (env[name]) text = text.split(env[name]).join('[CLAVE OCULTA]');
-  return text.replace(/\bsk-[A-Za-z0-9_-]{12,}/g, '[CLAVE OCULTA]').slice(0, 48_000);
-}
+const redact = (value, env) => redactSecrets(value, env);
 export async function withTimeout(operation, ms) {
   const controller = new AbortController();
   let timer;

@@ -276,6 +276,13 @@ function renderJobs(data) {
       const error = el('p', '', job.error.message);
       error.style.color = '#ffc98a';
       detail.append(error);
+      const entries = Object.entries(job.error.details || {});
+      if (entries.length) {
+        const more = document.createElement('details');
+        more.dataset.panelDetail = `${card.id}-error-details`;
+        more.append(el('summary', '', `Detalle del error (${job.error.code || 'sin código'})`), el('pre', 'job-output', entries.map(([key, value]) => `${key}: ${value}`).join('\n')));
+        detail.append(more);
+      }
     }
     if (job.result?.text) detail.append(el('pre', 'job-output', job.result.text));
     const sourceIdea = data.ideas?.find(idea => ideaLinks(idea, [job]).length);

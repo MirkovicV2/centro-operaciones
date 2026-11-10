@@ -15,6 +15,7 @@ import { ContractError, deliveryInstructions, deliveryApproved, fingerprint, par
 import { ORCA_OUTPUT_LIMIT_BYTES, isOrcaStatusReadError, normalizeWorkerStatus, checkWorkerIdentity, matchingCompletion, pendingStageDelivery, stageAskAnswered, readCompleteTranscript, saveStageReport, readStageReport, saveDispatchSpec, verifyDispatchSpec } from './orca-evidence.mjs';
 
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
+import { excerpt } from './redaction.mjs';
 export { ORCA_EXE };
 const PROFILE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.codex', 'agents');
 const GAME_SKILL_DIR = path.resolve(PROFILE_DIR, '..', 'skills', 'game-production');
@@ -97,19 +98,42 @@ function run(exe, args, { cwd, signal } = {}) {
   });
 }
 
+// 15: known native codes map to an actionable explanation. Unknown codes keep the generic text.
+export const ORCA_NATIVE_CODE_HINTS = Object.freeze({
+  consumer_fenced: 'otro proceso ya consume esta Run (normalmente el panel abierto). Orca admite un consumidor por Run: cierra el otro ejecutor o despacha solo desde el panel.',
+  no_active_sender_terminal: 'la terminal remitente (--from) no está activa en Orca. Comprueba data/coordinator-bindings.json y que la sesión del coordinador siga abierta.',
+  coordinator_required: 'la Run exige una terminal coordinadora vinculada. Revisa el coordinador configurado para esta empresa.',
+  invalid_arguments: 'Orca rechazó los argumentos del comando. Comprueba la versión de Orca CLI y los perfiles.',
+  invalid_params: 'Orca rechazó los parámetros del comando. Comprueba la versión de Orca CLI.',
+  unknown_option: 'Orca no reconoce una opción del comando. Comprueba la versión de Orca CLI.',
+  run_not_found: 'la Run configurada no existe en esta instalación de Orca. Vuelve a vincular el coordinador.',
+  dispatch_not_found: 'Orca no encuentra el dispatch guardado. Revisa el Run en Orca antes de reanudar.',
+});
+const REJECTED_NATIVE_CODES = ['invalid_arguments', 'invalid_params', 'unknown_option', 'no_active_sender_terminal', 'coordinator_required'];
+
+// 2 + 15: a typed failure that keeps code, a bounded redacted message and a stderr excerpt.
+export function orcaCommandFailure(value, exitCode, stderr = '') {
+  const nativeCode = /^[a-zA-Z0-9_-]{1,100}$/.test(value?.error?.code ?? '') ? value.error.code : 'orca_command_failed';
+  const rejected = REJECTED_NATIVE_CODES.includes(nativeCode);
+  const hint = ORCA_NATIVE_CODE_HINTS[nativeCode];
+  const error = new ProviderError(rejected ? 'orca_command_rejected' : 'orca_command_failed', 'Orca: ' + nativeCode + '; ' + (hint || 'consulta la evidencia del intento.'), { uncertain: !rejected });
+  error.nativeCode = nativeCode;
+  error.rejected = rejected;
+  const nativeMessage = typeof value?.error?.message === 'string' ? excerpt(value.error.message) : '';
+  const stderrExcerpt = excerpt(stderr);
+  error.details = {
+    ...Object.fromEntries(['requestId', 'failedStage', 'stage'].filter(key => typeof value?.[key] === 'string' && /^[a-zA-Z0-9_-]{1,120}$/.test(value[key])).map(key => [key, value[key]])),
+    nativeCode, ...(Number.isInteger(exitCode) ? { exitCode } : {}),
+    ...(nativeMessage ? { nativeMessage } : {}), ...(stderrExcerpt ? { stderr: stderrExcerpt } : {}), ...(hint ? { hint } : {}),
+  };
+  return error;
+}
+
 async function jsonCommand(args, cwd, signal) {
-  const { stdout, code } = await run(ORCA_EXE, [...args, '--json'], { cwd, signal });
+  const { stdout, stderr, code } = await run(ORCA_EXE, [...args, '--json'], { cwd, signal });
   let value;
   try { value = JSON.parse(stdout); } catch { throw new ProviderError('orca_invalid_response', 'Orca devolvió una respuesta ilegible; revisa el flujo antes de repetir.'); }
-  if (value.ok === false || code !== 0) {
-    const nativeCode = /^[a-zA-Z0-9_-]{1,100}$/.test(value.error?.code ?? '') ? value.error.code : 'orca_command_failed';
-    const rejected = ['invalid_arguments', 'invalid_params', 'unknown_option', 'no_active_sender_terminal', 'coordinator_required'].includes(nativeCode);
-    const error = new ProviderError(rejected ? 'orca_command_rejected' : 'orca_command_failed', 'Orca: ' + nativeCode + '; consulta la evidencia del intento.', { uncertain: !rejected });
-    error.nativeCode = nativeCode;
-    error.rejected = rejected;
-    error.details = Object.fromEntries(['requestId', 'failedStage', 'stage'].filter(key => typeof value[key] === 'string' && /^[a-zA-Z0-9_-]{1,120}$/.test(value[key])).map(key => [key, value[key]]));
-    throw error;
-  }
+  if (value.ok === false || code !== 0) throw orcaCommandFailure(value, code, stderr);
   return value.result ?? value;
 }
 
@@ -338,9 +362,11 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     } catch (error) {
       const rejected = error.rejected === true;
       await ctx.reportStage?.({ key: role.stageKey, status: rejected ? 'failed' : 'blocked', dispatchStatus: rejected ? 'rejected' : 'unknown', error: error.nativeCode ?? error.code ?? 'orca_start_failed', commandFailure: error.details ?? null });
-      throw new ProviderError(error.code ?? 'orca_start_failed', rejected
+      const failure = new ProviderError(error.code ?? 'orca_start_failed', (rejected
         ? `Orca rechazó los argumentos de ${role.name}; no confirmó un trabajador.`
-        : `No se pudo confirmar si Orca inició ${role.name}; revisa el dispatch antes de repetir.`, { uncertain: !rejected });
+        : `No se pudo confirmar si Orca inició ${role.name}; revisa el dispatch antes de repetir.`) + (error.nativeCode ? ` ${error.message}` : ''), { uncertain: !rejected });
+      if (error.details) failure.details = error.details;
+      throw failure;
     }
     dispatchId = started.dispatchId ?? started.dispatch?.dispatchId;
     taskId = started.taskId ?? started.task?.id;
