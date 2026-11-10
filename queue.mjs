@@ -1391,6 +1391,22 @@ export async function resolveJob(root, id, { confirm = false } = {}) {
   });
 }
 
+// Cancels a job that is waiting in the queue and has never started: no worker, no checkout
+// changes and no reserved budget to settle. Started jobs keep going through resolve/retry.
+export async function cancelQueuedJob(root, id, { confirm = false } = {}) {
+  if (!confirm) throw new QueueError('Confirma la cancelación con --confirm-reviewed.');
+  return mutate(root, async state => {
+    const previous = state.jobs.find(j => j.id === id);
+    if (!previous) throw new QueueError('No existe ese trabajo.');
+    if (previous.state !== 'queued' || (previous.attempts ?? 0) !== 0)
+      throw new QueueError('Solo se pueden cancelar trabajos en cola que no han arrancado nunca.');
+    const job = { ...previous, state: 'cancelled', reservedUsd: 0, cancelledAt: stamp() };
+    const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - (previous.reservedUsd ?? 0)) };
+    await commit(root, state, 'operator_cancelled', { jobs: [job], budget }, { jobId: id });
+    return job;
+  });
+}
+
 export async function retractFalseSuccess(root, id, { confirm = false } = {}) {
   if (!confirm) throw new QueueError('Comprueba la respuesta y el checkout; usa --confirm-reviewed para retirar el falso éxito.');
   return mutate(root, async state => {

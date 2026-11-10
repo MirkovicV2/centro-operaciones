@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { projectMemory } from './project-memory.mjs';
 import { resolveOperationsRoot } from './operations-root.mjs';
 import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
-import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, settledQaRevalidation, stoppedDeveloperCheckpoint, actorContext } from './queue.mjs';
+import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, cancelQueuedJob, settledQaRevalidation, stoppedDeveloperCheckpoint, actorContext } from './queue.mjs';
 import { parseTailscaleAccess, assertRoleAllows } from './access-control.mjs';
 import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt } from '../auto-run.mjs';
 import { createWorker } from '../providers.mjs';
@@ -333,7 +333,7 @@ async function handleApi(request, response, url, tailscale = null) {
   if (ideaSend) return send(response, 409, { error: 'El panel ya no inicia agentes directamente desde Ideas. Envía la idea al coordinador para que decida la ruta.' });
   const resumeDispatch = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/resume$/);
   if (resumeDispatch) return send(response, 200, await resumeCoordinatedDispatch(QUEUE_ROOT, resumeDispatch[1], { confirm: body.confirmReviewed === true }));
-  const reviewedJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/(retry|resolve)$/);
+  const reviewedJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/(retry|resolve|cancel)$/);
   if (reviewedJob) {
     let job;
     if (reviewedJob[2] === 'retry') {
@@ -347,6 +347,8 @@ async function handleApi(request, response, url, tailscale = null) {
           ? await retryAutoReceipt(QUEUE_ROOT, reviewedJob[1], { confirm, noDispatchConfirmed: body.noDispatchConfirmed === true })
           : await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm });
       }
+    } else if (reviewedJob[2] === 'cancel') {
+      job = await cancelQueuedJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
     } else {
       job = await resolveJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
     }
