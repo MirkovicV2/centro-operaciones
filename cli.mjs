@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import * as fs from 'node:fs/promises';
+import http from 'node:http';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,8 @@ node cli.mjs add --business games|agency --kind analysis|code --title "Título" 
   Código: --workspace "${path.join(ROOT, 'workspaces', 'checkout-aislado')}" --isolated
 node cli.mjs run                       Simulación: no ejecuta trabajadores ni modifica estado
 node cli.mjs run --execute [--max-jobs 5] [--id IDENTIFICADOR]
+  Con el panel abierto en el puerto configurado (CENTRO_OPERATIONS_PORT, 4187 por defecto) la CLI no despacha:
+  Orca admite un consumidor por Run y rechazaría el worker-start con consumer_fenced. Usa el panel o ciérralo antes.
 node cli.mjs show --id IDENTIFICADOR
 node cli.mjs route --id IDENTIFICADOR --provider orca
 node cli.mjs reconcile --id IDENTIFICADOR --dispatch-id ctx_... --evidence-file "resultado.md" --confirm-reviewed
@@ -50,6 +53,29 @@ function parse(args) {
   return { command, options };
 }
 const numeric = (value, fallback) => value === undefined ? fallback : Number(value);
+
+// 16 + 19: Orca accepts one consumer per Run. A live panel already consumes the
+// configured Runs, so a CLI dispatch would be fenced (consumer_fenced) after
+// creating state. Probe the panel port first and explain instead of dispatching.
+export function panelPort(env = process.env) {
+  const port = Number(env.CENTRO_OPERATIONS_PORT || 4187);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : 4187;
+}
+export function probePanel(port, { timeoutMs = 1500 } = {}) {
+  return new Promise(resolve => {
+    const request = http.get({ host: '127.0.0.1', port, path: '/api/config', timeout: timeoutMs, agent: false, headers: { host: `127.0.0.1:${port}` } }, response => {
+      response.resume();
+      resolve({ alive: true, status: response.statusCode });
+    });
+    request.on('timeout', () => { request.destroy(); resolve({ alive: false, reason: 'timeout' }); });
+    request.on('error', error => resolve({ alive: false, reason: error.code || 'error' }));
+  });
+}
+export async function assertPanelNotRunning({ port = panelPort(), probe = probePanel } = {}) {
+  const result = await probe(port);
+  if (!result?.alive) return { port, alive: false };
+  throw new QueueError(`El panel está abierto en http://127.0.0.1:${port}. Orca admite un único consumidor por Run y rechazaría este despacho con consumer_fenced tras crear estado. Usa el panel para ejecutar o ciérralo antes de run --execute.`, 'panel_active');
+}
 const runRecordsCache = new Map();
 
 export function reconcileCodeSummary(job) {
@@ -140,7 +166,10 @@ async function main() {
       result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], undefined), timeoutMs: timeoutSeconds === null ? undefined : timeoutSeconds * 1000, maxUsd: numeric(o['max-usd'], 0.1) });
       break;
     }
-    case 'run': result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5), jobId: o.id }); break;
+    case 'run':
+      if (o.execute) await assertPanelNotRunning();
+      result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5), jobId: o.id });
+      break;
     case 'retry': result = await retryJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'attempt-limit': {
       const job = await increaseJobAttemptLimit(ROOT, o.id, numeric(o['max-attempts'], NaN));
