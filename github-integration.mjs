@@ -108,14 +108,10 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (!sha(base) || !sha(remoteHead) || (remoteHead !== job.destination?.remoteSha && !reconciledPush) || (base !== job.destination?.baseSha && !reconciledBase)) throw new Error('Baseline remoto divergente o desactualizado.');
   const behind = (await g(['rev-list', '--count', `HEAD..${remoteHead}`])).trim();
   if (behind !== '0') throw new Error('La rama remota diverge del checkout; sincroniza y revisa manualmente.');
-  // 38: before any effect, the credential must be able to read the checks of this repository, either as
-  // check runs or, with a fine-grained token, as Actions runs. Unreadable checks stop here, with nothing published.
-  if (job.branch !== dest.baseBranch && !record.checksSource) {
-    const readable = async args => { try { await h(args); return true; } catch (error) { if (checksPermissionDenied(error)) return false; throw error; } };
-    if (!await readable(['api', '--method', 'GET', `repos/${repo}/commits/${base}/check-runs`, '-f', 'per_page=1'])) {
-      if (!await readable(['api', '--method', 'GET', `repos/${repo}/actions/runs`, '-f', 'per_page=1'])) throw checksUnreadable(repo);
-      record.checksSource = 'actions';
-    }
+  // A partial view of Actions runs cannot verify the complete set of PR checks.
+  if (job.branch !== dest.baseBranch && !record.prNumber) {
+    try { await h(['api', '--method', 'GET', `repos/${repo}/commits/${base}/check-runs`, '-f', 'per_page=1']); }
+    catch (error) { throw checksPermissionDenied(error) ? checksUnreadable(repo) : error; }
   }
   const existing = await h(['pr', 'list', '--repo', repo, '--head', job.branch, '--base', dest.baseBranch, '--state', 'open', '--limit', '100', '--json', pullRequestIdentityFields]);
   const prs = sameRepositoryPullRequests(JSON.parse(existing || '[]'), repo, job.branch, dest.baseBranch);
@@ -178,23 +174,13 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   }
   if (pr.headRefOid !== head) throw new Error('La PR abierta apunta a un commit diferente del aprobado.');
   await save('pr_confirmed', { prNumber: pr.number, prUrl: pr.url, commitSha: head });
-  // 38: a fine-grained token cannot read check runs (statusCheckRollup answers «Resource not accessible»).
-  // Only then, and from then on for this record, the checks come from the Actions API for the exact head.
   const readChecks = async () => {
-    if (record.checksSource !== 'actions') {
-      try {
-        const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
-        return { detail, checks: detail.statusCheckRollup };
-      } catch (error) {
-        if (!checksPermissionDenied(error)) throw error;
-        record.checksSource = 'actions';
-      }
+    try {
+      const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,statusCheckRollup,headRefOid,baseRefOid']));
+      return { detail, checks: detail.statusCheckRollup };
+    } catch (error) {
+      throw checksPermissionDenied(error) ? checksUnreadable(repo) : error;
     }
-    const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,headRefOid,baseRefOid']));
-    let runs;
-    try { runs = JSON.parse(await h(['api', '--method', 'GET', `repos/${repo}/actions/runs`, '-f', `head_sha=${head}`, '-f', 'per_page=100'])); }
-    catch (error) { throw checksPermissionDenied(error) ? checksUnreadable(repo) : error; }
-    return { detail, checks: actionsRunsAsChecks(runs, head) };
   };
   const checkReadiness = async () => {
     const { detail, checks } = await readChecks();
@@ -344,29 +330,9 @@ export function checksPermissionDenied(error) {
   return /Resource not accessible by (personal access token|integration)/i.test(text);
 }
 
-// 38: GitHub Actions runs for the exact head, shaped like statusCheckRollup entries. Only the latest run of
-// each workflow and event counts (a new run replaces an older one); an incomplete listing fails closed.
-// Limitation: commit statuses and check runs from other CI apps are not visible through this API.
-// 38: the credential cannot read the checks in any supported way. A distinct state, never a timeout.
 function checksUnreadable(repo) {
-  return Object.assign(new Error(`La credencial de gh no puede leer los checks de ${repo} (ni check runs ni Actions). Usa la sesión normal de gh o da al token el permiso Actions: lectura; la integración no fusiona sin poder comprobar los checks.`),
+  return Object.assign(new Error(`La credencial de gh no puede comprobar todos los checks de ${repo}. Usa una sesión de gh con acceso a los checks de la PR y reanuda la integración.`),
     { code: 'github_checks_unreadable' });
-}
-
-export function actionsRunsAsChecks(listing, head) {
-  const runs = listing?.workflow_runs;
-  if (!Array.isArray(runs) || !Number.isInteger(listing.total_count) || listing.total_count !== runs.length || runs.length >= 100) {
-    throw new Error('La lista de ejecuciones de Actions está incompleta o limitada; revisa los checks a mano.');
-  }
-  const latest = new Map();
-  for (const run of runs) {
-    if (run?.head_sha !== head || !Number.isInteger(run.id) || run.workflow_id == null) continue;
-    const key = `${run.workflow_id}:${run.event}`;
-    if (!latest.has(key) || latest.get(key).id < run.id) latest.set(key, run);
-  }
-  return [...latest.values()].sort((a, b) => a.id - b.id).map(run => ({
-    name: String(run.name || run.workflow_id), status: String(run.status || '').toUpperCase(), conclusion: run.conclusion ? String(run.conclusion).toUpperCase() : '',
-  }));
 }
 
 export function createIntegrationCommandAdapters({ signal, executeCommand = exec, timeoutMs = 30_000 } = {}) {
