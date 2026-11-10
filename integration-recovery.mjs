@@ -74,9 +74,12 @@ const EFFECT_KEYS = ['manifest', 'commitSha', 'prNumber', 'prUrl', 'mergeSha', '
 const PRE_EFFECT_PHASES = [undefined, 'validation_pending', 'validation_approved'];
 
 /** A failed integration record that never reached a durable effect intent. Pure; no I/O. */
-export function effectFreeIntegrationRecord(record, history = [], jobId = record?.jobId) {
-  return Boolean(record) && record.status === 'needs_attention' && PRE_EFFECT_PHASES.includes(record.phase)
-    && EFFECT_KEYS.every(key => record[key] === undefined)
+// `closed`: the job is cancelled and reviewed, so a record left mid-validation (QA or Revisión
+// stopped before the integration step) is final too and may release the checkout.
+export function effectFreeIntegrationRecord(record, history = [], jobId = record?.jobId, { closed = false } = {}) {
+  const statuses = closed ? ['needs_attention', 'validating', 'validated'] : ['needs_attention'];
+  return Boolean(record) && statuses.includes(record.status) && PRE_EFFECT_PHASES.includes(record.phase)
+    && EFFECT_KEYS.every(key => record[key] == null)
     && !history.some(item => item?.jobId === jobId && item.type === 'github_integration' && !PRE_EFFECT_PHASES.includes(item.phase));
 }
 
@@ -84,7 +87,8 @@ export function effectFreeIntegrationRecord(record, history = [], jobId = record
 export async function inspectEffectFreeIntegration(root, job, record, { git, gh, history = [] } = {}) {
   const defaults = createIntegrationCommandAdapters();
   git ??= defaults.git; gh ??= defaults.gh;
-  assert(effectFreeIntegrationRecord(record, history, job?.id), 'El registro de integración no acredita un fallo anterior a cualquier efecto.');
+  const closed = job?.state === 'cancelled' && Boolean(job.reviewedAt) && !job.orphanRisk;
+  assert(effectFreeIntegrationRecord(record, history, job?.id, { closed }), 'El registro de integración no acredita un fallo anterior a cualquier efecto.');
   const destination = job?.destination ?? {};
   const workspace = path.resolve(job?.workspace || '');
   assert(path.isAbsolute(job?.workspace || '') && record.jobId === job.id && sameRepository(record.repository, destination.repository)

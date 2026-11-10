@@ -300,3 +300,37 @@ test('retry-checkout accepts a lock written by this process for a job that is no
   assert.equal(reopened.status, 'pending');
   await assert.rejects(fs.access(f.lockPath), { code: 'ENOENT' });
 });
+
+test('retry-checkout releases the lock of a resolved job stopped before integration, whose record stayed validating (encargo 8)', async t => {
+  const f = await fixture(t);
+  // Shape left by a review that blocked: validation_pending/validating, no effect fields, no failure.
+  const midValidation = { ...f.record, phase: 'validation_pending', status: 'validating', needsAttention: false, error: null, commitSha: null };
+  delete midValidation.validation.approvals;
+  await patchAuto(f.root, state => { state.integrations[f.receiptId] = midValidation; });
+  // While the job is still open the record is not a recoverable failure.
+  await assert.rejects(f.recover({ inspectIntegrationEffects: async () => assert.fail('an in-flight record is not recovered') }), /manifiesto durable/);
+  await resolveJob(f.root, f.jobId, { confirm: true });
+  await patchAuto(f.root, state => { state.receipts[0].status = 'reviewed'; });
+  await fs.writeFile(f.lockPath, JSON.stringify({ jobId: f.jobId, receiptId: f.receiptId, attempt: 1, pid: 2147483647 }));
+  const next = await confirmSubmission(f.root, 'receipt-next', { id: 'next-job', business: 'agency', kind: 'code', provider: 'orca', title: 'Siguiente encargo',
+    prompt: 'Complete the fixture acceptance.', contract: { acceptance: ['Complete the fixture acceptance.'] }, workspace: f.workspace, isolated: true, branch: 'feature', destination: f.destination, maxAttempts: 2 });
+  await createAutoRunner(f.root, { verify: f.verify, worker: async () => assert.fail('the locked checkout must not admit') }).tick();
+  const inspectWorker = async () => {};
+  // The default inspector runs with injected adapters: unchanged refs and no open PR.
+  const git = async args => args[0] === 'remote' ? 'git@github.com:fixture/repo.git' : args[0] === 'rev-parse' ? SHA.local : `${args.at(-1) === 'main' ? SHA.base : SHA.local}\trefs/heads/${args.at(-1)}`;
+  const gh = async () => '[]';
+  const inspectIntegrationEffects = (root, job, record, options) => inspectEffectFreeIntegration(root, job, record, { ...options, git, gh });
+  const reopened = await retryCheckoutAdmission(f.root, next.receipt.id, { confirm: true, inspectWorker, inspectIntegrationEffects });
+  assert.equal(reopened.status, 'pending');
+  await assert.rejects(fs.access(f.lockPath), { code: 'ENOENT' });
+  assert.equal((await readAutoRun(f.root)).history.find(item => item.type === 'checkout_admission_reopened').previousOwner.integrationEffects.phase, 'validation_pending');
+});
+
+test('effectFreeIntegrationRecord accepts mid-validation records only for a closed job', () => {
+  const record = { jobId: 'j1', receiptId: 'r1', status: 'validating', phase: 'validation_pending', commitSha: null };
+  assert.equal(effectFreeIntegrationRecord(record), false);
+  assert.equal(effectFreeIntegrationRecord(record, [], 'j1', { closed: true }), true);
+  assert.equal(effectFreeIntegrationRecord({ ...record, status: 'validated', phase: 'validation_approved' }, [], 'j1', { closed: true }), true);
+  assert.equal(effectFreeIntegrationRecord({ ...record, status: 'running', phase: 'commit_intent' }, [], 'j1', { closed: true }), false);
+  assert.equal(effectFreeIntegrationRecord({ ...record, commitSha: 'c'.repeat(40) }, [], 'j1', { closed: true }), false);
+});
