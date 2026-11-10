@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as wait } from 'node:timers/promises';
 import { replaceLocalFile } from './atomic-file.mjs';
+import { containsSecret } from './redaction.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { normalizeJobContract, validateContinuation, validateDelivery, IDENTIFIERS } from './workflow-contract.mjs';
 import { jobCoordination } from './coordination.mjs';
@@ -244,7 +245,7 @@ export function validateSpec(spec) {
   if (!['analysis', 'code'].includes(spec.kind)) throw new QueueError('kind debe ser analysis o code.');
   if (!spec.title || spec.title.length > 160) throw new QueueError('El título debe tener entre 1 y 160 caracteres.');
   if (!spec.prompt || Buffer.byteLength(spec.prompt, 'utf8') > 12_000) throw new QueueError('La instrucción debe tener entre 1 y 12.000 bytes.');
-  if (/\bsk-[A-Za-z0-9_-]{12,}/.test(spec.prompt + spec.title) || ['OPENAI_API_KEY', 'CODEX_API_KEY'].some(name => process.env[name] && (spec.prompt + spec.title).includes(process.env[name]))) throw new QueueError('No guardes claves en títulos o instrucciones; usa solo variables de entorno.');
+  if (containsSecret(spec.prompt + spec.title)) throw new QueueError('No guardes claves en títulos o instrucciones; usa solo variables de entorno.');
   attemptLimit(spec);
   if (!Number.isInteger(spec.timeoutMs ?? 180_000) || (spec.timeoutMs ?? 180_000) < 10 || (spec.timeoutMs ?? 180_000) > 1_800_000) throw new QueueError('timeoutMs debe estar entre 10 y 1.800.000.');
   if (!Number.isFinite(spec.maxUsd ?? 0.1) || (spec.maxUsd ?? 0.1) <= 0) throw new QueueError('maxUsd debe ser positivo.');
