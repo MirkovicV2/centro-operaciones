@@ -277,8 +277,13 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
                 assertRecoveryCheckpoint(job, entry.dispatchRecovery);
                 if (entry.dispatchRecovery.mode === 'same_attempt_integration_validation') {
                   const record = current.integrations?.[entry.id];
-                  if (record?.phase !== 'validation_pending' || record.integrationRecoveryId !== entry.dispatchRecovery.id
-                    || record.validationCandidateSnapshot !== entry.dispatchRecovery.integrationValidation.candidateSnapshot) throw new Error('El registro de nueva validación no coincide con su recibo.');
+                  const candidate = entry.dispatchRecovery.integrationValidation.candidateSnapshot;
+                  // 29: an integration-only resume keeps the sealed, approved validation of this exact snapshot.
+                  const kept = entry.dispatchRecovery.integrationOnly
+                    ? record?.phase === 'validation_approved' && record.status === 'validated' && record.integrationRecoveryId === entry.dispatchRecovery.id
+                      && record.validation?.snapshot === candidate && record.validation.approvals?.qa && record.validation.approvals?.reviewer
+                    : record?.phase === 'validation_pending' && record.integrationRecoveryId === entry.dispatchRecovery.id && record.validationCandidateSnapshot === candidate;
+                  if (!kept) throw new Error('El registro de nueva validación no coincide con su recibo.');
                 }
                 if (entry.dispatchRecovery.mode === 'same_attempt_integration_reconcile'
                   && recoveryFingerprint(current.integrations?.[entry.id]) !== entry.dispatchRecovery.integrationRecordHash) throw new Error('El registro de integración cambió en la admisión.');
@@ -823,8 +828,9 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
       if (action && job?.state === 'needs_attention') assertQualityAction(job, action);
       const scope = resuming ? prior.stage : action ? job.workflow.currentStage : settledQaRevalidation(job) ? 'qa' : 'integration';
       if (qualityAction && scope === 'integration') throw new Error('El informe de calidad ya no está vigente.');
+      // A job that already consumed a validation cycle may still resume only the integration (29); a new revalidation is refused below.
       const integrationBlocked = job?.error?.code === 'github_integration_needs_attention' && job.workflow?.currentStage === 'integration'
-        && step?.status === 'blocked' && step.error === 'integration_needs_attention' && !job.validationCycle;
+        && step?.status === 'blocked' && step.error === 'integration_needs_attention';
       const previousValidation = record?.validation;
       const developer = job?.workflow?.steps?.find(item => item.key === 'developer');
       const recordEligible = scope !== 'integration' ? job && receipt && record?.phase === 'validation_pending' && record.status === 'validating'
@@ -868,6 +874,15 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
       if (observed?.state !== 'succeeded' || observed.liveness !== 'exited' || observed.runId !== recovery.runId) throw new Error('Las etapas originales no acreditan cierre nativo exacto.');
       const proof = assertIntegrationValidationProof(recovery, observed.integrationValidation);
       if (scope !== 'integration' && proof.candidateSnapshot !== previousValidation.snapshot) throw new Error('Los archivos cambiaron desde el QA anterior.');
+      // 29: resume only the integration when (a) the checkout snapshot is exactly the one QA and
+      // Revisión approved, (b) the remote confirmed no commit, push or PR and (c) the remote base
+      // branch was verifiable. Otherwise QA and Revisión are revalidated on the current files.
+      const approvedSnapshot = record?.phase === 'validation_approved' && previousValidation?.approvals && /^[a-f0-9]{64}$/.test(previousValidation.snapshot || '') ? previousValidation.snapshot : null;
+      const integrationOnly = preEffectFailure && Boolean(approvedSnapshot) && proof.candidateSnapshot === approvedSnapshot
+        && /^[a-f0-9]{40,64}$/i.test(integrationEffects?.remoteBaseSha || '') && integrationEffects.remoteBaseSha === job.destination?.baseSha;
+      if (resuming ? Boolean(prior.integrationOnly) !== integrationOnly : false) throw new Error('El candidato cambió respecto a la huella aprobada durante la recuperación.');
+      if (!resuming && integrationOnly) recovery.integrationOnly = true;
+      if (!resuming && scope === 'integration' && !integrationOnly && job.validationCycle) throw new Error('Solo se revalida una vez la integración sin manifiesto original.');
       if (resuming && recoveryFingerprint(proof) !== recoveryFingerprint(recovery.integrationValidation)) throw new Error('El candidato cambió durante la recuperación de integración.');
       assertRecoveryDestination(recovery.destination, await verify(root, job, { requireClean: false }));
       const checkoutLock = await recoveryCheckoutLock(root, job, receipt.id, recovery.attempt, { allowMissing: Boolean(resuming && prior.lockOwner) });
@@ -910,10 +925,14 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
       if (receipt.dispatchRecovery?.id !== recovery.id || recoveryFingerprint(state.integrations[receiptId]) !== recovery.integrationRecordHash) throw new Error('El recibo o registro de integración cambió.');
       receipt.dispatchRecovery = { ...queued.livenessResume, phase: 'ready', updatedAt: now() };
       receipt.integrationRecoveryHistory = [...(receipt.integrationRecoveryHistory || []), { recoveryId: recovery.id, at: now(), originalRecord: recovery.originalIntegrationRecord }];
-      state.integrations[receiptId] = { jobId, receiptId, repository: job.destination.repository, sourceBranch: job.branch, baseBranch: job.destination.baseBranch,
-        phase: 'validation_pending', status: 'validation_pending', integrationRecoveryId: recovery.id, validationCandidateSnapshot: recovery.integrationValidation.candidateSnapshot, updatedAt: now() };
+      state.integrations[receiptId] = recovery.integrationOnly
+        // The sealed validation and its approvals stay; only the failure is cleared so the integration preflight runs again.
+        ? { ...state.integrations[receiptId], status: 'validated', needsAttention: false, error: null, integrationRecoveryId: recovery.id, updatedAt: now() }
+        : { jobId, receiptId, repository: job.destination.repository, sourceBranch: job.branch, baseBranch: job.destination.baseBranch,
+          phase: 'validation_pending', status: 'validation_pending', integrationRecoveryId: recovery.id, validationCandidateSnapshot: recovery.integrationValidation.candidateSnapshot, updatedAt: now() };
       receipt.status = 'pending'; receipt.retryAuthorizedAttempt = job.attempts; receipt.updatedAt = now();
-      receipt.reason = recovery.qualityAction?.type === 'correction' ? 'Corrección de Desarrollo encolada con hallazgos de QA.'
+      receipt.reason = recovery.integrationOnly ? 'Integración reanudada sobre la huella aprobada por QA y Revisión; no se repiten esas etapas.'
+        : recovery.qualityAction?.type === 'correction' ? 'Corrección de Desarrollo encolada con hallazgos de QA.'
         : recovery.qualityAction?.type === 'answer' ? 'QA reanudado con las respuestas guardadas del panel.'
           : 'Nueva validación QA y revisión sobre candidato fijo; conserva el mismo intento y el historial.';
       audit(state, 'integration_validation_ready', { jobId, receiptId, recoveryId: recovery.id, attempt: job.attempts }); return queued;

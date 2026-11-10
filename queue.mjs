@@ -938,6 +938,8 @@ export function assertIntegrationValidationProof(recovery, proof) {
 }
 
 function validationResetStages(recovery) {
+  // 29: an effect-free integration failure over the exact approved snapshot resumes only the integration.
+  if (recovery.integrationOnly) return ['integration'];
   if (recovery.qualityAction?.type === 'correction') return ['developer', 'qa', 'reviewer', 'integration'];
   return recovery.stage === 'reviewer' ? ['reviewer', 'integration'] : ['qa', 'reviewer', 'integration'];
 }
@@ -949,7 +951,8 @@ function assertIntegrationValidationResume(job, recovery) {
     || recovery.originalError !== (recovery.stage === 'integration' ? 'github_integration_needs_attention' : 'delivery_incomplete')
     || recovery.jobId !== job.id || recovery.receiptId !== job.autoIntent?.receiptId || recovery.attempt !== job.attempts
     || recovery.runId !== job.workflow?.runId || recovery.observedState !== 'succeeded' || recovery.liveness !== 'exited'
-    || job.validationCycle !== recovery.id || recovery.queuedWorkflowHash !== recoveryFingerprint(job.workflow)
+    || (recovery.integrationOnly ? (job.validationCycle ?? null) !== (recovery.keepValidationCycle ?? null) : job.validationCycle !== recovery.id)
+    || recovery.queuedWorkflowHash !== recoveryFingerprint(job.workflow)
     || job.workflow.currentStage !== resetStages[0]
     || resetStages.some(key => {
       const step = job.workflow.steps.find(item => item.key === key); return !step || step.status !== 'queued' || step.taskId || step.dispatchId || step.delivery || step.artifact;
@@ -968,7 +971,7 @@ export async function queueIntegrationValidationResume(root, id, recovery) {
       : previous?.error?.code === 'github_integration_needs_attention' && previous.workflow?.currentStage === 'integration'
         && integration?.status === 'blocked' && integration.error === 'integration_needs_attention';
     if (previous?.state !== 'needs_attention' || !recoverable
-      || (recovery.stage === 'integration' && previous.validationCycle) || previous.reservedUsd !== 0 || recovery.originalWorkflowHash !== recoveryFingerprint(previous.workflow)
+      || (recovery.stage === 'integration' && !recovery.integrationOnly && previous.validationCycle) || previous.reservedUsd !== 0 || recovery.originalWorkflowHash !== recoveryFingerprint(previous.workflow)
       || recoveryFingerprint(integrationValidationSteps(previous, recovery.stage, recovery.qualityAction)) !== recoveryFingerprint(recovery.originalSteps)) {
       throw new QueueError('Solo se revalida una vez la integración sin manifiesto original.', 'integration_recovery_invalid');
     }
@@ -979,12 +982,14 @@ export async function queueIntegrationValidationResume(root, id, recovery) {
         ? { key: step.key, label: step.label, ...(step.profile ? { profile: step.profile } : {}), status: 'queued', validationCycle: recovery.id,
           ...(step.key === 'developer' || step.key === recovery.stage && recovery.stage !== 'integration'
             ? { predecessorTaskId: recovery.originalSteps.find(item => item.stage === step.key).taskId } : {}) } : step) };
-    const marker = { ...recovery, phase: 'ready', queuedAt: stamp(), queuedWorkflowHash: recoveryFingerprint(workflow) };
+    const marker = { ...recovery, phase: 'ready', queuedAt: stamp(), queuedWorkflowHash: recoveryFingerprint(workflow),
+      ...(recovery.integrationOnly ? { keepValidationCycle: previous.validationCycle ?? null } : {}) };
     const answers = recovery.qualityAction?.answers ?? [];
     const qualityAnswers = [...(previous.qualityAnswers || []), ...answers.map(answer => ({ ...answer,
       ...(recovery.stage === 'reviewer' ? { reviewerDispatchId: recovery.qualityAction.dispatchId } : { qaDispatchId: recovery.qualityAction.dispatchId }),
       candidateSnapshot: recovery.integrationValidation.candidateSnapshot }))];
-    const job = { ...previous, state: 'queued', error: null, nextAttemptAt: null, validationCycle: recovery.id, livenessResume: marker, workflow,
+    const job = { ...previous, state: 'queued', error: null, nextAttemptAt: null, livenessResume: marker, workflow,
+      ...(recovery.integrationOnly ? {} : { validationCycle: recovery.id }),
       ...(answers.length ? { qualityAnswers } : {}),
       workflowHistory: [...(previous.workflowHistory || []), { ...previous.workflow, attempt: previous.attempts, savedAt: stamp(), recoveryId: recovery.id, originalWorkflowHash: recovery.originalWorkflowHash }],
       livenessRecoveryHistory: [...(previous.livenessRecoveryHistory || []), marker] };

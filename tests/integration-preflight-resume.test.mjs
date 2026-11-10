@@ -9,6 +9,7 @@ import { saveStageReport } from '../orca-evidence.mjs';
 import { inspectRecoveryDispatch } from '../panel/dispatch-recovery.mjs';
 import { effectFreeIntegrationRecord, inspectEffectFreeIntegration } from '../integration-recovery.mjs';
 import { pullRequestIdentityFields } from '../github-integration.mjs';
+import { runOrca } from '../orca-provider.mjs';
 
 // Improvement 29 (D4) and F14: a `gh` failure in validation_approved, before any
 // commit, push or PR, must be resumable in the same attempt and must not pin the
@@ -30,7 +31,8 @@ function delivery(job, stage) {
     approval: ['qa', 'reviewer'].includes(stage) ? 'approved' : 'not_applicable', summary: `${stage} completed.`,
     acceptance: job.contract.acceptance.map(criterion => ({ criterion, status: 'passed', evidence: 'Fixture verified.' })), evidence: ['Fixture evidence.'], questions: [], decisions: [] };
 }
-const effectFree = (job, record) => ({ kind: 'effect_free_integration', jobId: job.id, receiptId: record.receiptId, phase: record.phase ?? null, openPullRequests: 0 });
+const effectFree = (job, record) => ({ kind: 'effect_free_integration', jobId: job.id, receiptId: record.receiptId, phase: record.phase ?? null, openPullRequests: 0,
+  repository: 'fixture/repo', sourceBranch: 'feature', baseBranch: 'main', headSha: SHA.local, remoteSourceSha: SHA.local, remoteBaseSha: SHA.base });
 
 // Runs the pipeline to a sealed validation and then fails the integration the way
 // orca-provider does when gh fails before preflight_complete (job 7 of EOC-E2E-01).
@@ -45,13 +47,13 @@ async function fixture(t, { workspaceName = 'fixture', id = 'preflight-job', rec
     title: 'Integrar tras aprobación', prompt: 'Complete the fixture acceptance.', contract: { acceptance: ['Complete the fixture acceptance.'] }, workspace, isolated: true, branch: 'feature', destination, maxAttempts: 2,
     coordination: { requestId: 'coord-preflight001', runId, senderId, business: 'agency' } });
   await createAutoRunner(root, { verify, worker: async (job, ctx) => {
-    let developer;
+    const artifacts = {};
     for (const stage of ['ux', 'developer', 'qa', 'reviewer']) {
       const value = delivery(job, stage);
       await ctx.reportStage({ key: stage, status: 'running', ...identity(stage), attempt: 1 });
       const artifact = await saveStageReport(root, { ...value, workerState: 'succeeded' }, JSON.stringify(value), value);
+      artifacts[stage] = artifact;
       if (stage === 'developer') {
-        developer = artifact;
         await persistIntegration(root, { jobId: job.id, receiptId: job.autoIntent.receiptId, repository: 'fixture/repo', sourceBranch: 'feature', baseBranch: 'main',
           phase: 'validation_pending', status: 'validating', needsAttention: false, error: null,
           validation: { version: 1, snapshot, attempt: 1, cycleId: 'attempt-1', jobId: job.id, receiptId: job.autoIntent.receiptId, runId, workspace, branch: job.branch,
@@ -63,7 +65,7 @@ async function fixture(t, { workspaceName = 'fixture', id = 'preflight-job', rec
     const sealed = await readAutoRun(root);
     const record = sealed.integrations[job.autoIntent.receiptId];
     await persistIntegration(root, { ...record, phase: 'validation_approved', status: 'validated',
-      validation: { ...record.validation, approvedAt: new Date().toISOString(), approvals: Object.fromEntries(['qa', 'reviewer'].map(stage => [stage, { taskId: identity(stage).taskId, dispatchId: identity(stage).dispatchId, artifactSha256: job.workflow.steps.find(step => step.key === stage)?.artifact?.sha256 ?? null }])) } });
+      validation: { ...record.validation, approvedAt: new Date().toISOString(), approvals: Object.fromEntries(['qa', 'reviewer'].map(stage => [stage, { taskId: identity(stage).taskId, dispatchId: identity(stage).dispatchId, artifactSha256: artifacts[stage].sha256 }])) } });
     await ctx.reportStage({ key: 'integration', status: 'running', summary: 'Revisión aprobada; preparando preflight de integración.' });
     // gh fails on `pr list` (unknown JSON field baseRefOid): no preflight_complete, commit_intent or later phase was saved.
     await persistIntegration(root, { jobId: job.id, receiptId: job.autoIntent.receiptId, status: 'needs_attention', needsAttention: true, error: ghError });
@@ -77,8 +79,10 @@ async function fixture(t, { workspaceName = 'fixture', id = 'preflight-job', rec
     const stage = ['ux', 'developer', 'qa', 'reviewer'].find(key => identity(key).dispatchId === dispatchId); assert.ok(stage, dispatchId);
     return { ...identity(stage), state: 'succeeded', liveness: 'exited', workspace };
   };
-  const inspect = async expected => inspectRecoveryDispatch(root, (await loadState(root)).jobs[0], expected, { command, captureSnapshot: async () => snapshot });
-  const recover = options => recoverKnownDispatchReceipt(root, sent.job.id, { confirm: true, verify, inspectDispatch: inspect, inspectIntegrationEffects: async (_root, job, record) => effectFree(job, record), ...options });
+  // `current` is the checkout snapshot Orca observes now; `snapshot` is the one QA and Revisión approved.
+  const inspectWith = current => async expected => inspectRecoveryDispatch(root, (await loadState(root)).jobs[0], expected, { command, captureSnapshot: async () => current });
+  const inspect = inspectWith(snapshot);
+  const recover = (options = {}, { current = snapshot } = {}) => recoverKnownDispatchReceipt(root, sent.job.id, { confirm: true, verify, inspectDispatch: inspectWith(current), inspectIntegrationEffects: async (_root, job, record) => effectFree(job, record), ...options });
   const before = (await loadState(root)).jobs[0];
   assert.equal(before.state, 'needs_attention'); assert.equal(before.error.code, 'github_integration_needs_attention'); assert.equal(before.attempts, 1);
   const record = (await readAutoRun(root)).integrations[sent.receipt.id];
@@ -86,13 +90,15 @@ async function fixture(t, { workspaceName = 'fixture', id = 'preflight-job', rec
   return { root, workspace, destination, verify, recover, before, record, jobId: sent.job.id, receiptId: sent.receipt.id, lockPath: path.join(workspace, '.git', 'centro-executor.lock') };
 }
 
-test('a gh failure in validation_approved without effects resumes in the same attempt once the remote confirms no commit, push or PR', async t => {
+test('a gh failure in validation_approved whose files changed since the approval revalidates QA and Revisión in the same attempt', async t => {
   const f = await fixture(t);
   const seen = [];
+  const changed = 'b'.repeat(64);
   const queued = await f.recover({ inspectIntegrationEffects: async (root, job, record, options) => {
     seen.push({ root, jobId: job.id, phase: record.phase, historyTypes: options.history.map(item => item.type) });
     return effectFree(job, record);
-  } });
+  } }, { current: changed });
+  assert.equal(queued.livenessResume.integrationOnly, undefined); assert.match(queued.validationCycle, /^[a-f0-9]{64}$/);
   assert.equal(seen.length, 1); assert.equal(seen[0].root, f.root); assert.equal(seen[0].jobId, f.jobId); assert.equal(seen[0].phase, 'validation_approved');
   assert.ok(seen[0].historyTypes.includes('github_integration'));
   assert.equal(queued.state, 'queued'); assert.equal(queued.attempts, 1);
@@ -103,17 +109,78 @@ test('a gh failure in validation_approved without effects resumes in the same at
   const auto = await readAutoRun(f.root);
   assert.equal(auto.receipts[0].status, 'pending'); assert.equal(auto.receipts[0].dispatchRecovery.integrationEffects.kind, 'effect_free_integration');
   assert.equal(auto.integrations[f.receiptId].phase, 'validation_pending'); assert.equal(auto.integrations[f.receiptId].manifest, undefined);
+  assert.equal(auto.integrations[f.receiptId].validationCandidateSnapshot, changed);
   assert.equal(auto.receipts[0].integrationRecoveryHistory[0].originalRecord.phase, 'validation_approved');
   await assert.rejects(fs.access(f.lockPath), { code: 'ENOENT' });
   // Idempotent replay: the ready recovery neither inspects Orca nor the remote again.
   await f.recover({ inspectDispatch: async () => assert.fail('ready recovery must not inspect'), inspectIntegrationEffects: async () => assert.fail('ready recovery must not re-check effects') });
   let admitted = 0;
-  await createAutoRunner(f.root, { verify: f.verify, captureSnapshot: async () => snapshot, worker: async job => {
+  await createAutoRunner(f.root, { verify: f.verify, captureSnapshot: async () => changed, worker: async job => {
     admitted++; assert.equal(job.attempts, 1); assert.equal(job.livenessResume.phase, 'consumed');
     return { text: 'Revalidación e integración completadas.' };
   } }).tick();
   assert.equal(admitted, 1);
   assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded');
+});
+
+test('the same approved snapshot resumes only the integration: QA and Revisión are kept, no new dispatch, approvals intact', async t => {
+  const f = await fixture(t);
+  const queued = await f.recover();
+  assert.equal(queued.state, 'queued'); assert.equal(queued.attempts, 1);
+  assert.equal(queued.livenessResume.mode, 'same_attempt_integration_validation'); assert.equal(queued.livenessResume.integrationOnly, true);
+  assert.equal(queued.livenessResume.keepValidationCycle, null); assert.equal(queued.validationCycle, undefined);
+  for (const stage of ['ux', 'developer', 'qa', 'reviewer']) assert.deepEqual(queued.workflow.steps.find(item => item.key === stage), f.before.workflow.steps.find(item => item.key === stage));
+  const integration = queued.workflow.steps.find(item => item.key === 'integration');
+  assert.equal(integration.status, 'queued'); assert.equal(integration.taskId, undefined); assert.equal(queued.workflow.currentStage, 'integration');
+  const auto = await readAutoRun(f.root);
+  const record = auto.integrations[f.receiptId];
+  assert.equal(record.phase, 'validation_approved'); assert.equal(record.status, 'validated'); assert.equal(record.error, null); assert.equal(record.integrationRecoveryId, queued.livenessResume.id);
+  assert.deepEqual(record.validation.approvals, f.record.validation.approvals); assert.equal(record.validation.snapshot, snapshot);
+  assert.match(auto.receipts[0].reason, /no se repiten esas etapas/);
+  await assert.rejects(fs.access(f.lockPath), { code: 'ENOENT' });
+  // Admission refuses a kept record that no longer matches the approved snapshot or lost its approvals; nothing is admitted or consumed.
+  for (const tamper of [value => { value.validation.snapshot = 'f'.repeat(64); }, value => { delete value.validation.approvals.reviewer; }, value => { value.status = 'needs_attention'; }]) {
+    await patchAuto(f.root, state => { tamper(state.integrations[f.receiptId]); });
+    await createAutoRunner(f.root, { verify: f.verify, captureSnapshot: async () => snapshot, worker: async () => assert.fail('a tampered record must not be admitted') }).tick();
+    const blocked = await readAutoRun(f.root);
+    assert.equal(blocked.receipts[0].status, 'blocked'); assert.match(blocked.receipts[0].reason, /no coincide con su recibo/);
+    assert.equal((await loadState(f.root)).jobs[0].state, 'queued');
+    await patchAuto(f.root, state => { state.integrations[f.receiptId] = record; state.receipts[0].status = 'pending'; delete state.receipts[0].blockCode; });
+  }
+  // Real provider on re-admission: no worker-start at all; QA and Revisión come from their saved reports; integrate sees the original approvals.
+  const command = async args => {
+    if (args[0] === 'repo' && args[1] === 'list') return { repos: [{ path: f.workspace }] };
+    if (args[1] === 'run-show') return { run: { id: runId, coordinator_handle: senderId } };
+    if (args[0] === 'terminal') return { terminal: { handle: senderId, connected: true, writable: true } };
+    assert.fail('No native command may start or inspect a worker: ' + args.join(' '));
+  };
+  let integrations = 0;
+  await createAutoRunner(f.root, { verify: f.verify, captureSnapshot: async () => snapshot,
+    worker: (job, ctx) => runOrca(job, ctx, { command, verifyDestination: f.verify, captureSnapshot: async () => snapshot,
+      integrate: async (job, _ctx, options) => {
+        integrations++; assert.equal(job.attempts, 1); assert.equal(job.integrationSnapshot, snapshot);
+        assert.equal(options.previous.phase, 'validation_approved'); assert.equal(options.previous.status, 'validated');
+        assert.deepEqual(options.previous.validation.approvals, f.record.validation.approvals);
+        assert.equal(options.previous.validation.approvals.qa.dispatchId, identity('qa').dispatchId);
+        await options.persist({ ...options.previous, phase: 'complete', status: 'completed' }); return { phase: 'complete' };
+      } }) }).tick();
+  const finished = (await loadState(f.root)).jobs[0];
+  assert.equal(finished.state, 'succeeded', JSON.stringify(finished.error)); assert.equal(integrations, 1); assert.equal(finished.attempts, 1);
+  for (const stage of ['qa', 'reviewer']) assert.equal(finished.workflow.steps.find(item => item.key === stage).dispatchId, identity(stage).dispatchId);
+  assert.equal(finished.livenessResume.phase, 'consumed');
+});
+
+test('without a verifiable remote base, or when the snapshot differs, the approved record is not resumed integration-only', async t => {
+  const f = await fixture(t);
+  // (c) The remote base must be verifiable: a proof without it falls back to revalidation.
+  const noBase = await f.recover({ inspectIntegrationEffects: async (_root, job, record) => ({ ...effectFree(job, record), remoteBaseSha: undefined }) });
+  assert.equal(noBase.livenessResume.integrationOnly, undefined); assert.equal(noBase.workflow.steps.find(item => item.key === 'qa').status, 'queued');
+  assert.equal((await readAutoRun(f.root)).integrations[f.receiptId].phase, 'validation_pending');
+  const g = await fixture(t, { workspaceName: 'other', id: 'preflight-job-2', receiptId: 'receipt-preflight-2' });
+  // (a) A different snapshot revalidates even though the record is approved and effect-free.
+  const differing = await g.recover({}, { current: 'c'.repeat(64) });
+  assert.equal(differing.livenessResume.integrationOnly, undefined); assert.match(differing.validationCycle, /^[a-f0-9]{64}$/);
+  assert.equal(differing.workflow.steps.find(item => item.key === 'reviewer').status, 'queued');
 });
 
 test('a remote that cannot confirm the absence of effects, or a record with effects, keeps the integration blocked and the lock in place', async t => {
