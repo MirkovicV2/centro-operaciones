@@ -1048,8 +1048,9 @@ export function settledOrcaObservation(job, code = job?.error?.code) {
   if (code === 'delivery_invalid' && ['qa', 'reviewer'].includes(step.key) && step.status === 'blocked' && step.error === code
     && step.dispatchSettled === true && step.dispatchStatus === 'completed' && step.artifact && !step.delivery) return step;
   if (step.artifact) return null;
-  // An executor interruption leaves the exact developer dispatch blocked; recovery observes that same dispatch.
-  if (code === 'interrupted' && step.key === 'developer' && step.status === 'blocked' && step.error === code) return step;
+  // An executor interruption leaves the exact dispatch of Development, QA or Revisión blocked; recovery
+  // observes that same dispatch in the same attempt (D3; QA and Revisión also keep the sealed validation).
+  if (code === 'interrupted' && ['developer', 'qa', 'reviewer'].includes(step.key) && step.status === 'blocked' && step.error === code) return step;
   if (code === 'orca_response_too_large' && step.dispatchStatus === 'awaiting_exit'
     && (step.status === 'running' && !step.error || step.status === 'blocked' && step.error === code)) return step;
   if (code === 'orca_dispatch_status_unknown' && step.status === 'blocked' && step.dispatchStatus === 'unknown'

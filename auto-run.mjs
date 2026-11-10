@@ -276,6 +276,10 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
               if (sameAttempt) {
                 if (entry.dispatchRecovery?.phase !== 'ready' || entry.dispatchRecovery.id !== job.livenessResume.id) throw new Error('La recuperación ya se consumió o cambió antes de admitirla.');
                 assertRecoveryCheckpoint(job, entry.dispatchRecovery);
+                if (entry.dispatchRecovery.integrationRecordHash && entry.dispatchRecovery.mode === 'same_attempt_liveness'
+                  && recoveryFingerprint(current.integrations?.[entry.id]) !== entry.dispatchRecovery.integrationRecordHash) {
+                  throw new Error('La validación sellada cambió antes de reanudar la etapa de calidad.');
+                }
                 if (entry.dispatchRecovery.mode === 'same_attempt_integration_validation') {
                   const record = current.integrations?.[entry.id];
                   const candidate = entry.dispatchRecovery.integrationValidation.candidateSnapshot;
@@ -655,6 +659,20 @@ async function recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, 
       if (job.kind === 'code') {
         const destination = await verify(root, job, { requireClean: recovery.stage === 'ux' && !decidedStep });
         assertRecoveryDestination(recovery.destination, destination);
+      }
+      // D3 for QA and Revisión: the interrupted quality stage resumes over the exact candidate that the
+      // sealed pre-QA validation recorded; a changed record or checkout refuses before releasing the lock.
+      if (observation && observationError === 'interrupted' && ['qa', 'reviewer'].includes(recovery.stage) && job.autoIntent?.eligible === true) {
+        const saved = integrationRecord?.validation, developer = job.workflow.steps.find(item => item.key === 'developer');
+        if (integrationRecord?.phase !== 'validation_pending' || integrationRecord.status !== 'validating' || integrationRecord.commitSha || integrationRecord.manifest
+          || !/^[a-f0-9]{64}$/.test(saved?.snapshot || '') || saved.approvals || saved.jobId !== job.id || saved.receiptId !== receipt.id
+          || saved.attempt !== job.attempts || saved.runId !== job.workflow.runId || saved.cycleId !== (job.validationCycle || `attempt-${job.attempts}`)
+          || saved.developerTaskId !== developer?.taskId || saved.developerDispatchId !== developer?.dispatchId || saved.developerArtifactSha256 !== developer?.artifact?.sha256
+          || resuming && recoveryFingerprint(integrationRecord) !== prior.integrationRecordHash) {
+          throw new Error('La validación sellada antes de QA no corresponde a la etapa interrumpida; no se reanuda.');
+        }
+        if (await captureSnapshot(job.workspace) !== saved.snapshot) throw new Error('Los archivos cambiaron desde la validación sellada antes de QA.');
+        recovery.integrationRecordHash = recoveryFingerprint(integrationRecord);
       }
       if (job.kind === 'code' && (uxReturn || decidedStep)) {
         const snapshot = await captureSnapshot(job.workspace);
