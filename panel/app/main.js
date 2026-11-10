@@ -5,6 +5,7 @@ import { api, attentionItems } from './domain.js';
 import * as views from './views.js';
 import { requests, openNewJob } from './views-requests.js';
 import { projects, settings } from './views-ops.js';
+import { ideas } from './views-ideas.js';
 
 const $ = selector => document.querySelector(selector);
 const store = { get: (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }, set: (key, value) => { try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch {} } };
@@ -17,7 +18,7 @@ const ROUTES = {
   trabajos: { title: 'Trabajos', icon: 'jobs', view: views.jobs },
   historial: { title: 'Historial', icon: 'history', view: views.history },
   proyectos: { title: 'Proyectos', icon: 'projects', group: 'Operaciones', view: projects },
-  ideas: { title: 'Ideas y preguntas', icon: 'ideas', view: views.classic('Ideas y preguntas', '#ideas', 'La captura de ideas y la bandeja de preguntas llegarán en la siguiente entrega. Las preguntas pendientes ya se pueden responder desde Atención.') },
+  ideas: { title: 'Ideas y preguntas', icon: 'ideas', view: ideas },
   conocimiento: { title: 'Conocimiento', icon: 'knowledge', view: views.classic('Conocimiento', '#conocimiento', 'El mapa de notas de Obsidian llegará en la siguiente entrega del panel nuevo.') },
   dominios: { title: 'Dominios', icon: 'domains', view: views.classic('Dominios', '#dominios', 'El inventario de dominios llegará en la siguiente entrega del panel nuevo.') },
   ajustes: { title: 'Ajustes', icon: 'settings', view: settings },

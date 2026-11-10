@@ -10,10 +10,11 @@ const labels = { queued: 'Pendiente', pending: 'Pendiente', running: 'En curso',
 const store = { get: key => { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } }, set: (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} } };
 
 // Same as the classic panel: a retry of the same content reuses its operation id, so nothing is sent twice.
-export function stableOperation(namespace, signature) {
+export function stableOperation(namespace, signature, retiredId) {
   const key = `operations-${namespace}`;
   const operations = store.get(key) || {};
-  const id = operations[signature] || crypto.randomUUID();
+  const previous = operations[signature];
+  const id = previous && previous !== retiredId ? previous : crypto.randomUUID();
   operations[signature] = id; store.set(key, operations);
   return id;
 }

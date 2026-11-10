@@ -486,3 +486,44 @@ a.srcline.link:hover{color:var(--text)}
 }
 a.setnav{display:flex;align-items:center;text-decoration:none}
 @media (max-width:760px){.toolbar{overflow-x:auto;scrollbar-width:none}.toolbar>*{flex:none}.toolbar .spacer{flex:1 0 8px}}
+
+/* ---- Ideas y preguntas */
+.qrow .grow{gap:2px}.qrow .t{font-weight:550;color:var(--text)}.qrow .m{font-size:12px;color:var(--text3)}
+.qanswer textarea{flex:1;font:inherit;color:var(--text);background:var(--raised);border:0;box-shadow:inset 0 0 0 1px var(--line2);border-radius:8px;padding:7px 10px;resize:vertical;min-height:34px}
+.qanswer textarea:focus{outline:2px solid var(--accent);outline-offset:0}
+.qanswer .btn{align-self:flex-start}
+.sech.gap{margin-top:28px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.chipsel{font:inherit;font-size:12px;font-weight:500;color:var(--text2);background:var(--chip);border:0;border-radius:7px;height:26px;padding:0 6px;max-width:160px}
+.chipsel:focus{outline:2px solid var(--accent)}
+.row.tall{align-items:flex-start;min-height:46px}
+.row .t.wrap,.row .m.wrap{white-space:normal}
+.row.dimmed{opacity:.6}
+details.idea{border-bottom:1px solid var(--line)}
+details.idea>summary{list-style:none;cursor:pointer;min-height:48px;border-radius:8px}
+details.idea>summary::-webkit-details-marker{display:none}
+details.idea[open]>summary .t{white-space:normal}
+.ideabody{padding:2px 0 16px 23px;display:flex;flex-direction:column;gap:8px}
+.ideabody .prose{white-space:pre-wrap;margin:0;color:var(--text)}
+.panel.wide{width:340px}
+.stackbtn{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+.btn.center{justify-content:center}
+.seg.radios{flex-wrap:wrap}
+.seg.radios label.segbtn{display:inline-flex;align-items:center;cursor:pointer;font-weight:500;font-size:12px;color:var(--text2)}
+.seg.radios input{position:absolute;opacity:0;pointer-events:none}
+.seg.radios label.segbtn:has(input:checked){background:var(--raised);color:var(--text);box-shadow:0 0 0 .5px var(--line2),0 1px 2px rgba(0,0,0,.08)}
+.seg.radios label.segbtn:has(input:focus-visible){outline:2px solid var(--accent)}
+@media (max-width:1200px){.panel.wide{display:block;width:300px}}
+@media (max-width:760px){
+  .sidefoot{display:contents}
+  .sidefoot>:not(.nav){display:none}
+  .sidefoot .nav{margin:0;width:auto}
+  .body:has(.panel.wide){flex-direction:column;overflow:auto}
+  .body:has(.panel.wide)>.scroll{overflow:visible;flex:none}
+  .panel.wide{width:auto;border-left:0;border-top:1px solid var(--line);padding-bottom:90px}
+  .chips{margin-left:0}
+}
+.form .seg.radios label.segbtn{flex-direction:row;padding:4px 11px;font-size:12px;gap:0}
+.sech:has(.chips){height:auto;min-height:34px;flex-wrap:wrap;padding-bottom:6px}
+@media (max-width:760px){.qanswer{flex-direction:column}.qanswer textarea{width:100%}.chips .chipsel{max-width:none;flex:1 1 40%}.chips{width:100%}}
+.seg.radios label.segbtn{position:relative}.sheet-body{overflow-x:hidden}
