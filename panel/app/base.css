@@ -527,3 +527,27 @@ details.idea[open]>summary .t{white-space:normal}
 .sech:has(.chips){height:auto;min-height:34px;flex-wrap:wrap;padding-bottom:6px}
 @media (max-width:760px){.qanswer{flex-direction:column}.qanswer textarea{width:100%}.chips .chipsel{max-width:none;flex:1 1 40%}.chips{width:100%}}
 .seg.radios label.segbtn{position:relative}.sheet-body{overflow-x:hidden}
+
+/* ---- Conocimiento y Dominios */
+.graphwrap{display:flex;flex-direction:column;padding:20px 24px}
+.graphwrap .graph{flex:1;min-height:420px;display:flex}
+.graphwrap .graph svg{flex:1;display:block}
+.gnode circle{fill:var(--text3);stroke:var(--sunk);stroke-width:1.5;transition:opacity .15s}
+.gnode.g-idea circle{fill:var(--warn)}.gnode.g-trabajo circle{fill:var(--accent)}
+.gnode:hover circle,.gnode:focus circle{stroke:var(--text);stroke-width:2}
+.gnode:focus{outline:none}
+.gnode.hit circle{stroke:var(--accentfg);stroke-width:3}
+.gnode.faded{opacity:.25}
+.gleg.g-nota{background:var(--text3)}.gleg.g-idea{background:var(--warn)}.gleg.g-trabajo{background:var(--accent)}
+.ph.top,.hint.top{margin-top:20px}
+.srcline.mb{margin-bottom:12px}
+.notes{display:flex;flex-direction:column}
+.notes a{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);color:var(--text);font-size:12.5px;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.notes a:hover{color:var(--accentfg)}
+.notes a span{color:var(--text3);font-size:11.5px}
+.phead.dom,.prow.dom{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) 120px 140px}
+.mono.strong{color:var(--text);font-size:12.5px}
+.feed.flush{margin-top:0}
+@media (max-width:760px){.graphwrap .graph{min-height:320px}.phead.dom{display:none}.prow.dom{grid-template-columns:minmax(0,1fr) auto}}
+.phead{margin:0 -10px;width:calc(100% + 20px)}
+.graphwrap .graph{flex:none;min-height:0;display:block}.graphwrap .graph svg{width:100%;height:auto;max-height:calc(100vh - 110px)}

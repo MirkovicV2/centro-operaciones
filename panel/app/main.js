@@ -6,6 +6,7 @@ import * as views from './views.js';
 import { requests, openNewJob } from './views-requests.js';
 import { projects, settings } from './views-ops.js';
 import { ideas } from './views-ideas.js';
+import { knowledge, domains } from './views-knowledge.js';
 
 const $ = selector => document.querySelector(selector);
 const store = { get: (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }, set: (key, value) => { try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch {} } };
@@ -19,8 +20,8 @@ const ROUTES = {
   historial: { title: 'Historial', icon: 'history', view: views.history },
   proyectos: { title: 'Proyectos', icon: 'projects', group: 'Operaciones', view: projects },
   ideas: { title: 'Ideas y preguntas', icon: 'ideas', view: ideas },
-  conocimiento: { title: 'Conocimiento', icon: 'knowledge', view: views.classic('Conocimiento', '#conocimiento', 'El mapa de notas de Obsidian llegará en la siguiente entrega del panel nuevo.') },
-  dominios: { title: 'Dominios', icon: 'domains', view: views.classic('Dominios', '#dominios', 'El inventario de dominios llegará en la siguiente entrega del panel nuevo.') },
+  conocimiento: { title: 'Conocimiento', icon: 'knowledge', view: knowledge },
+  dominios: { title: 'Dominios', icon: 'domains', view: domains },
   ajustes: { title: 'Ajustes', icon: 'settings', view: settings },
 };
 const ALIASES = { trabajo: 'trabajos', inicio: 'overview' };
@@ -110,7 +111,7 @@ function render(force = true) {
   const openDetails = new Set([...document.querySelectorAll('details[data-key][open]')].map(node => node.dataset.key));
   const scroll = [...document.querySelectorAll('.scroll')].map(node => node.scrollTop);
   const focusedId = document.activeElement?.id;
-  const draft = $('#answer')?.value; const askDraft = $('#ask')?.value; const searchCaret = document.activeElement?.id === 'project-search' ? document.activeElement.selectionStart : null;
+  const draft = $('#answer')?.value; const askDraft = $('#ask')?.value; const searchCaret = ['project-search', 'note-search'].includes(document.activeElement?.id) ? document.activeElement.selectionStart : null;
   const app = $('#app');
   let screen;
   if (!data) screen = { toolbar: [h('h1', { text: ROUTES[key].title })], body: h('div', { class: 'body' }, h('div', { class: 'scroll' }, h('div', { class: 'col' }, h('div', { class: 'empty' }, h('b', { text: state.error ? 'No se pudo leer el estado del panel.' : 'Leyendo el estado…' }), state.error ? ` ${state.error}` : '')))) };
