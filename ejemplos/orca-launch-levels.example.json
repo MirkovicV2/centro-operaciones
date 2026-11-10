@@ -1,5 +1,5 @@
 {
-  "_comentario": "Copia este archivo a data/orca-launch-levels.json (no versionado). Niveles por rol: ligero, estandar, profundo. Cada agente traduce el nivel a --model/--effort de worker-start. Sin este archivo, Codex usa exactamente los valores actuales y Claude no recibe flags.",
+  "_comentario": "Copia este archivo a data/orca-launch-levels.json (no versionado). Niveles por rol: ligero, estandar, profundo. Cada agente traduce el nivel a --model/--effort de worker-start. Sin este archivo, Codex usa exactamente los valores actuales y Claude no recibe flags. Opcional: projects.<id>.roles fija niveles para un proyecto concreto; un encargo puede elegir modelo y esfuerzo por rol con launch (ver docs/UBUNTU_CLAUDE.md).",
   "roles": {
     "planificador": "profundo",
     "ux": "estandar",
@@ -9,14 +9,37 @@
   },
   "agents": {
     "codex": {
-      "ligero": { "model": "gpt-6.1-sol", "effort": "low" },
-      "estandar": { "model": "gpt-6.1-sol", "effort": "medium" },
-      "profundo": { "model": "gpt-6-luna", "effort": "high" }
+      "ligero": {
+        "model": "gpt-6.1-sol",
+        "effort": "low"
+      },
+      "estandar": {
+        "model": "gpt-6.1-sol",
+        "effort": "medium"
+      },
+      "profundo": {
+        "model": "gpt-6-luna",
+        "effort": "high"
+      }
     },
     "claude": {
-      "ligero": { "model": "haiku" },
-      "estandar": { "model": "sonnet" },
-      "profundo": { "model": "opus", "effort": "high" }
+      "ligero": {
+        "model": "haiku"
+      },
+      "estandar": {
+        "model": "sonnet"
+      },
+      "profundo": {
+        "model": "opus",
+        "effort": "high"
+      }
+    }
+  },
+  "projects": {
+    "ID_DEL_PROYECTO": {
+      "roles": {
+        "revisor": "profundo"
+      }
     }
   }
 }
