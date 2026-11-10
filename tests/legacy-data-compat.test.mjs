@@ -12,7 +12,7 @@ import { validateDelivery } from '../workflow-contract.mjs';
 import { loadDashboardState } from '../panel/agency-assistant/dashboard-state.mjs';
 
 // Rule 2 of EOC-CLAUDE-01: the owner's real data predates every field added by this
-// branch (actor, finishedAtSource, criterionId, error.details, tailscale users,
+// branch (actor, criterionId, error.details, tailscale users,
 // launchLevel, surface, integrationEffects). A ledger, snapshot, auto-run journal and
 // bindings in that format must load and drive the queue and the panel unchanged.
 const T = '2026-11-09T22:';

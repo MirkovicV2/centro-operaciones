@@ -322,10 +322,6 @@ test('a developer interrupted while really running records its segment and resum
   const running = (await loadState(root)).jobs[0];
   assert.equal(running.state, 'running');
   assert.equal(running.attemptHistory?.length ?? 0, 0);
-  // The executor was alive when it persisted the developer start; that event bounds the segment.
-  const persisted = (await fs.readFile(path.join(data, 'events.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
-  const lastEventAt = persisted.filter(event => event.patch?.jobs?.some(item => item.id === running.id)).at(-1).at;
-  assert.ok(Number.isFinite(Date.parse(lastEventAt)));
 
   let calls = 0;
   await createAutoRunner(root, { verify, worker: async () => { calls++; } }).tick();
@@ -338,10 +334,9 @@ test('a developer interrupted while really running records its segment and resum
   assert.equal(segment.error, 'interrupted');
   assert.ok(Number.isFinite(segment.elapsedMs) && segment.elapsedMs >= 0);
   assert.equal(segment.startedAt, running.startedAt);
-  assert.equal(segment.finishedAt, lastEventAt);
-  assert.equal(segment.finishedAtSource, 'last_persisted_event');
-  assert.equal(segment.elapsedMs, Date.parse(lastEventAt) - Date.parse(running.startedAt));
-  assert.ok(Date.parse(interrupted.finishedAt) >= Date.parse(segment.finishedAt));
+  // The worker may keep running in Orca while the executor is down: the segment ends at detection.
+  assert.equal(segment.finishedAt, interrupted.finishedAt);
+  assert.equal(segment.elapsedMs, Date.parse(interrupted.finishedAt) - Date.parse(running.startedAt));
 
   await recoverKnownDispatchReceipt(root, sent.job.id, { confirm: true, verify, inspectDispatch: async () => ({ ...dev, state: 'succeeded', liveness: 'exited' }) });
   const queued = (await loadState(root)).jobs[0];
@@ -373,21 +368,26 @@ test('an interrupted segment without a usable start time keeps the elapsed-time 
   await assert.rejects(f.recover(), /tiempo consumido/);
 });
 
-test('an interrupted segment without a timestamped ledger event falls back to the detection time', async t => {
+test('an interrupted segment ends at detection even when the last persisted event is much older', async t => {
   const f = await fixture(t);
-  const before = Date.now();
+  const startedAt = new Date(Date.now() - 600_000).toISOString();
   await patchJob(f.root, job => {
-    job.state = 'running';
+    job.state = 'running'; job.startedAt = startedAt;
     job.attemptHistory = job.attemptHistory.filter(item => item.attempt !== job.attempts);
     Object.assign(job.workflow.steps.find(step => step.key === 'developer'), { status: 'running', dispatchStatus: 'active', error: null });
   });
+  // Rewind the timestamp of that last event: the outage started ten minutes ago.
+  const ledger = path.join(f.root, 'data', 'events.jsonl');
+  const lines = (await fs.readFile(ledger, 'utf8')).trim().split('\n');
+  lines[lines.length - 1] = JSON.stringify({ ...JSON.parse(lines.at(-1)), at: startedAt });
+  await fs.writeFile(ledger, lines.join('\n') + '\n');
+  const before = Date.now();
   await createAutoRunner(f.root, { verify: f.verify, worker: async () => assert.fail('No worker may start.') }).tick();
   const job = (await loadState(f.root)).jobs[0];
-  assert.equal(job.state, 'needs_attention');
   const segment = job.attemptHistory.at(-1);
   assert.equal(segment.error, 'interrupted');
-  assert.equal(segment.finishedAtSource, 'detection');
   assert.equal(segment.finishedAt, job.finishedAt);
   assert.ok(Date.parse(segment.finishedAt) >= before);
-  assert.equal(segment.elapsedMs, Date.parse(segment.finishedAt) - Date.parse(job.startedAt));
+  assert.ok(segment.elapsedMs >= 600_000, 'the outage counts as consumed time');
+  assert.equal(segment.finishedAtSource, undefined);
 });
