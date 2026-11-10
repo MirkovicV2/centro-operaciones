@@ -40,6 +40,12 @@ Leyenda de las afirmaciones: **verificado** = test ejecutado aquí; **leído** =
 | 11 | Rutas personales en `centro.cmd`, `AGENTS.md` y README | `%USERPROFILE%` + `centro.local.cmd` opcional; texto genérico; test que impide reintroducirlas | `centro.cmd`, `AGENTS.md`, `panel/agency-assistant/README.md`, `.gitignore`, `ejemplos/` | +1 (`no-personal-paths`) | — | **Leído, no ejecutado**: en el equipo del dueño `%USERPROFILE%` resuelve a la misma ruta |
 | Compat. | Datos reales sin campos nuevos | Test que carga ledger/instantánea/`auto-run.json`/bindings antiguos | `tests/legacy-data-compat.test.mjs` | +2 | — | Es la garantía de la regla 2 |
 
+## Validación real con Orca (E2E del 10-11-2026)
+
+**E2E del 10-11-2026 (encargo 9)**: UX → Desarrollo interrumpido y reanudado → QA → Revisión interrumpida y reanudada → Integración reconciliada → merge `b0b9cec` en el repo sandbox, en el intento 1 y con un dispatch por etapa. Evidencia en `.artifacts/e2e-evidencia/hallazgos-sesion3.md`.
+
+Arreglos hechos durante esa prueba (autorizados y con tests y mutación): `9f9a2b4` (liberar checkout de un encargo cerrado a mitad de validación, F14), `de68d9f` (los trabajadores leen su encargo con Read; la plantilla deja de permitir `cat`/`ls` libres), `cdf3f14` (regresión de la mejora 13: 8 comparaciones de repositorio pasan a `sameRepository`; afectaba a datos guardados antes de la rama) y `9c59b9c` (mejora 36: QA y Revisión interrumpidas se reanudan en el mismo intento, como Desarrollo).
+
 ## Qué queda sin hacer y por qué
 
 - **29**: la reanudación «solo integración» exige huella idéntica a la aprobada; con cualquier cambio en el checkout se revalidan QA y Revisión (≈5 min con trabajadores reales). Un job que ya consumió un ciclo de revalidación puede reanudar solo la integración, pero no abrir otro ciclo.
@@ -50,14 +56,20 @@ Leyenda de las afirmaciones: **verificado** = test ejecutado aquí; **leído** =
 - **9**: ejecutar las suites de navegador en CI requiere instalar Playwright y Chromium en el runner (dependencia nueva): queda como propuesta abajo.
 - **Panel**: los cambios de `panel/dashboard.mjs` y `app.js` se han verificado con `node --check`, tests unitarios y lectura; no se arrancó el panel sobre los datos reales de este clon.
 
+- **33 (F15, pendiente de código tras el E2E)**: `/retry-checkout` no puede liberar el lock de un encargo antiguo. Horas después del cierre, Orca devuelve `observation: { status: missing, exactWorker: false }` y `terminal: null`, aunque conserva `projection.liveness: { verdict: exited, source: resource_release }` y el recurso `released` del mismo dispatch (`evidence.durable: true`). `normalizeWorkerStatus` exige observación exacta y da `unverifiable`. Propuesta: para un encargo cancelado y revisado, aceptar como salida la evidencia duradera (veredicto `exited` por liberación del recurso, recurso `released/released` cuyo `ownerDispatchId` y `terminalHandle` son los del dispatch, sin trabajadores vivos de esa Task en `worker-list`), solo en la vía de liberación del checkout. Detectado en el E2E del 10-11-2026 (encargo 9); se resolvió borrando el lock a mano tras repetir las comprobaciones.
+- **38 (R15, alta: pendiente de código y documentación)**: la integración lee `statusCheckRollup`; los check runs requieren el permiso Checks, que un PAT fine-grained no tiene, así que con `GH_TOKEN` fine-grained la integración se detiene tras crear la PR. Documentar que hace falta una sesión de `gh` (keyring) o un token con acceso a checks, y añadir al preflight de `gh` una lectura de checks de solo consulta. Alternativa sin sesión amplia: leer el resultado de la CI por la API de Actions (`actions/runs?head_sha=`, permiso Actions: read disponible en PAT fine-grained) o usar una GitHub App.
+- **39 (R15, pendiente de código)**: el adaptador de `gh` de la integración descarta stderr (solo tipa «Unknown JSON field»), así que un fallo real de `gh` queda como «gh falló o la respuesta fue ambigua». Propuesta: reutilizar `excerpt` y `DestinationError`/detalles acotados de las mejoras 2+15 en `createIntegrationCommandAdapters`.
+- **32 (pendiente)**: si Orca se reinicia, la terminal del coordinador desaparece (`terminal_handle_stale`) y hay que crear otro coordinador y reescribir `data/coordinator-bindings.json` a mano. Propuesta: reconexión guiada desde el panel.
+- **34 (pendiente)**: el trabajador UX envió `worker_done` dos veces en el mismo dispatch. Verificar que el motor es idempotente ante entregas duplicadas y añadir test.
+- **35 (documentación)**: en modo Auto («Approve for me») Claude aprobó un `ls` que no estaba en la lista allow del sandbox: en Auto la lista allow es orientativa y solo `deny` es una barrera dura. Lo crítico debe ir en `deny`.
+- **37 (pendiente)**: opción local para silenciar el aviso del preflight cuando se trabaja en Full access a propósito.
+
 ## Antes de fusionar (comprobaciones del dueño)
 
 1. **`npm test` en Windows.** Las ramas `win32` solo se han verificado por simulación.
 2. **Arrancar la rama sobre una copia de tu `data/` real**, en otro puerto, sin tocar la instalación estable: copia la carpeta del repo con su `data/` a una ruta temporal, cambia a `david/soporte-claude` y ejecuta `CENTRO_OPERATIONS_PORT=4199 node panel/dashboard.mjs` (en PowerShell: `$env:CENTRO_OPERATIONS_PORT=4199; node panel\dashboard.mjs`). Comprueba que Trabajos, Historial, Proyectos, Ideas y recibos muestran lo mismo que hoy y que no aparece ningún error al cargar. `tests/legacy-data-compat.test.mjs` usa datos con la forma de la prueba E2E (Claude, agencia); tus datos reales (Codex, `games`, recuperaciones antiguas, meses de historia) solo se validan así.
 3. **No lanzar trabajos desde esa copia**: la autoejecución debe seguir pausada y el panel en un puerto distinto del habitual.
 4. Revisión independiente (10 nov): el refinamiento de la mejora 27 que cerraba el segmento interrumpido en el último evento persistido era incorrecto (el trabajador sigue ejecutándose en Orca con el panel caído, así que esa marca es una cota inferior del tiempo consumido y permitiría exceder `timeoutMs`). Se revierte a la hora de detección.
-
-- **33 (F15, pendiente de código tras el E2E)**: `/retry-checkout` no puede liberar el lock de un encargo antiguo. Horas después del cierre, Orca devuelve `observation: { status: missing, exactWorker: false }` y `terminal: null`, aunque conserva `projection.liveness: { verdict: exited, source: resource_release }` y el recurso `released` del mismo dispatch (`evidence.durable: true`). `normalizeWorkerStatus` exige observación exacta y da `unverifiable`. Propuesta: para un encargo cancelado y revisado, aceptar como salida la evidencia duradera (veredicto `exited` por liberación del recurso, recurso `released/released` cuyo `ownerDispatchId` y `terminalHandle` son los del dispatch, sin trabajadores vivos de esa Task en `worker-list`), solo en la vía de liberación del checkout. Detectado en el E2E del 10-11-2026 (encargo 9); se resolvió borrando el lock a mano tras repetir las comprobaciones.
 
 ## Tu forma de trabajar no cambia (y cómo volver a ella)
 
