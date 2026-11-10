@@ -5,6 +5,25 @@ const state = { business: ['agency', 'games'].includes(savedBusiness) ? savedBus
 const workflowStatusNames = { queued: 'Pendiente', running: 'En curso', succeeded: 'Completado', blocked: 'Bloqueado', failed: 'Falló', skipped: 'Omitido' };
 const statusNames = { queued: 'En cola', running: 'En marcha', retry_wait: 'Reintento programado', needs_attention: 'Requiere revisión', succeeded: 'Entregado localmente', cancelled: 'Cancelado' };
 const businessNames = { agency: 'Agencia', games: 'Videojuegos' };
+// Appearance: Claro | Oscuro | Sistema. "Sistema" follows the OS; a manual choice is kept in this browser.
+const THEME_KEY = 'operations-theme';
+function applyTheme(choice) {
+  const value = ['light', 'dark'].includes(choice) ? choice : 'system';
+  if (value === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = value;
+  for (const button of document.querySelectorAll('[data-theme-choice]')) button.setAttribute('aria-pressed', String(button.dataset.themeChoice === value));
+  return value;
+}
+let savedTheme = 'system';
+try { savedTheme = localStorage.getItem(THEME_KEY) || 'system'; } catch {}
+applyTheme(savedTheme);
+for (const button of document.querySelectorAll('[data-theme-choice]')) {
+  button.addEventListener('click', () => {
+    const value = applyTheme(button.dataset.themeChoice);
+    try { if (value === 'system') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, value); } catch {}
+  });
+}
+
 const toast = $('#toast');
 let toastTimer;
 
