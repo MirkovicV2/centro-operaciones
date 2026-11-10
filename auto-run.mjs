@@ -7,6 +7,7 @@ import { captureIntegrationSnapshot } from './github-integration.mjs';
 import { inspectCommittedIntegration, inspectEffectFreeIntegration, effectFreeIntegrationRecord } from './integration-recovery.mjs';
 import { replaceLocalFile } from './atomic-file.mjs';
 import { assertQualityAction, queueContractRevisionRetry, recoverableChecksTimeout, uxReturnSource, developerDecisionSource, stageDecisionSource, isPartialStageResume, settledOrcaObservation, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
+import { currentActor } from './queue.mjs';
 import { createContractRevision, assertContractRevisionCheckpoint, assertContractRevisionProof, contractRevisionHash, originalContractRevisionJob } from './contract-revision.mjs';
 
 const location = root => path.join(path.resolve(root), 'data', 'auto-run.json');
@@ -77,7 +78,7 @@ async function writeChange(root, action) {
     await lock.close(); await fs.unlink(`${file}.lock`);
   }
 }
-function audit(state, type, detail) { state.history.push({ at: now(), type, ...detail }); }
+function audit(state, type, detail) { const actor = currentActor(); state.history.push({ at: now(), type, ...(actor ? { actor } : {}), ...detail }); }
 export async function setAutoRun(root, business, enabled, { confirm = false } = {}) {
   businessCheck(business);
   if (!confirm || typeof enabled !== 'boolean') throw new Error('Confirma explícitamente activar o pausar esta empresa.');

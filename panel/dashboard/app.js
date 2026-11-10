@@ -272,6 +272,7 @@ function renderJobs(data) {
       detail.append(workflow);
     }
     if (integration && job.kind === 'code') detail.append(renderIntegration(integration, job, receipt));
+    detail.append(el('p', 'microcopy', `Creado por: ${job.actor || 'desconocido'}`));
     if (job.error?.message) {
       const error = el('p', '', job.error.message);
       error.style.color = '#ffc98a';

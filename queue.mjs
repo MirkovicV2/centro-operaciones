@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as wait } from 'node:timers/promises';
 import { replaceLocalFile } from './atomic-file.mjs';
@@ -34,6 +35,10 @@ const emptyState = () => ({ schema: 1, revision: 0, jobs: [], budget: { limitUsd
 const dir = root => path.join(root, 'data');
 const ledger = root => path.join(dir(root), 'events.jsonl');
 const stamp = () => new Date().toISOString();
+// 7: who acts. The panel and the CLI run their work inside actorContext.run({ actor, role });
+// ledger events and new jobs record the actor when present. Old entries simply lack it.
+export const actorContext = new AsyncLocalStorage();
+export const currentActor = () => { const actor = actorContext.getStore()?.actor; return typeof actor === 'string' && actor.trim() ? actor.trim().slice(0, 200) : undefined; };
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
 const applyEvent = (state, event) => {
   if (event.revision !== state.revision + 1 || event.schema !== 1 || !event.patch) throw new QueueError('Registro de eventos inconsistente: requiere revisión manual.', 'ledger_corrupt');
@@ -82,7 +87,8 @@ function commit(root, state, type, patch = {}, details = {}) {
   return pending;
 }
 async function writeCommit(root, state, type, patch = {}, details = {}) {
-  const event = { schema: 1, revision: state.revision + 1, at: stamp(), type, details, patch };
+  const actor = currentActor();
+  const event = { schema: 1, revision: state.revision + 1, at: stamp(), type, details, patch, ...(actor ? { actor } : {}) };
   const handle = await fs.open(ledger(root), 'a');
   try { await handle.writeFile(JSON.stringify(event) + '\n'); await handle.sync(); } finally { await handle.close(); }
   applyEvent(state, event);
@@ -258,7 +264,8 @@ export async function addJob(root, spec) {
     const provider = spec.provider ?? 'orca';
     const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true);
     const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
-      ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0 };
+      ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0,
+      ...(currentActor() ? { actor: currentActor() } : {}) };
     job.contract = contract;
     if (spec.coordination) job.coordination = jobCoordination(spec.coordination, spec);
     if (continuation) job.continuation = continuation;

@@ -88,6 +88,19 @@ Este proceso vive **solo en este PC**, que debe permanecer encendido y conectado
 
 `PAUSAR.cmd` crea el archivo de pausa. El script separado `mantener-activo.ps1` puede impedir temporalmente la suspensión durante ocho horas mientras Orca está abierto, permitiendo apagar la pantalla; libera esa petición al salir o detectar `data\PAUSE`. No cambia permanentemente la configuración de energía de Windows. El vigilante por sí mismo no modifica la suspensión.
 
+## Acceso para dos personas por Tailscale
+
+El panel escucha solo en `127.0.0.1`. Para compartirlo con otra persona, publica el puerto con Tailscale Serve (HTTPS, sin Funnel) y crea `data/tailscale-access.json` (no versionado). El formato antiguo con una sola cuenta sigue valiendo (`{ "hostname": "equipo.tailnet.ts.net", "login": "cuenta@ejemplo.test" }`, que actúa como `admin`). Para varias cuentas:
+
+```json
+{ "hostname": "equipo.tailnet.ts.net", "users": [
+  { "login": "duenyo@ejemplo.test", "role": "admin" },
+  { "login": "colega@ejemplo.test", "role": "ejecutar" },
+  { "login": "revisor@ejemplo.test", "role": "revisar" } ] }
+```
+
+Una cuenta no listada recibe 403. `revisar` solo consulta; `ejecutar` puede lanzar, reintentar, aprobar y cerrar encargos pero no cambiar la configuración, la autoejecución ni los proyectos; `admin` puede todo. Cada evento del ledger, cada encargo nuevo y cada entrada del historial de autoejecución guardan `actor` (la cuenta de Tailscale, `local` desde este equipo o `cli:<usuario>` desde la CLI). Los registros anteriores no tienen ese campo y el panel los muestra como «desconocido»; el ledger no se reescribe.
+
 ## Verificar sin consumo
 
 ```powershell

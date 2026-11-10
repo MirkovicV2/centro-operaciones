@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import * as fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addJob, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError } from './queue.mjs';
+import { addJob, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError, actorContext } from './queue.mjs';
 import { createWorker } from './providers.mjs';
 import { ORCA_EXE } from './local-tools.mjs';
 import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
@@ -191,7 +192,7 @@ async function main() {
   console.log(JSON.stringify(command === 'reconcile-code' ? reconcileCodeSummary(result) : result, null, 2));
   if (command === 'run' && o.execute && (result.blockedNeedsAttention?.length || result.jobs?.some(job => job.state === 'needs_attention'))) process.exitCode = 2;
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) actorContext.run({ actor: `cli:${os.userInfo().username}`, role: 'admin' }, main).catch(error => {
   // Do not print raw provider bodies, process stderr, environment, or credentials.
   console.error(JSON.stringify({ error: error.code || 'operation_failed', message: error instanceof QueueError ? error.message : 'No se pudo completar la operación local. Comprueba archivos, permisos y opciones.' }));
   process.exitCode = 1;
