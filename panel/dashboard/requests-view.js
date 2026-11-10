@@ -8,6 +8,7 @@
   const roles = { ux: 'Diseño UX', developer: 'Desarrollo', qa: 'QA', reviewer: 'Revisión', planner: 'Análisis' };
   let current = { requestTraces: [], projects: [], questions: [] }, business = '', signature = '';
   const expanded = new Set();
+  let selected = null; // the request shown in full; the rest are one-line rows
   const format = value => value ? new Date(value).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' }) : '';
   const storageRead = key => { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } };
   const store = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
@@ -76,9 +77,18 @@
     return section;
   }
   function card(trace) {
-    const item = make('article', 'request-card'); item.id = `request-${trace.requestId}`;
+    const isOpen = trace.requestId === selected;
+    const item = make('article', `request-card ${isOpen ? 'is-open' : 'is-collapsed'}`); item.id = `request-${trace.requestId}`;
     const header = make('div', 'request-card-header');
-    const identity = make('div'); identity.append(make('p', 'eyebrow', trace.projectName || 'Consulta general · sin proyecto'), make('h3', '', trace.title));
+    const heading = make('h3', '');
+    const toggle = make('button', 'request-toggle', trace.title); toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', String(isOpen)); toggle.setAttribute('aria-controls', item.id);
+    toggle.onclick = () => { selected = isOpen ? null : trace.requestId; renderList(true); document.getElementById(item.id)?.querySelector('.request-toggle')?.focus({ preventScroll: true }); };
+    heading.append(toggle);
+    const track = make('span', 'stage-track'); track.setAttribute('aria-hidden', 'true');
+    for (const step of trace.steps || []) { if (step.status === 'skipped') continue; track.append(make('span', `stage-bar is-${step.status === 'succeeded' || step.status === 'completed' ? 'ok' : step.status === 'running' ? 'active' : ['blocked', 'failed'].includes(step.status) ? 'fail' : 'wait'}`)); }
+    const identity = make('div'); identity.append(make('p', 'eyebrow', trace.projectName || 'Consulta general · sin proyecto'), heading);
+    if (track.children.length) identity.append(track);
     header.append(identity, make('span', `request-state ${done.has(trace.status) ? 'is-done' : attention.has(trace.status) ? 'is-attention' : 'is-active'}`, trace.statusLabel || labels[trace.status] || trace.status));
     item.append(header, make('p', 'request-owner', `Responsable: ${trace.responsible?.name || 'Pendiente de asignación'}`));
     const flow = make('ol', 'request-flow'); flow.setAttribute('aria-label', 'Etapas de la petición');
@@ -136,7 +146,8 @@
     const traces = (current.requestTraces || []).filter(t => (!query || `${t.title} ${t.responsible?.name || ''} ${t.projectName || ''}`.toLocaleLowerCase('es').includes(query))
       && (project === 'all' || (project === 'none' ? !t.projectId : t.projectId === project))
       && (filter === 'all' || filter === 'done' && done.has(t.status) || filter === 'attention' && (attention.has(t.status) || questionsFor(t).some(q => q.status === 'pending')) || filter === 'active' && !done.has(t.status) && !attention.has(t.status)));
-    const next = JSON.stringify([traces, current.questions, query, filter, project]);
+    if (!traces.some(t => t.requestId === selected)) selected = (traces.find(t => attention.has(t.status) || questionsFor(t).some(q => q.status === 'pending')) || traces[0])?.requestId ?? null;
+    const next = JSON.stringify([traces, current.questions, query, filter, project, selected]);
     $('request-count').textContent = String((current.requestTraces || []).filter(t => !done.has(t.status)).length);
     $('request-results').textContent = `${traces.length} ${traces.length === 1 ? 'petición' : 'peticiones'} · el historial se conserva al terminar`;
     if (!force && signature === next) return; signature = next;
