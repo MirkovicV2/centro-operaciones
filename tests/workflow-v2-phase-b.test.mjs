@@ -290,3 +290,18 @@ test('an eligible job waiting for the owner is resumed once, without the pre-dis
   assert.equal((await loadState(root)).jobs.find(item => item.id === sent.job.id).state, 'succeeded');
   await second.tick(); assert.equal(runs, 2, 'nothing runs again');
 });
+
+test('a project can name its virtualenv for V2 checks; it reaches submit as --python-env', async () => {
+  assert.equal(normalizeWorkflowV2(config()).projects.obi.pythonEnv, null);
+  assert.throws(() => normalizeWorkflowV2(config({ pythonEnv: 'relative/venv' })), { code: 'workflow_v2_config_invalid' });
+  const entry = { ...entryB(), pythonEnv: '/home/x/hf/.venv' };
+  const seen = [];
+  const run = async argv => { seen.push(argv); return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify({ task: argv[argv.indexOf('submit') + 1], status: 'pendiente_owner',
+    identity: 'id-1', evidence_id: 'ev-1', reviews: [], steps: [{ unit: 'U1', candidate: C }] }) }; };
+  const job = { id: 'v2b-1', kind: 'code', projectId: 'obi', title: 'x', workflowV2Snapshot: A, workflow: { steps: [{ key: 'reviewer' }] } };
+  await runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, entry, '/tmp/ws', { run }).catch(() => {});
+  assert.deepEqual(seen[0].slice(seen[0].indexOf('--python-env'), seen[0].indexOf('--python-env') + 2), ['--python-env', '/home/x/hf/.venv']);
+  const without = [];
+  await runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, entryB(), '/tmp/ws', { run: async argv => { without.push(argv); return run(argv); } }).catch(() => {});
+  assert.equal(without[0].includes('--python-env'), false);
+});
