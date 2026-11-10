@@ -28,8 +28,11 @@ test('the permissions template allows what a worker needs and denies effects, ot
   assert.ok(!text.includes('/home/') && !text.includes('C:\\\\'), 'the template carries placeholders, not personal paths');
 });
 
-test('the dispatch brief and the spec ask for one simple command per call and a single curl for the context query', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-brief-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+async function captureBriefs(t, agent) {
+  const previous = process.env.CENTRO_ORCA_AGENT;
+  if (agent === undefined) delete process.env.CENTRO_ORCA_AGENT; else process.env.CENTRO_ORCA_AGENT = agent;
+  t.after(() => { if (previous === undefined) delete process.env.CENTRO_ORCA_AGENT; else process.env.CENTRO_ORCA_AGENT = previous; });
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), `claude-brief-${agent ?? 'default'}-`)); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const workspace = path.join(root, 'workspaces', 'game'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
   const briefs = [], specs = [], updates = [];
   const ctx = { root, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
@@ -45,6 +48,11 @@ test('the dispatch brief and the spec ask for one simple command per call and a 
   };
   await runOrca({ id: 'brief-001', business: 'agency', kind: 'code', provider: 'orca', title: 'Brief', prompt: 'Probar el brief.', workspace, isolated: true, attempts: 1,
     coordination: { requestId: 'coord-brief', runId: 'run_brief0001', senderId: 'term_brief', business: 'agency' } }, ctx, { command });
+  return { briefs, specs };
+}
+
+test('the dispatch brief and the spec ask for one simple command per call and a single curl for the context query', async t => {
+  const { briefs, specs } = await captureBriefs(t, 'claude');
   assert.equal(briefs.length, 4);
   for (const brief of briefs) {
     assert.match(brief, /COMANDOS: ejecuta un comando simple por llamada, sin ;, &&, \|, variables ni cd\./);
@@ -54,4 +62,19 @@ test('the dispatch brief and the spec ask for one simple command per call and a 
     assert.equal(brief.includes('cat ' + JSON.stringify(file)), false);
   }
   for (const spec of specs) assert.match(spec, /Ejecuta la consulta como un único comando curl, sin encadenarlo con otros comandos ni variables\./);
+});
+
+// 40: the COMMANDS line names Claude's Read tool, so a Codex brief (the default agent) keeps exactly
+// the lines it had before the Claude support: no COMMANDS line, no Read, no cat ban.
+test('a Codex brief keeps its original lines without the Claude-only COMMANDS line', async t => {
+  for (const agent of [undefined, 'codex']) {
+    const { briefs, specs } = await captureBriefs(t, agent);
+    assert.equal(briefs.length, 4);
+    for (const brief of briefs) {
+      assert.doesNotMatch(brief, /COMANDOS:|\(Read\)|no con cat/);
+      assert.deepEqual(brief.split('\n').map(line => line.split(':')[0]).slice(0, 4), ['ENCARGO COMPLETO INMUTABLE. Antes de actuar, lee íntegramente el archivo y verifica SHA256 de sus bytes. No ejecutes el encargo si no puedes leerlo completo o la huella difiere', 'SPEC_FILE', 'SPEC_SHA256', 'IDENTIDAD']);
+      assert.equal(brief.split('\n').length, 6);
+    }
+    assert.equal(specs.length, 4);
+  }
 });

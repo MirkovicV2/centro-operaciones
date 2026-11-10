@@ -117,14 +117,16 @@ function originalTaskSpec(job, step) {
   return null;
 }
 
-function dispatchBrief(artifact, identity) {
+// 40: the COMMANDS line names Claude's Read tool and matches Claude's permission template, so only
+// Claude workers get it; a Codex brief stays exactly as it was before the Claude support.
+function dispatchBrief(artifact, identity, orcaAgent = 'codex') {
   return [
     'ENCARGO COMPLETO INMUTABLE. Antes de actuar, lee íntegramente el archivo y verifica SHA256 de sus bytes. No ejecutes el encargo si no puedes leerlo completo o la huella difiere: informa al coordinador y termina bloqueado.',
     'SPEC_FILE: ' + JSON.stringify(artifact.path),
     'SPEC_SHA256: ' + artifact.sha256,
     'IDENTIDAD: ' + JSON.stringify(identity),
     'El archivo contiene el perfil, alcance, restricciones, decisiones y contrato de entrega obligatorios. Este mensaje es solo su referencia, no un resumen que sustituya instrucciones. Usa los Task/Dispatch nativos de TU asignación y conserva el intento de entrada indicado; no inventes IDs ni delegues.',
-    'COMANDOS: ejecuta un comando simple por llamada, sin ;, &&, |, variables ni cd. Verifica la huella con literalmente: sha256sum ' + JSON.stringify(artifact.path) + ' y lee el archivo con tu herramienta de lectura de archivos (Read), no con cat. Las reglas de permisos del checkout solo reconocen comandos simples; un comando encadenado se bloquea o pide aprobación.',
+    ...(orcaAgent === 'claude' ? ['COMANDOS: ejecuta un comando simple por llamada, sin ;, &&, |, variables ni cd. Verifica la huella con literalmente: sha256sum ' + JSON.stringify(artifact.path) + ' y lee el archivo con tu herramienta de lectura de archivos (Read), no con cat. Las reglas de permisos del checkout solo reconocen comandos simples; un comando encadenado se bloquea o pide aprobación.'] : []),
     'No modifiques este archivo. Aplica el encargo completo y reporta con worker_done según su contrato.',
   ].join('\n');
 }
@@ -401,7 +403,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
       ...(specCycle ? { validationCycle: specCycle } : {}) };
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
-    const brief = retry ? null : dispatchBrief(specArtifact, specIdentity);
+    const brief = retry ? null : dispatchBrief(specArtifact, specIdentity, orcaAgent);
     await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
