@@ -63,7 +63,7 @@ export function overview(ctx) {
   return {
     toolbar: [h('h1', { text: 'Overview' }), h('span', { class: 'spacer' }),
       h('button', { type: 'button', class: 'search', onclick: () => ctx.openSearch() }, icon('search', 14), h('span', { text: 'Buscar o saltar a…' }), h('kbd', { text: 'Ctrl K' })),
-      h('a', { class: 'btn primary', href: '/#trabajos' }, icon('plus', 13), 'Nuevo trabajo')],
+      h('button', { type: 'button', class: 'btn primary', onclick: () => ctx.openNewJob() }, icon('plus', 13), 'Nuevo trabajo')],
     body,
   };
 }

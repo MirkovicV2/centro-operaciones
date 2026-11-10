@@ -417,3 +417,35 @@ dialog::backdrop { background: rgba(20,20,24,.32); }
 .pv-reported { box-shadow: inset 0 0 0 1.5px var(--text2); }
 .pv-unknown { border: 1.5px dashed var(--text3); box-sizing: border-box; }
 .prop dd .pv, .kv dd .pv, .pvl .pv { flex: none; }
+
+/* Peticiones */
+.scroll.stack { display: flex; flex-direction: column; }
+.scroll.stack > .col { flex: 1; width: 100%; box-sizing: border-box; }
+.arow .rowfoot { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.req .title { margin-bottom: 6px; }
+.flow { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; padding: 0; }
+.fstep { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; border-radius: 999px; box-shadow: inset 0 0 0 1px var(--line2); font-size: 12px; color: var(--text2); background: var(--raised); }
+.fstep b { color: var(--text); font-weight: 550; } .fstep .n { color: var(--text3); font-size: 11px; } .fstep small { color: var(--text3); }
+.fstep-running { background: var(--accentsoft); box-shadow: inset 0 0 0 1px var(--accent); }
+.fstep-succeeded, .fstep-completed { background: var(--okbg); box-shadow: none; }
+.fstep-blocked, .fstep-failed { background: var(--warnbg); box-shadow: none; }
+.next { color: var(--text2); font-size: 13.5px; margin: 10px 0; }
+.answer { margin: 16px 0; padding: 14px 16px; border-radius: 12px; background: var(--sunk); box-shadow: inset 3px 0 var(--accent); }
+.answer.soft-box { box-shadow: inset 0 0 0 1px var(--line); }
+.answer h4 { margin: 0 0 6px; font-size: 13px; }
+.prose { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.6; }
+.prose code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+.trace .trw { color: var(--text3); font-size: 12px; }
+.decision { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.decision p { margin: 4px 0 0; font-size: 12.5px; }
+.ev .spacer { flex: 1; }
+.composer { position: sticky; bottom: 16px; margin: 0 auto 16px; }
+.composer select { font: inherit; font-size: 12px; color: var(--text); background: var(--raised); border: 0; box-shadow: inset 0 0 0 1px var(--line2); border-radius: 7px; padding: 4px 8px; max-width: 220px; }
+.composer textarea { font: inherit; color: var(--text); }
+/* Hoja de nuevo trabajo */
+dialog.sheet { width: 600px; max-width: calc(100vw - 32px); position: fixed; inset: 64px auto auto 50%; transform: translateX(-50%); margin: 0; }
+.sheet-body { padding: 18px 22px 8px; max-height: calc(100dvh - 260px); overflow: auto; }
+.sheeth .ibtn { font-size: 20px; line-height: 1; border: 0; background: none; color: var(--text2); cursor: pointer; }
+.form-error { margin: 0; color: var(--danger); font-size: 12.5px; }
+.form-error:empty { display: none; }
+.sheet .props { margin-bottom: 6px; }

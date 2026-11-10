@@ -3,6 +3,7 @@
 import { h, icon, BUSINESSES, scopeData, initial } from './lib.js';
 import { api, attentionItems } from './domain.js';
 import * as views from './views.js';
+import { requests, openNewJob } from './views-requests.js';
 
 const $ = selector => document.querySelector(selector);
 const store = { get: (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }, set: (key, value) => { try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch {} } };
@@ -11,7 +12,7 @@ const state = { raw: null, business: ['agency', 'games'].includes(store.get('ope
 const ROUTES = {
   overview: { title: 'Overview', icon: 'overview', view: views.overview },
   atencion: { title: 'Atención', icon: 'attention', view: views.attention },
-  peticiones: { title: 'Peticiones', icon: 'requests', view: views.classic('Peticiones', '#peticiones', 'La lista de peticiones con su recorrido y la conversación con el coordinador llegará en la siguiente entrega del panel nuevo.') },
+  peticiones: { title: 'Peticiones', icon: 'requests', view: requests },
   trabajos: { title: 'Trabajos', icon: 'jobs', view: views.jobs },
   historial: { title: 'Historial', icon: 'history', view: views.history },
   proyectos: { title: 'Proyectos', icon: 'projects', group: 'Operaciones', view: views.classic('Proyectos', '#proyectos', 'La lista de proyectos con su edición llegará en la siguiente entrega del panel nuevo.') },
@@ -105,16 +106,17 @@ function render(force = true) {
   const openDetails = new Set([...document.querySelectorAll('details[data-key][open]')].map(node => node.dataset.key));
   const scroll = [...document.querySelectorAll('.scroll')].map(node => node.scrollTop);
   const focusedId = document.activeElement?.id;
-  const draft = $('#answer')?.value;
+  const draft = $('#answer')?.value; const askDraft = $('#ask')?.value;
   const app = $('#app');
   let screen;
   if (!data) screen = { toolbar: [h('h1', { text: ROUTES[key].title })], body: h('div', { class: 'body' }, h('div', { class: 'scroll' }, h('div', { class: 'col' }, h('div', { class: 'empty' }, h('b', { text: state.error ? 'No se pudo leer el estado del panel.' : 'Leyendo el estado…' }), state.error ? ` ${state.error}` : '')))) };
-  else screen = ROUTES[key].view({ data, param, state, confirm: confirmAction, done, openSearch, rerender: () => render(true) });
+  else { const ctx = { data, param, state, confirm: confirmAction, done, openSearch, rerender: () => render(true) }; ctx.openNewJob = () => openNewJob(ctx); screen = ROUTES[key].view(ctx); }
   app.replaceChildren(h('div', { class: 'window' }, sidebar(data, key), h('main', { class: 'main' }, h('header', { class: 'toolbar' }, screen.toolbar), screen.body)));
   applyTheme(store.get('operations-theme', 'system'));
   for (const node of document.querySelectorAll('details[data-key]')) if (openDetails.has(node.dataset.key)) node.open = true;
   document.querySelectorAll('.scroll').forEach((node, index) => { if (scroll[index]) node.scrollTop = scroll[index]; });
   if (draft && $('#answer')) $('#answer').value = draft;
+  if (askDraft && $('#ask')) $('#ask').value = askDraft;
   if (focusedId && document.getElementById(focusedId)) document.getElementById(focusedId).focus({ preventScroll: true });
   document.title = `${ROUTES[key].title} · Centro de Operaciones`;
 }
