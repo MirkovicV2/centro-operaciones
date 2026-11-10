@@ -17,7 +17,7 @@ import { ORCA_OUTPUT_LIMIT_BYTES, isOrcaStatusReadError, normalizeWorkerStatus, 
 
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 import { excerpt } from './redaction.mjs';
-import { runWorkflowV2Gate, workflowV2For } from './workflow-v2-gate.mjs';
+import { bindWorkflowV2Approval, priorV2Submission, resolveWorkflowV2Approval, runWorkflowV2Gate, workflowV2For } from './workflow-v2-gate.mjs';
 export { ORCA_EXE };
 const PROFILE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.codex', 'agents');
 const GAME_SKILL_DIR = path.resolve(PROFILE_DIR, '..', 'skills', 'game-production');
@@ -676,6 +676,7 @@ export async function runOrca(job, ctx, {
   polling = {},
   readArchivedFinal,
   runWorkflowV2 = runWorkflowV2Gate,
+  resolveWorkflowV2 = resolveWorkflowV2Approval,
 } = {}) {
   const startedAt = Date.now();
   const metrics = { orcaCliCalls: 0, dispatchStarts: 0, polls: 0, inputTokens: null, outputTokens: null };
@@ -777,7 +778,7 @@ export async function runOrca(job, ctx, {
   const validation = job.autoIntent?.eligible === true && !workflowV2 ? await prepareIntegrationValidation(job, {
     runId, developer, previous: previousIntegration, captureSnapshot, persist: record => persistIntegration(ctx.root, record),
   }) : null;
-  let workflowV2Snapshot;
+  let workflowV2Snapshot, workflowV2Approval = null;
   if (workflowV2) {
     const retrySource = savedQa?.retryOf && (job.workflowHistory ?? []).findLast(workflow =>
       workflow.steps?.some(step => step.key === 'qa' && step.dispatchId === savedQa.retryOf.dispatchId))
@@ -804,24 +805,38 @@ export async function runOrca(job, ctx, {
       await ctx.reportStage?.({ key: 'qa', status: 'blocked', error: error.code, summary: error.message });
       throw error;
     }
-    await runWorkflowV2(reviewed, ctx, workflowV2, workspace);
-    // A returning gate must never fall through to the legacy integration path.
-    throw new ProviderError('workflow_v2_unexpected', 'Workflow V2 no devolvió un estado terminal verificable.', { uncertain: true });
+    // Phase B: a candidate already submitted is never submitted again; its approval is read from V2.
+    const submitted = workflowV2.integrateAfterApproval ? priorV2Submission(job, workflowV2Snapshot) : null;
+    if (!submitted) {
+      await runWorkflowV2(reviewed, ctx, workflowV2, workspace);
+      // A returning gate must never fall through to the legacy integration path.
+      throw new ProviderError('workflow_v2_unexpected', 'Workflow V2 no devolvió un estado terminal verificable.', { uncertain: true });
+    }
+    workflowV2Approval = await resolveWorkflowV2(reviewed, ctx, workflowV2, submitted);
+    if (workflowV2Approval?.qaSnapshot !== workflowV2Snapshot || await captureSnapshot(workspace) !== workflowV2Snapshot) {
+      const error = new ProviderError('workflow_v2_candidate_changed', 'El checkout ya no es el candidato que aprobaste en Workflow V2. No se integra; vuelve a pasar QA y V2.', { uncertain: false });
+      await ctx.reportStage?.({ key: 'integration', status: 'blocked', error: error.code, summary: error.message });
+      throw error;
+    }
   }
-  const review = await runStage(reviewed, ctx, 'revisor', workspace, runId,
+  const review = workflowV2Approval ? null : await runStage(reviewed, ctx, 'revisor', workspace, runId,
     'Haz una revisión independiente y de solo lectura del diff, el encargo, la especificación UX y la evidencia de QA. Busca defectos funcionales, accesibilidad, regresiones y omisiones; no edites. Para devolver a Desarrollo un defecto reproducible, identifica en acceptance el criterio exacto del contrato como failed e incluye los pasos y la evidencia. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO.',
     `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}\n\nQA:\n${handoffText(qa)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'qa', taskId: qa.taskId, dispatchId: qa.dispatchId });
-  await enforceGate(ctx, 'revisor', review);
+  if (review) await enforceGate(ctx, 'revisor', review);
   if (validation) previousIntegration = await sealIntegrationValidation(job, validation, {
     qa, review, captureSnapshot, persist: record => persistIntegration(ctx.root, record),
   });
   let integration = { status: 'skipped', reason: 'not_eligible' };
   if (job.autoIntent?.eligible === true) {
-    await ctx.reportStage?.({ key: 'integration', status: 'running', summary: 'Revisión aprobada; preparando preflight de integración.',
+    // Phase B: the record is bound to the owner's V2 approval before any effect (restart-safe).
+    if (workflowV2Approval) previousIntegration = await bindWorkflowV2Approval(job, workflowV2Approval, {
+      previous: previousIntegration, persist: record => persistIntegration(ctx.root, record) });
+    await ctx.reportStage?.({ key: 'integration', status: 'running', summary: workflowV2Approval ? 'Aprobado en Workflow V2; preparando preflight de integración del candidato aprobado.' : 'Revisión aprobada; preparando preflight de integración.',
       authorization: job.workflow?.steps?.find(step => step.key === 'integration')?.authorization
-        ?? (job.coordination ? { ...stageAuthorization(job, 'integration', { stage: 'reviewer', taskId: review.taskId, dispatchId: review.dispatchId }), at: new Date().toISOString() } : undefined) });
+        ?? (job.coordination ? { ...stageAuthorization(job, 'integration', review ? { stage: 'reviewer', taskId: review.taskId, dispatchId: review.dispatchId } : { stage: 'reviewer' }),
+          ...(workflowV2Approval ? { workflowV2Task: workflowV2Approval.task } : {}), at: new Date().toISOString() } : undefined) });
     try {
-      integration = await integrate({ ...job, integrationSnapshot }, ctx, { previous: previousIntegration, persist: record => persistIntegration(ctx.root, record) });
+      integration = await integrate({ ...job, integrationSnapshot: workflowV2Approval ? workflowV2Approval.qaSnapshot : integrationSnapshot }, ctx, { previous: previousIntegration, persist: record => persistIntegration(ctx.root, record) });
       if (integration?.phase !== 'complete') throw new Error('La integración no confirmó su estado terminal remoto; necesita revisión.');
     } catch (error) {
       const prior = await readIntegration(ctx.root, job.autoIntent.receiptId);
@@ -835,16 +850,18 @@ export async function runOrca(job, ctx, {
   } else if (job.workflow?.steps?.some(step => step.key === 'integration')) {
     await ctx.reportStage?.({ key: 'integration', status: 'skipped', summary: 'Recibo ausente o no elegible; integración omitida.' });
   }
+  const reviewText = review ? review.text : `Workflow V2: aprobado por el owner (tarea ${workflowV2Approval.task}, identidad ${workflowV2Approval.identity}).`;
   return {
     provider: 'orca-quality-workflow',
     runId,
-    dispatchId: review.dispatchId,
-    taskId: review.taskId,
-    stages: { ux: ux.dispatchId, developer: developer.dispatchId, qa: qa.dispatchId, reviewer: review.dispatchId },
+    dispatchId: review ? review.dispatchId : qa.dispatchId,
+    taskId: review ? review.taskId : qa.taskId,
+    stages: { ux: ux.dispatchId, developer: developer.dispatchId, qa: qa.dispatchId, reviewer: review ? review.dispatchId : `workflow-v2:${workflowV2Approval.task}` },
+    ...(workflowV2Approval ? { workflowV2: workflowV2Approval } : {}),
     integration,
-    delivery: review.delivery,
+    delivery: review ? review.delivery : null,
     metrics: { ...metrics, elapsedMs: Date.now() - startedAt },
-    text: [`UX:\n${ux.text}`, `Implementación:\n${developer.text}`, `QA:\n${qa.text}`, `Revisión:\n${review.text}`].join('\n\n'),
+    text: [`UX:\n${ux.text}`, `Implementación:\n${developer.text}`, `QA:\n${qa.text}`, `Revisión:\n${reviewText}`].join('\n\n'),
   };
   } catch (error) {
     error.metrics = { ...metrics, elapsedMs: Date.now() - startedAt };

@@ -10,6 +10,7 @@ import { replaceLocalFile } from './atomic-file.mjs';
 import { assertQualityAction, queueContractRevisionRetry, recoverableChecksTimeout, uxReturnSource, developerDecisionSource, stageDecisionSource, isPartialStageResume, settledOrcaObservation, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
 import { currentActor } from './queue.mjs';
 import { createContractRevision, assertContractRevisionCheckpoint, assertContractRevisionProof, contractRevisionHash, originalContractRevisionJob } from './contract-revision.mjs';
+import { workflowV2Resumable } from './workflow-v2-gate.mjs';
 
 const location = root => path.join(path.resolve(root), 'data', 'auto-run.json');
 const empty = () => ({ schema: 1, businesses: { agency: false, games: false }, receipts: [], history: [], integrations: {} });
@@ -1032,6 +1033,52 @@ async function reviseJobAcceptanceOnce(root, jobId, { productAcceptance, reason,
 
 // Reopen only a reviewed, pre-dispatch auto-run failure. The immutable receipt
 // remains the source of destination truth; uncertain or started stages stay blocked.
+// Workflow V2 phase B: after the owner approves in V2, resume the same job so it reads that approval and
+// integrates only the approved candidate. Unlike retryAutoReceipt, the workflow already has dispatches;
+// what makes this safe is that no Orca stage is relaunched (QA is recovered, V2 is only read) and the
+// integration resumes from its bound record.
+export async function resumeWorkflowV2Receipt(root, jobId, { confirm = false } = {}) {
+  if (!confirm) throw new Error('Confirma que aprobaste este candidato en Workflow V2 antes de reanudar.');
+  const candidate = await change(root, async state => {
+    const receipt = state.receipts.find(item => item.jobId === jobId);
+    const job = (await loadState(root)).jobs.find(item => item.id === jobId);
+    if (!receipt || receipt.status !== 'needs_attention' || !receipt.eligible || !job || job.autoIntent?.receiptId !== receipt.id
+      || receipt.spec?.id !== job.id || receipt.spec?.workspace !== job.workspace || receipt.spec?.destination?.workspace !== job.workspace
+      || receipt.spec?.destination?.branch !== job.branch || !workflowV2Resumable(job) || job.attempts >= job.maxAttempts) {
+      throw new Error('Este trabajo no está esperando una aprobación de Workflow V2 ni su integración; revisa su estado.');
+    }
+    receipt.status = 'retrying'; receipt.updatedAt = now();
+    audit(state, 'retrying', { receiptId: receipt.id, jobId, reason: 'Reanudación tras la decisión del owner en Workflow V2.' });
+    return { receiptId: receipt.id, workspace: job.workspace };
+  });
+  try {
+    const workspacesRoot = path.resolve(root, 'workspaces');
+    const workspace = path.resolve(candidate.workspace);
+    const relative = path.relative(workspacesRoot, workspace);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('Checkout fuera de workspaces; no se libera ningún bloqueo.');
+    const lockPath = path.join(workspace, '.git', 'centro-executor.lock');
+    try {
+      const lockOwner = JSON.parse(await fs.readFile(lockPath, 'utf8'));
+      if (lockOwner.jobId !== jobId || lockOwner.receiptId !== candidate.receiptId) throw new Error('Bloqueo del checkout pertenece a otro trabajo; requiere revisión.');
+      await fs.unlink(lockPath);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const job = await retryJob(root, jobId, { confirm: true });
+    await change(root, state => {
+      const receipt = state.receipts.find(item => item.id === candidate.receiptId);
+      if (!receipt || receipt.status !== 'retrying') throw new Error('El recibo cambió durante la reanudación; requiere revisión.');
+      receipt.status = 'pending'; receipt.retryAuthorizedAttempt = job.attempts; receipt.updatedAt = now();
+      audit(state, 'retry_authorized', { receiptId: receipt.id, jobId, attempt: job.attempts, workflowV2: true });
+    });
+    return job;
+  } catch (error) {
+    await change(root, state => {
+      const receipt = state.receipts.find(item => item.id === candidate.receiptId);
+      if (receipt?.status === 'retrying') { receipt.status = 'needs_attention'; receipt.updatedAt = now(); audit(state, 'retry_blocked', { receiptId: receipt.id, jobId, reason: error.message }); }
+    });
+    throw error;
+  }
+}
+
 export async function retryAutoReceipt(root, jobId, { confirm = false, noDispatchConfirmed = false } = {}) {
   if (!confirm || !noDispatchConfirmed) throw new Error('Confirma que consultaste Orca: no existe Run/dispatch para este intento y no hay agentes activos.');
   const candidate = await change(root, async state => {
