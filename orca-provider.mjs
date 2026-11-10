@@ -410,7 +410,8 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
     const brief = retry ? null : dispatchBrief(specArtifact, specIdentity, orcaAgent);
-    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
+    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel,
+      ...(role.stageKey === 'qa' && job.workflowV2Snapshot ? { workflowV2Snapshot: job.workflowV2Snapshot } : {}), inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
     try {
@@ -726,6 +727,12 @@ export async function runOrca(job, ctx, {
   // Optional, off by default: a project listed in data/workflow-v2.json replaces the Revisión stage with
   // Workflow V2 and is never integrated by the Centro (phase A). See workflow-v2-gate.mjs.
   const workflowV2 = await workflowV2For(ctx.root, job);
+  const savedQa = job.workflow?.steps?.find(step => step.key === 'qa');
+  const priorWorkflowV2 = [job.workflow, ...(job.workflowHistory ?? [])].some(workflow =>
+    workflow?.steps?.some(step => step.workflowV2Snapshot || step.workflowV2));
+  if (priorWorkflowV2 && !workflowV2) {
+    throw new ProviderError('workflow_v2_config_missing', 'Este encargo ya pasó por Workflow V2. Restablece su configuración antes de continuar.', { uncertain: false });
+  }
 
   const design = job.business === 'games'
     ? 'Entrega una especificación de diseño jugable y verificable sin editar archivos. Define reglas, controles, ritmo, feedback y casos de prueba pertinentes.'
@@ -770,15 +777,37 @@ export async function runOrca(job, ctx, {
   const validation = job.autoIntent?.eligible === true && !workflowV2 ? await prepareIntegrationValidation(job, {
     runId, developer, previous: previousIntegration, captureSnapshot, persist: record => persistIntegration(ctx.root, record),
   }) : null;
+  let workflowV2Snapshot;
+  if (workflowV2) {
+    const retrySource = savedQa?.retryOf && (job.workflowHistory ?? []).findLast(workflow =>
+      workflow.steps?.some(step => step.key === 'qa' && step.dispatchId === savedQa.retryOf.dispatchId))
+      ?.steps.find(step => step.key === 'qa');
+    const savedSnapshot = savedQa?.workflowV2Snapshot ?? retrySource?.workflowV2Snapshot;
+    workflowV2Snapshot = await captureSnapshot(workspace);
+    if (!/^[a-f0-9]{64}$/i.test(workflowV2Snapshot ?? '')
+      || (savedSnapshot ? savedSnapshot !== workflowV2Snapshot : savedQa?.dispatchId || savedQa?.retryOf || savedQa?.status === 'succeeded')) {
+      throw new ProviderError('workflow_v2_qa_candidate_unverified', 'La huella actual no coincide con un candidato verificable anterior a QA. Revalida QA antes de enviar a Workflow V2.', { uncertain: false });
+    }
+  }
   const integrationSnapshot = validation?.snapshot ?? null;
-  const reviewed = integrationSnapshot ? { ...job, reviewCandidate: integrationSnapshot } : job;
+  const reviewCandidate = workflowV2Snapshot ?? integrationSnapshot;
+  const reviewed = reviewCandidate ? { ...job, reviewCandidate, ...(workflowV2Snapshot ? { workflowV2Snapshot } : {}) } : job;
   const qa = await runStage(reviewed, ctx, 'qa', workspace, runId,
     job.business === 'games'
       ? 'Valida la escena y el comportamiento en el motor del encargo. Ejecuta los tests locales relevantes y conserva sus resultados. No edites archivos del juego ni instales herramientas. Termina con RESULTADO: APROBADO o RESULTADO: BLOQUEADO; identifica cualquier comprobación esencial ausente.'
       : 'Valida los cambios sin editarlos. Revisa los scripts del proyecto y ejecuta comprobaciones acotadas y relevantes de tipos, lint, compilación y comportamiento; no instales paquetes ni uses red. No añadas ni ejecutes suites de pruebas salvo que el encargo lo solicite expresamente. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO. Si la validación falla, aporta el comando y el error reproducible.',
-    `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'developer', taskId: developer.taskId, dispatchId: developer.dispatchId });
+    `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}${reviewCandidate ? `\n\nHuella del candidato actual: ${reviewCandidate}` : ''}`, command, { stage: 'developer', taskId: developer.taskId, dispatchId: developer.dispatchId });
   await enforceGate(ctx, 'qa', qa);
-  if (workflowV2) await runWorkflowV2(job, ctx, workflowV2, workspace); // always stops the job for the owner
+  if (workflowV2) {
+    if (await captureSnapshot(workspace) !== workflowV2Snapshot) {
+      const error = new ProviderError('workflow_v2_qa_candidate_changed', 'El checkout cambió durante QA. La aprobación no cubre el candidato actual.', { uncertain: false });
+      await ctx.reportStage?.({ key: 'qa', status: 'blocked', error: error.code, summary: error.message });
+      throw error;
+    }
+    await runWorkflowV2(reviewed, ctx, workflowV2, workspace);
+    // A returning gate must never fall through to the legacy integration path.
+    throw new ProviderError('workflow_v2_unexpected', 'Workflow V2 no devolvió un estado terminal verificable.', { uncertain: true });
+  }
   const review = await runStage(reviewed, ctx, 'revisor', workspace, runId,
     'Haz una revisión independiente y de solo lectura del diff, el encargo, la especificación UX y la evidencia de QA. Busca defectos funcionales, accesibilidad, regresiones y omisiones; no edites. Para devolver a Desarrollo un defecto reproducible, identifica en acceptance el criterio exacto del contrato como failed e incluye los pasos y la evidencia. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO.',
     `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}\n\nQA:\n${handoffText(qa)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'qa', taskId: qa.taskId, dispatchId: qa.dispatchId });

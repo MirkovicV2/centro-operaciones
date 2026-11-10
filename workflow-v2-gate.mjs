@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { ProviderError } from './providers.mjs';
+import { excerpt } from './redaction.mjs';
 
 export const WORKFLOW_V2_FILE = 'workflow-v2.json';
 const TIERS = new Set(['FAST', 'STANDARD', 'CRITICAL']);
@@ -146,12 +147,12 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
     result = await run(argv, { cwd: entry.engineeringSystem, timeoutMs: entry.timeoutMs, signal: ctx.signal });
   } catch (error) {
     await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: 'No se pudo ejecutar Workflow V2.', error: 'workflow_v2_unavailable' });
-    throw new ProviderError('workflow_v2_unavailable', `No se pudo ejecutar Workflow V2: ${error.message}`.slice(0, 500), { uncertain: false });
+    throw new ProviderError('workflow_v2_unavailable', `No se pudo ejecutar Workflow V2: ${excerpt(error.message)}`.slice(0, 500), { uncertain: false });
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
   if (result.timedOut || result.code !== 0) {
-    const detail = result.timedOut ? 'se agotó el tiempo' : (result.stderr.trim().split('\n').at(-1) || `salida ${result.code}`);
+    const detail = result.timedOut ? 'se agotó el tiempo' : (excerpt(result.stderr.trim().split('\n').at(-1)) || `salida ${result.code}`);
     await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: `Workflow V2 rechazó el envío: ${detail}`.slice(0, 1000), error: 'workflow_v2_refused' });
     throw new ProviderError('workflow_v2_refused', `Workflow V2 rechazó el envío: ${detail}`.slice(0, 500), { uncertain: result.timedOut });
   }
@@ -161,8 +162,18 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
     throw new ProviderError('workflow_v2_unexpected', 'La salida de Workflow V2 no es JSON.', { uncertain: false });
   }
   const { outcome, code } = interpretV2(summary);
-  const candidate = summary.steps?.find(step => step.unit === 'U1')?.candidate ?? null;
-  const workflowV2 = { task: task.id, outcome, status: summary.status, tier: summary.tier ?? null, candidate,
+  const candidate = Array.isArray(summary?.steps) ? summary.steps.find(step => step?.unit === 'U1')?.candidate ?? null : null;
+  if (summary?.task !== task.id || (['owner_pending', 'rejected'].includes(outcome) && !/^[a-f0-9]{64}$/i.test(candidate ?? ''))) {
+    const error = new ProviderError('workflow_v2_identity_mismatch', 'Workflow V2 no acredita la tarea enviada y la huella de su candidato.', { uncertain: true });
+    await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code });
+    throw error;
+  }
+  if (job.workflowV2Snapshot && await ctx.captureSnapshot(workspace) !== job.workflowV2Snapshot) {
+    const error = new ProviderError('workflow_v2_candidate_changed', 'El checkout cambió durante el envío a Workflow V2. Revisa la evidencia antes de continuar.', { uncertain: true });
+    await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code });
+    throw error;
+  }
+  const workflowV2 = { task: task.id, outcome, status: summary.status, tier: summary.tier ?? null, candidate, qaSnapshot: job.workflowV2Snapshot ?? null,
     identity: summary.identity ?? null, evidenceId: summary.evidence_id ?? null, reviews: summary.reviews ?? [],
     blockedReason: summary.blocked_reason ?? null, next: summary.next ?? null };
   const line = [MESSAGES[outcome], summary.tier ? `Nivel ${summary.tier}.` : '', summary.blocked_reason ? `Motivo: ${summary.blocked_reason}.` : '',

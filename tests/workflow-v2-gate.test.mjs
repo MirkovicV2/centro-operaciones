@@ -62,7 +62,7 @@ test('the V2 summary is read conservatively: only the owner approves', () => {
 
 async function gate(t, { result, jobExtra = {} } = {}) {
   const updates = [], calls = [];
-  const ctx = { signal: new AbortController().signal, async reportStage(update) { updates.push(update); } };
+  const ctx = { signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, captureSnapshot: async () => 'a'.repeat(64) };
   const entry = { ...normalizeWorkflowV2(config()).projects.obi, engineeringSystem: '/srv/engineering-system', python: 'python3' };
   const run = async (argv, options) => {
     calls.push({ argv, options, task: JSON.parse(await fs.readFile(argv[argv.indexOf('--task-file') + 1], 'utf8')) });
@@ -78,7 +78,7 @@ const summary = (status, reviews, extra = {}) => ({ code: 0, stderr: '', timedOu
 
 test('an ACCEPT recommendation stops the job for the owner and never reaches integration', async t => {
   const { error, updates, calls } = await gate(t, { result: summary('revision', [{ role: 'unit', recommendation: 'ACCEPT', isolation: 'DEMONSTRATED' }]),
-    jobExtra: { workflow: { steps: [{ key: 'reviewer' }, { key: 'integration' }] } } });
+    jobExtra: { workflowV2Snapshot: 'a'.repeat(64), workflow: { steps: [{ key: 'reviewer' }, { key: 'integration' }] } } });
   assert.equal(error.code, 'workflow_v2_owner_pending');
   assert.match(error.message, /Decide tú en V2/);
   assert.equal(error.details.v2Candidate, 'c'.repeat(64));
@@ -90,6 +90,7 @@ test('an ACCEPT recommendation stops the job for the owner and never reaches int
   assert.deepEqual(updates.map(u => [u.key, u.status]), [['reviewer', 'running'], ['reviewer', 'blocked'], ['integration', 'skipped']]);
   assert.equal(updates[1].workflowV2.outcome, 'owner_pending');
   assert.equal(updates[1].workflowV2.candidate, 'c'.repeat(64));
+  assert.equal(updates[1].workflowV2.qaSnapshot, 'a'.repeat(64));
   assert.match(updates[1].summary, /Siguiente: owner: `wfv2 verdict/);
 });
 
@@ -112,12 +113,25 @@ test('a refused submit or unreadable output is reported, not treated as a review
   assert.equal(timedOut.error.uncertain, true);
 });
 
+test('V2 rejects a foreign task or a missing candidate and checks the local QA snapshot again', async t => {
+  const valid = summary('revision', [{ recommendation: 'ACCEPT' }]);
+  for (const result of [
+    summary('revision', [{ recommendation: 'ACCEPT' }], { task: 'other-job' }),
+    summary('pendiente_owner', [], { steps: [{ unit: 'U1', candidate: null }] }),
+  ]) {
+    assert.equal((await gate(t, { result })).error.code, 'workflow_v2_identity_mismatch');
+  }
+  const stale = await gate(t, { result: valid, jobExtra: { workflowV2Snapshot: 'b'.repeat(64) } });
+  assert.equal(stale.error.code, 'workflow_v2_candidate_changed');
+});
+
 test('runOrca: a governed project runs V2 instead of the Centro Revisión; others are unchanged', async t => {
   const { runOrca } = await import('../orca-provider.mjs');
   const root = await rootWith(t, config());
   const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
-  const run = async projectId => {
+  const run = async (projectId, { changeDuringQa = false, priorQa, gateReturns = false } = {}) => {
     const starts = [], updates = [], gates = [];
+    let snapshotReads = 0;
     const ctx = { root, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
     const command = async args => {
       if (args[0] === 'repo') return { repos: [{ path: workspace }] };
@@ -127,16 +141,27 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
       if (args[1] === 'inbox') { const key = starts.at(-1); return { messages: [{ type: 'worker_done', body: ['qa', 'reviewer'].includes(key) ? 'Validación correcta.\nRESULTADO: APROBADO' : `${key} completado`, payload: JSON.stringify({ dispatchId: `ctx_v2gate${starts.length}` }) }] }; }
       throw new Error(`Unexpected command: ${args.join(' ')}`);
     };
-    const runWorkflowV2 = async (job, _ctx, entry, ws) => { gates.push({ job: job.id, entry, ws }); throw Object.assign(new Error('owner'), { code: 'workflow_v2_owner_pending' }); };
-    const outcome = await runOrca({ id: `v2-${projectId}`, business: 'agency', kind: 'code', provider: 'orca', projectId, title: 'V2', prompt: 'Probar V2.', workspace, isolated: true, attempts: 1 },
-      ctx, { command, runWorkflowV2 }).then(() => 'succeeded', error => error.code);
-    return { starts, gates, outcome };
+    const runWorkflowV2 = async (job, _ctx, entry, ws) => { gates.push({ job: job.id, entry, ws, snapshot: job.workflowV2Snapshot }); if (gateReturns) return; throw Object.assign(new Error('owner'), { code: 'workflow_v2_owner_pending' }); };
+    const outcome = await runOrca({ id: `v2-${projectId}`, business: 'agency', kind: 'code', provider: 'orca', projectId, title: 'V2', prompt: 'Probar V2.', workspace, isolated: true, attempts: 1, ...(priorQa ? { workflow: { steps: [priorQa] } } : {}) },
+      ctx, { command, runWorkflowV2, captureSnapshot: async () => changeDuringQa && ++snapshotReads > 1 ? 'b'.repeat(64) : 'a'.repeat(64) }).then(() => 'succeeded', error => error.code);
+    return { starts, gates, outcome, updates };
   };
   const governed = await run('obi');
   assert.deepEqual(governed.starts, ['ux', 'developer', 'qa'], 'the Centro Revisión stage is not launched');
   assert.equal(governed.gates.length, 1);
   assert.equal(governed.gates[0].ws, workspace);
   assert.equal(governed.outcome, 'workflow_v2_owner_pending');
+  assert.equal(governed.gates[0].snapshot, 'a'.repeat(64));
+  assert.equal(governed.updates.find(item => item.key === 'qa' && item.dispatchStatus === 'starting').workflowV2Snapshot, 'a'.repeat(64));
+  const changed = await run('obi', { changeDuringQa: true });
+  assert.equal(changed.outcome, 'workflow_v2_qa_candidate_changed');
+  assert.equal(changed.gates.length, 0);
+  const noConfig = await run('forge', { priorQa: { key: 'qa', workflowV2Snapshot: 'a'.repeat(64) } });
+  assert.equal(noConfig.outcome, 'workflow_v2_config_missing');
+  assert.equal(noConfig.starts.length, 0);
+  const unexpected = await run('obi', { gateReturns: true });
+  assert.equal(unexpected.outcome, 'workflow_v2_unexpected');
+  assert.deepEqual(unexpected.starts, ['ux', 'developer', 'qa']);
   const other = await run('forge');
   assert.deepEqual(other.starts, ['ux', 'developer', 'qa', 'reviewer']);
   assert.equal(other.gates.length, 0);
