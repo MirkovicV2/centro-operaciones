@@ -306,17 +306,17 @@ function lifecycle(job, report, integrationRecord) {
   else rev = phase(review, { succeeded: ['ok', 'Aprobada'], running: ['active', 'En curso'], blocked: ['fail', 'Rechazada'], failed: ['fail', 'Falló'] });
   const acceptance = v2
     ? (v2.status === 'aprobado' ? ['ok', 'Aceptada por ti'] : ['wait', 'Pendiente de tu decisión en V2'])
-    : ['na', 'No aplica · el Centro integra tras su Revisión'];
+    : ['na', 'No aplica'];
   const integ = report?.integration;
   let integration;
-  if (!job.autoIntent?.eligible) integration = ['na', 'Manual · fuera del Centro'];
+  if (!job.autoIntent?.eligible) integration = ['na', 'Manual'];
   else if (!integrationRecord && !integ?.phase) integration = ['unk', 'Sin registro'];
   else if ((integrationRecord?.phase || integ?.phase) === 'complete') integration = ['ok', 'Integrada'];
   else integration = ['active', integrationRecord?.phase || integ?.phase];
   const note = { exec: dev ? (dev.dispatchId ? `Dispatch ${dev.dispatchId}` : dev.label) : 'Sin etapa de ejecución',
     rev: review?.delivery?.findings?.length ? `${review.delivery.findings.length} hallazgos` : review ? review.label : 'Sin revisión todavía',
-    acc: v2 ? `Tarea ${v2.task || ''}` : 'Solo en proyectos gobernados por Workflow V2',
-    int: integrationRecord?.mergeSha ? `Merge ${integrationRecord.mergeSha.slice(0, 7)}` : integrationRecord?.prUrl ? 'PR abierta' : '' };
+    acc: v2 ? `Tarea ${v2.task || ''}` : 'El Centro integra tras su Revisión',
+    int: integrationRecord?.mergeSha ? `Merge ${integrationRecord.mergeSha.slice(0, 7)}` : integrationRecord?.prUrl ? 'PR abierta' : !job.autoIntent?.eligible ? 'Fuera del Centro' : '' };
   const level = (tone, exact) => tone === 'na' ? 'na' : tone === 'unk' || tone === 'wait' ? 'unknown' : exact ? 'observed' : 'reported';
   return [
     ['Ejecución', exec, note.exec, level(exec[0], dev?.dispatchId)],
@@ -451,8 +451,70 @@ function renderRun(data) {
   const open = el('a', 'button secondary', 'Ver en la lista de Trabajos'); open.href = '#trabajos'; open.onclick = () => setTimeout(() => focusJob(job.id), 0);
   side.append(open);
 
-  root.append(main, side);
+  // Left pane, as in the mockup: every job of this business with its stage track; the open one is selected.
+  const list = el('nav', 'run-list'); list.setAttribute('aria-label', 'Trabajos');
+  const order = { needs_attention: 0, running: 1, queued: 2, retry_wait: 2, succeeded: 3, cancelled: 4 };
+  for (const item of [...(data.jobs || [])].sort((a, b) => (order[a.state] ?? 5) - (order[b.state] ?? 5) || String(b.createdAt).localeCompare(String(a.createdAt)))) {
+    const link = el('a', `run-list-item${item.id === job.id ? ' selected' : ''}`); link.href = `#trabajo/${encodeURIComponent(item.id)}`;
+    if (item.id === job.id) link.setAttribute('aria-current', 'page');
+    link.append(el('span', 'run-list-title', item.title));
+    const meta = el('span', 'run-list-meta'); meta.append(el('span', '', `#${item.id}`));
+    const track = stageTrack(item); if (track) meta.append(track);
+    link.append(meta, el('span', `run-list-state is-${item.state}`, statusNames[item.state] || item.state));
+    list.append(link);
+  }
+  root.append(list, main, side);
   restore();
+}
+
+// Historial e informes: closed jobs as a table, and the selected job's report (informe E) with provenance.
+function durationText(job) {
+  const start = Date.parse(job.startedAt || job.createdAt), end = Date.parse(job.finishedAt || '');
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return '—';
+  const minutes = Math.round((end - start) / 60000);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+function renderHistory(data) {
+  const root = $('#history-page');
+  const closed = (data.jobs || []).filter(job => ['succeeded', 'cancelled'].includes(job.state)).sort((a, b) => String(b.finishedAt || b.createdAt).localeCompare(String(a.finishedAt || a.createdAt)));
+  const reports = (data.requestTraces || []).flatMap(trace => trace.reports || []);
+  const selected = closed.find(job => job.id === state.historySelected) || closed[0];
+  const signature = JSON.stringify([closed.map(job => [job.id, job.state, job.finishedAt]), selected?.id, reports.length]);
+  if (root.dataset.signature === signature) return;
+  root.dataset.signature = signature;
+  root.replaceChildren();
+  const table = el('div', 'history-table'); table.setAttribute('role', 'table'); table.setAttribute('aria-label', 'Trabajos cerrados');
+  const head = el('div', 'history-row history-head'); head.setAttribute('role', 'row');
+  for (const label of ['Trabajo', 'Resultado', 'Duración', 'Modelos', 'Cerrado']) { const cell = el('span', '', label); cell.setAttribute('role', 'columnheader'); head.append(cell); }
+  table.append(head);
+  if (!closed.length) table.append(el('p', 'attention-empty', 'Los trabajos terminados o cancelados aparecerán aquí.'));
+  for (const job of closed) {
+    const row = el('button', `history-row${job === selected ? ' selected' : ''}`); row.type = 'button'; row.setAttribute('role', 'row');
+    row.setAttribute('aria-pressed', String(job === selected));
+    const title = el('span', 'history-title'); title.append(el('b', '', job.title), el('small', '', `${job.projectName || businessNames[job.business]} · #${job.id}`));
+    const models = [...new Set((job.workflow?.steps || []).map(step => step.launch?.model).filter(Boolean))].join(' · ') || 'No registrados';
+    row.append(title, el('span', '', ''), el('span', 'history-num', durationText(job)), el('span', 'history-models', models), timeNode(job.finishedAt, 'history-when'));
+    row.children[1].append(el('span', `request-state ${job.state === 'succeeded' ? 'is-done' : 'is-active'}`, statusNames[job.state] || job.state));
+    row.onclick = () => { state.historySelected = job.id; renderHistory(data); };
+    table.append(row);
+  }
+  const panel = el('aside', 'history-report'); panel.setAttribute('aria-label', 'Informe del trabajo');
+  if (selected) {
+    const report = reports.find(item => item.jobId === selected.id);
+    panel.append(el('p', 'run-kicker', `Informe · #${selected.id}`), el('h3', 'history-report-title', selected.title));
+    const facts = el('dl', 'history-facts');
+    const fact = (label, value, level) => { const dd = el('dd'); dd.append(el('span', '', value)); facts.append(el('dt', '', label), dd, provenance(level)); };
+    fact('Estado', statusNames[selected.state] || selected.state, 'observed');
+    for (const step of selected.workflow?.steps || []) fact(step.label, `${workflowStatusNames[step.status] || step.status}${step.launch?.model ? ` · ${step.launch.model}` : ''}`, step.dispatchId ? 'observed' : 'unknown');
+    for (const item of report?.criteria || []) fact('Criterio', `${item.criterion} · ${item.status === 'passed' ? 'cumple' : item.status === 'failed' ? 'no cumple' : 'sin verificar'}`, item.level);
+    if (report?.integration?.applies) for (const item of report.integration.facts) fact(item.label, item.value, item.level);
+    else fact('Integración', 'Manual · fuera del Centro', 'na');
+    fact('Tokens y coste', 'Sin registro fiable', 'unknown');
+    panel.append(facts);
+    if (report) panel.append(el('p', 'run-totals', `${report.totals.observed} comprobados · ${report.totals.reported} declarados · ${report.totals.unknown} sin registro`));
+    const open = el('a', 'button secondary', 'Abrir la ficha'); open.href = `#trabajo/${encodeURIComponent(selected.id)}`; panel.append(open);
+  } else panel.append(el('p', 'attention-empty', 'Elige un trabajo para ver su informe.'));
+  root.append(table, panel);
 }
 
 function renderJobs(data) {
@@ -1306,6 +1368,7 @@ async function refresh() {
     ideaCheckoutHint();
     renderJobs(data);
     renderAttention(data);
+    renderHistory(data);
     if (state.visibleSection === 'trabajo' || location.hash.startsWith('#trabajo/')) renderRun(data);
     renderQuestions(data);
     window.RequestsView?.render(data, state.business);
@@ -1488,7 +1551,7 @@ function applyBusinessContext() {
 function showSection() {
   const [id = 'inicio', runId] = (location.hash.slice(1) || 'inicio').split('/');
   if (id === 'trabajo') { state.runId = decodeURIComponent(runId || ''); if (state.data) renderRun(state.data); }
-  const selected = ['inicio', 'trabajo', 'atencion', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
+  const selected = ['inicio', 'trabajo', 'atencion', 'historial', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
   if (state.visibleSection === selected) return;
   state.visibleSection = selected;
   const navSection = selected === 'trabajo' ? 'trabajos' : selected;
