@@ -61,6 +61,7 @@ test('the approval is read from V2 and counts only for the identity and evidence
     [{ task: 'other', status: 'aprobado', identity: 'id-1', evidence_id: 'ev-1' }, 'workflow_v2_identity_mismatch'],
     [{ task: TASK, status: 'pendiente_owner', identity: 'id-1', evidence_id: 'ev-1' }, 'workflow_v2_owner_pending'],
     [{ task: TASK, status: 'rechazado' }, 'workflow_v2_rejected'],
+    [{ task: TASK, status: 'aprobado' }, 'workflow_v2_unavailable'],
     [{ task: TASK, status: 'nueva' }, 'workflow_v2_unexpected'],
   ];
   for (const [status, code] of cases) {

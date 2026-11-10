@@ -249,6 +249,11 @@ export async function resolveWorkflowV2Approval(job, ctx, entry, prior, { run = 
     throw error;
   }
   if (status.status === 'aprobado') {
+    if (!('identity' in status) || !('evidence_id' in status)) {
+      const error = new ProviderError('workflow_v2_unavailable', 'Esta versión de Engineering System no muestra a qué identidad está atada la aprobación (wfv2 status). Actualízala; no se integra sin comprobarlo.', { uncertain: false });
+      await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code });
+      throw error;
+    }
     if (status.identity !== prior.identity || status.evidence_id !== prior.evidenceId) {
       const error = new ProviderError('workflow_v2_approval_mismatch', 'La aprobación de Workflow V2 está atada a otra identidad o evidencia que el candidato enviado. No se integra; vuelve a pasar QA y V2.', { uncertain: false });
       await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code, workflowV2: record('approval_mismatch') });
