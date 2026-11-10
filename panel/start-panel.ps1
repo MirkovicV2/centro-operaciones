@@ -8,7 +8,7 @@ $expectedQueueRoot = $expectedQueueRoot.TrimEnd('\')
 
 function Test-CentroPanel {
     try {
-        $state = Invoke-RestMethod -Uri $stateUrl -TimeoutSec 2
+        $state = Invoke-RestMethod -Uri $stateUrl -TimeoutSec 30
         $actualRoot = [IO.Path]::GetFullPath([string]$state.settings.queueRoot).TrimEnd('\')
         return $actualRoot.Equals($expectedQueueRoot, [StringComparison]::OrdinalIgnoreCase)
     } catch {
