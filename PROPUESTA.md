@@ -59,6 +59,21 @@ Leyenda de las afirmaciones: **verificado** = test ejecutado aquí; **leído** =
 
 - **33 (F15, pendiente de código tras el E2E)**: `/retry-checkout` no puede liberar el lock de un encargo antiguo. Horas después del cierre, Orca devuelve `observation: { status: missing, exactWorker: false }` y `terminal: null`, aunque conserva `projection.liveness: { verdict: exited, source: resource_release }` y el recurso `released` del mismo dispatch (`evidence.durable: true`). `normalizeWorkerStatus` exige observación exacta y da `unverifiable`. Propuesta: para un encargo cancelado y revisado, aceptar como salida la evidencia duradera (veredicto `exited` por liberación del recurso, recurso `released/released` cuyo `ownerDispatchId` y `terminalHandle` son los del dispatch, sin trabajadores vivos de esa Task en `worker-list`), solo en la vía de liberación del checkout. Detectado en el E2E del 10-11-2026 (encargo 9); se resolvió borrando el lock a mano tras repetir las comprobaciones.
 
+## Tu forma de trabajar no cambia (y cómo volver a ella)
+
+Esta rama no te obliga a cambiar nada de cómo usas el Centro hoy. Lo que sigue igual por defecto y cómo dejarlo exactamente como lo tenías:
+
+- **Codex en Windows**: mismas rutas, mismo `taskkill`, mismos `.cmd`/`.ps1` y perfiles `.codex/agents/*.toml`. Sin `CENTRO_ORCA_AGENT`, el agente sigue siendo Codex.
+- **Full access**: puedes seguir usándolo. El preflight nuevo (`orca-settings.mjs`) solo **avisa** al arrancar el panel; no bloquea nada, y con Codex no muestra avisos. Mejora pendiente (37): una opción local para silenciar ese aviso si trabajas en Full access a propósito.
+- **Recomendación, no obligación**: en las pruebas, «Approve for me» (Auto) fue igual de rápido (QA sin ningún diálogo) y conserva un filtro para acciones arriesgadas. Si no te convence, sigue en Full access.
+- **Ajustes de Orca que cambiamos para Claude** (Settings → Agents): «Open agents as» en Terminal/CLI para Claude y Codex. Si prefieres el chat para tu uso diario con Codex, puedes volver a Chat para Codex; para que los trabajadores Claude cierren etapas hace falta Terminal (mejora 23 cubre el caso chat, pero solo se ha validado con Terminal).
+- **Tus datos**: todo campo nuevo es opcional y no se reescribe tu historial. Comprueba la rama sobre una copia de tu `data/` (ver «Antes de fusionar»).
+- **Volver atrás del todo**: la rama es independiente; si algo no te gusta, basta con no fusionarla o revertir el commit concreto (uno por mejora).
+
+- **34 (R15, pendiente de código)**: el adaptador de `gh` de la integración descarta stderr (solo tipa «Unknown JSON field»), así que un fallo real de `gh` queda como «gh falló o la respuesta fue ambigua». Propuesta: reutilizar `excerpt` y `DestinationError`/detalles acotados de las mejoras 2+15 en `createIntegrationCommandAdapters`.
+- **35 (R15, documentación y preflight)**: la integración lee `statusCheckRollup`; los check runs requieren el permiso Checks, que un PAT fine-grained no tiene, así que con `GH_TOKEN` fine-grained la integración se detiene tras crear la PR. Documentar que hace falta una sesión de `gh` (keyring) o un token con acceso a checks, y añadir al preflight de `gh` una lectura de checks de solo consulta.
+- **E2E del 10-11-2026 (encargo 9)**: UX → Desarrollo interrumpido y reanudado → QA → Revisión interrumpida y reanudada → Integración reconciliada → merge `b0b9cec` en el repo sandbox, en el intento 1 y con un dispatch por etapa. Evidencia en `.artifacts/e2e-evidencia/hallazgos-sesion3.md`.
+
 ## Decisiones para el dueño
 
 1. **Destino local para desarrollo (1)**: la vía coordinada exige un repositorio GitHub verificado incluso para encargos no elegibles para integración. Opción A: permitir `destination.kind: 'local'` (sin `origin`) para proyectos marcados como «solo desarrollo», bloqueando la integración. Opción B: mantener la exigencia y documentar que las pruebas usan un repo sandbox. Recomiendo A con bloqueo explícito de integración.
