@@ -10,8 +10,8 @@ import { saveStageReport } from '../orca-evidence.mjs';
 import { assertDeliveryTransportProof } from '../queue.mjs';
 
 // Improvement 30 (D5): a reviewer writing without accents left job 8 of EOC-E2E-01
-// in delivery_acceptance_missing. Criteria now compare by canonical text or by a
-// stable id, and the recovery of such a report does not need a Codex session archive.
+// in delivery_acceptance_missing. Criteria compare by canonical text and any supplied
+// id must agree. Recovery of such a report does not need a Codex session archive.
 const identity = { jobId: 'criteria-job', jobAttempt: 1, stage: 'reviewer', runId: 'run_criteria001', taskId: 'task_criteria001', dispatchId: 'ctx_criteria001' };
 const criteria = ["slugify('') devuelve la cadena vacía ''", 'Añadir mediante botón y tecla Enter.'];
 const report = (acceptance, extra = {}) => ({ version: 1, ...identity, outcome: 'completed', scope: 'complete', approval: 'approved', summary: 'Revision aprobada.',
@@ -30,8 +30,8 @@ test('canonical criteria ignore accents, case and spacing but not different word
   assert.equal(criterionId('Añadir mediante botón'), criterionId('anadir  mediante BOTON'));
   assert.notEqual(criterionId('Añadir mediante botón'), criterionId('Quitar mediante botón'));
   assert.deepEqual(acceptanceCriteriaIds(['a', 'b']).map(item => item.criterion), ['a', 'b']);
-  assert.equal(matchesCriterion({ criterion: 'otro', criterionId: criterionId('Añadir') }, 'añadir'), true);
-  assert.equal(matchesCriterion({ criterion: 'añadir', criterionId: criterionId('otro') }, 'añadir'), false, 'an explicit id wins over the text');
+  assert.equal(matchesCriterion({ criterion: 'otro', criterionId: criterionId('Añadir') }, 'añadir'), false);
+  assert.equal(matchesCriterion({ criterion: 'añadir', criterionId: criterionId('otro') }, 'añadir'), false, 'an explicit id must match the text');
   assert.equal(matchesCriterion(null, 'x'), false);
 });
 
@@ -39,7 +39,9 @@ test('a QA or review report without accents, with another case or with stable id
   const expected = { ...identity, acceptance: criteria };
   const ascii = report([passed("slugify('') devuelve la cadena vacia ''"), passed('anadir mediante boton y tecla enter.')]);
   assert.equal(validateDelivery(ascii, expected).approval, 'approved');
-  const byId = report([passed('criterio 1', { criterionId: criterionId(criteria[0]) }), passed('criterio 2', { criterionId: criterionId(criteria[1]) })]);
+  const byId = report(criteria.map(criterion => passed(canonicalCriterion(criterion), { criterionId: criterionId(criterion) })));
+  const unrelated = report([passed(criteria[0]), passed('El fondo es azul.', { criterionId: criterionId(criteria[1]) })]);
+  assert.throws(() => validateDelivery(unrelated, expected), { code: 'delivery_acceptance_missing' });
   assert.equal(validateDelivery(byId, expected).acceptance[0].criterionId, criterionId(criteria[0]));
   const spaced = report([passed("SLUGIFY('')   devuelve la cadena vacía ''"), passed(criteria[1])]);
   assert.doesNotThrow(() => validateDelivery(spaced, expected));
