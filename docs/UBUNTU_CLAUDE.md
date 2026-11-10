@@ -42,6 +42,19 @@ Abre [el panel local](http://127.0.0.1:4187) y deja esa terminal abierta. Puedes
 
 Comprueba la conexión con `curl -fsS http://127.0.0.1:4187/api/coordinators`. Si la Run o el propietario no coinciden, revisa esos datos en la terminal del coordinador. Conserva el lanzamiento con `CENTRO_ORCA_AGENT=claude npm start`. El valor selecciona Claude para los trabajadores que lanza el panel y para la preparación indicada al coordinador. Los trabajadores usan el modelo configurado en Claude Code. Sin esa variable, el panel usa Codex. La recuperación desde archivos de sesión privados es específica de Codex. Claude usa la entrega y la transcripción nativas de Orca.
 
+## Permisos de los trabajadores Claude
+
+Claude Code lee `.claude/settings.local.json` del checkout en el que trabaja. La plantilla [ejemplos/claude-settings.local.example.json](../ejemplos/claude-settings.local.example.json) permite lo que necesita un trabajador de la cola y deniega lo que el contrato prohíbe. Cópiala al checkout aislado de cada proyecto de prueba y sustituye los marcadores; el panel no la aplica automáticamente a checkouts ajenos.
+
+| Permitido | Denegado |
+| --- | --- |
+| Leer su encargo en `data/dispatch-specs/**` y los informes en `data/stage-reports/**` | `git push`, `git commit`, `gh`, `sudo`, `rm`, `wget` |
+| `sha256sum`, `wc -c`, `cat`, `ls`, `npm test`, `node --test`, `git status`, `git diff` | `curl` a otros hosts y a `localhost` (solo `127.0.0.1:<PUERTO>`) |
+| `curl -X POST http://127.0.0.1:<PUERTO>/api/jobs/*/context` | Escribir en `data/` y `.artifacts/` del centro |
+| `orca orchestration send --type worker_done`, `ask`, `dispatch-show` | `worker-start`, `run-create`, `task-create`, `dispatch`, `worker-stop`, `coordinator-start`, `worktree`, `agent`, `terminal`, `repo` |
+
+Las reglas `Bash(...)` solo reconocen comandos simples. Por eso el brief pide a los trabajadores un comando por llamada, sin `;`, `&&`, `|`, variables ni `cd` (por ejemplo `sha256sum <ruta>` y luego `cat <ruta>`), y una única llamada `curl` para la consulta de contexto. En la prueba E2E los comandos encadenados con `cd …; cat …` fueron los que provocaron diálogos de aprobación o denegaciones del modo automático.
+
 ## Niveles por rol: modelo y esfuerzo
 
 Cada rol tiene un nivel (`ligero`, `estandar`, `profundo`) que cada agente traduce a `--model/--effort` de `worker-start`. Sin configuración, Codex recibe exactamente los flags de siempre y Claude no recibe ninguno (usa el modelo de su instalación).
