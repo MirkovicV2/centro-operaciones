@@ -391,3 +391,37 @@ test('an interrupted segment ends at detection even when the last persisted even
   assert.ok(segment.elapsedMs >= 600_000, 'the outage counts as consumed time');
   assert.equal(segment.finishedAtSource, undefined);
 });
+
+for (const admittedRepository of ['Fixture/Repo', 'fixture/repo']) test(`case-mixed data: an interrupted developer admitted as ${admittedRepository} resumes when origin now says Fixture/Repo`, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'liveness-case-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspaces', 'fixture'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const destination = { workspace, checkout: 'workspaces/fixture', repository: 'fixture/repo', branch: 'feature', baseBranch: 'main', sha: 'a'.repeat(40), remoteSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), verified: true };
+  const dev = { runId: 'run_fixture01', taskId: 'task_develop01', dispatchId: 'ctx_develop01' };
+  // A job admitted before this branch stored the lower-case name; today the same origin is reported in its own case.
+  let observed = admittedRepository;
+  const verify = async () => ({ ...structuredClone(destination), repository: observed });
+  await setAutoRun(root, 'agency', true, { confirm: true });
+  const sent = await confirmSubmission(root, 'receipt-case', { id: 'case-job', business: 'agency', kind: 'code', provider: 'orca',
+    title: 'Mayúsculas', prompt: 'Implementar y validar.', workspace, isolated: true, branch: 'feature', destination, maxAttempts: 2 });
+  const data = path.join(root, 'data');
+  let crash;
+  await createAutoRunner(root, { verify, worker: async (job, ctx) => {
+    await ctx.reportStage({ key: 'ux', status: 'running', runId: dev.runId, taskId: 'task_fixture01', dispatchId: 'ctx_fixture01', attempt: job.attempts });
+    await ctx.reportStage({ key: 'ux', status: 'succeeded', summary: 'UX completed' });
+    await ctx.reportStage({ key: 'developer', status: 'running', dispatchStatus: 'active', ...dev, attempt: job.attempts, taskInputAttempt: 1 });
+    const names = (await fs.readdir(data)).filter(name => !name.endsWith('.lock'));
+    crash = await snapshotFiles([...names.map(name => path.join(data, name)), path.join(workspace, '.git', 'centro-executor.lock')]);
+    throw new Error('process killed');
+  } }).tick();
+  await restoreFiles(crash);
+  await createAutoRunner(root, { verify, worker: async () => assert.fail('no worker on detection') }).tick();
+  const interrupted = (await loadState(root)).jobs[0];
+  assert.equal(interrupted.destination.repository, admittedRepository);
+  observed = 'Fixture/Repo';
+  assert.equal((await readAutoRun(root)).receipts[0].spec.destination.repository, 'fixture/repo');
+  const queued = await recoverKnownDispatchReceipt(root, sent.job.id, { confirm: true, verify, inspectDispatch: async () => ({ ...dev, state: 'succeeded', liveness: 'exited' }) });
+  assert.equal(queued.state, 'queued'); assert.equal(queued.attempts, 1); assert.equal(queued.livenessResume.mode, 'same_attempt_liveness');
+  await createAutoRunner(root, { verify, worker: async job => { assert.equal(job.attempts, 1); return { text: 'Entrega recuperada.' }; } }).tick();
+  assert.equal((await loadState(root)).jobs[0].state, 'succeeded');
+});

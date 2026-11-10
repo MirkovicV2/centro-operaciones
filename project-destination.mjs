@@ -51,7 +51,8 @@ export function githubRepository(origin) {
   if (!match || match[1].split('/').some(part => part === '.' || part === '..')) throw new Error('Origin debe ser un repositorio GitHub HTTPS o SSH, sin credenciales ni rutas locales.');
   return match[1];
 }
-export const sameRepository = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+export { sameRepository } from './repository-name.mjs';
+import { sameRepository } from './repository-name.mjs';
 
 // Inject Git in tests. Production only observes the configured existing remote;
 // it never fetches, changes refs, creates branches, or writes to GitHub.

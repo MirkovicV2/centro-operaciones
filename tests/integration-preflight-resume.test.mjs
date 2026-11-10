@@ -36,12 +36,13 @@ const effectFree = (job, record) => ({ kind: 'effect_free_integration', jobId: j
 
 // Runs the pipeline to a sealed validation and then fails the integration the way
 // orca-provider does when gh fails before preflight_complete (job 7 of EOC-E2E-01).
-async function fixture(t, { workspaceName = 'fixture', id = 'preflight-job', receiptId = 'receipt-preflight' } = {}) {
+async function fixture(t, { workspaceName = 'fixture', id = 'preflight-job', receiptId = 'receipt-preflight', observedRepository } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'integration-preflight-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const workspace = path.join(root, 'workspaces', workspaceName); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
   const destination = { workspace, checkout: `workspaces/${workspaceName}`, repository: 'fixture/repo', branch: 'feature', baseBranch: 'main', sha: SHA.local, remoteSha: SHA.local, baseSha: SHA.base, verified: true };
-  const verify = async () => structuredClone(destination);
+  // observedRepository: origin keeps its case (13) while the receipt and old records are lower case.
+  const verify = async () => ({ ...structuredClone(destination), ...(observedRepository ? { repository: observedRepository } : {}) });
   await setAutoRun(root, 'agency', true, { confirm: true });
   const sent = await confirmSubmission(root, receiptId, { id, business: 'agency', kind: 'code', provider: 'orca',
     title: 'Integrar tras aprobación', prompt: 'Complete the fixture acceptance.', contract: { acceptance: ['Complete the fixture acceptance.'] }, workspace, isolated: true, branch: 'feature', destination, maxAttempts: 2,
@@ -333,4 +334,36 @@ test('effectFreeIntegrationRecord accepts mid-validation records only for a clos
   assert.equal(effectFreeIntegrationRecord({ ...record, status: 'validated', phase: 'validation_approved' }, [], 'j1', { closed: true }), true);
   assert.equal(effectFreeIntegrationRecord({ ...record, status: 'running', phase: 'commit_intent' }, [], 'j1', { closed: true }), false);
   assert.equal(effectFreeIntegrationRecord({ ...record, commitSha: 'c'.repeat(40) }, [], 'j1', { closed: true }), false);
+});
+
+test('case-mixed data (receipt and records lower case, origin Fixture/Repo): integration-only resume and retry-checkout still work', async t => {
+  const f = await fixture(t, { observedRepository: 'Fixture/Repo' });
+  assert.equal(f.before.destination.repository, 'Fixture/Repo', 'admission stores the verified origin case');
+  assert.equal((await readAutoRun(f.root)).receipts[0].spec.destination.repository, 'fixture/repo');
+  assert.equal(f.record.repository, 'fixture/repo');
+  const queued = await f.recover();
+  assert.equal(queued.livenessResume.integrationOnly, true);
+  let integrations = 0;
+  const command = async args => {
+    if (args[0] === 'repo' && args[1] === 'list') return { repos: [{ path: f.workspace }] };
+    if (args[1] === 'run-show') return { run: { id: runId, coordinator_handle: senderId } };
+    if (args[0] === 'terminal') return { terminal: { handle: senderId, connected: true, writable: true } };
+    assert.fail('No native command expected: ' + args.join(' '));
+  };
+  await createAutoRunner(f.root, { verify: f.verify, captureSnapshot: async () => snapshot,
+    worker: (job, ctx) => runOrca(job, ctx, { command, verifyDestination: f.verify, captureSnapshot: async () => snapshot,
+      integrate: async (job, _ctx, options) => { integrations++; assert.equal(job.destination.repository, 'Fixture/Repo'); await options.persist({ ...options.previous, phase: 'complete', status: 'completed' }); return { phase: 'complete' }; } }) }).tick();
+  assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded'); assert.equal(integrations, 1);
+
+  const g = await fixture(t, { workspaceName: 'other', id: 'case-job-2', receiptId: 'receipt-case-2', observedRepository: 'Fixture/Repo' });
+  await resolveJob(g.root, g.jobId, { confirm: true });
+  await patchAuto(g.root, state => { state.receipts[0].status = 'reviewed'; });
+  await fs.writeFile(g.lockPath, JSON.stringify({ jobId: g.jobId, receiptId: g.receiptId, attempt: 1, pid: 2147483647 }));
+  const next = await confirmSubmission(g.root, 'receipt-next', { id: 'next-job', business: 'agency', kind: 'code', provider: 'orca', title: 'Siguiente', prompt: 'Complete the fixture acceptance.',
+    contract: { acceptance: ['Complete the fixture acceptance.'] }, workspace: g.workspace, isolated: true, branch: 'feature', destination: g.destination, maxAttempts: 2 });
+  await createAutoRunner(g.root, { verify: g.verify, worker: async () => assert.fail('locked') }).tick();
+  const git = async args => args[0] === 'remote' ? 'git@github.com:Fixture/Repo.git' : args[0] === 'rev-parse' ? SHA.local : `${args.at(-1) === 'main' ? SHA.base : SHA.local}\trefs/heads/${args.at(-1)}`;
+  const inspectIntegrationEffects = (root, job, record, options) => inspectEffectFreeIntegration(root, job, record, { ...options, git, gh: async () => '[]' });
+  assert.equal((await retryCheckoutAdmission(g.root, next.receipt.id, { confirm: true, inspectWorker: async () => {}, inspectIntegrationEffects })).status, 'pending');
+  await assert.rejects(fs.access(g.lockPath), { code: 'ENOENT' });
 });

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { QUEUE_BUSINESSES, addJob, loadState, runQueue, recoverDashboardQueue, retryJob, validateSpec, acquireLock, acquireLedgerLock, releaseLock, queueKnownLivenessResume, elapsedAttemptMs, executionTimeExhausted, isEffectFreeLivenessPreflight, isSameAttemptRecoveryMode, deliveryTransportError, assertDeliveryTransportProof, recoveryFingerprint, integrationValidationSteps, assertIntegrationValidationProof, queueIntegrationValidationResume, assertCommittedIntegrationRecord, assertIntegrationReconcileProof, queueIntegrationReconcileResume } from './queue.mjs';
 import { verifyGitHubDestination } from './project-destination.mjs';
+import { sameRepository } from './repository-name.mjs';
 import { captureIntegrationSnapshot } from './github-integration.mjs';
 import { inspectCommittedIntegration, inspectEffectFreeIntegration, effectFreeIntegrationRecord } from './integration-recovery.mjs';
 import { replaceLocalFile } from './atomic-file.mjs';
@@ -459,7 +460,7 @@ export async function retryCheckoutAdmission(root, id, { confirm = false, inspec
 
 function assertRecoveryDestination(expected, observed) {
   const keys = ['workspace', 'branch', 'repository', 'baseBranch', 'sha', 'remoteSha', 'baseSha'];
-  if (keys.some(key => !expected?.[key] || observed?.[key] !== expected[key])
+  if (keys.some(key => !expected?.[key] || (key === 'repository' ? !sameRepository(observed?.[key], expected[key]) : observed?.[key] !== expected[key]))
     || !['sha', 'remoteSha', 'baseSha'].every(key => /^[a-f0-9]{40,64}$/i.test(expected[key]))
     || expected.sha !== expected.remoteSha) throw new Error('El destino observado diverge del checkout, ramas o SHA originales; no se autoriza otro baseline.');
 }
@@ -608,7 +609,7 @@ async function recoverKnownDispatchOnce(root, jobId, { inspectDispatch, verify, 
       if (!job || (job.kind !== 'code' && !decidedStep) || !receipt?.eligible || !job.autoIntent?.eligible || receipt.id !== job.autoIntent.receiptId
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec?.kind !== job.kind
         || job.kind === 'code' && (receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-          || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch)
+          || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch)
         || !['needs_attention', 'retrying'].includes(receipt.status)
         || !(job.state === 'needs_attention' || resuming && job.state === 'queued') || (!sameAttempt && job.attempts >= job.maxAttempts)
         || !preservesDispatch || !/^run_[A-Za-z0-9_-]{6,80}$/.test(stage.runId || '')
@@ -740,7 +741,7 @@ async function recoverIntegrationReconcileOnce(root, jobId, { inspectDispatch })
       const step = job?.workflow?.steps?.find(item => item.key === 'integration');
       if (!job || job.kind !== 'code' || !receipt?.eligible || !job.autoIntent?.eligible || job.autoIntent.receiptId !== receipt.id
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-        || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
+        || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
         || !['needs_attention', 'retrying'].includes(receipt.status) || !['needs_attention', ...(resuming ? ['queued'] : [])].includes(job.state)
         || !resuming && job.error?.code !== 'github_integration_needs_attention' && !recoverableChecksTimeout(job, record) || job.workflow?.currentStage !== 'integration'
         || step?.status !== 'blocked' || step.error !== 'integration_needs_attention' || record?.status !== 'needs_attention') {
@@ -848,7 +849,7 @@ async function recoverIntegrationValidationOnce(root, jobId, { inspectDispatch, 
       const preEffectFailure = scope === 'integration' && record?.phase !== undefined;
       if (!job || job.kind !== 'code' || !receipt?.eligible || !job.autoIntent?.eligible || job.autoIntent.receiptId !== receipt.id
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-        || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
+        || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
         || !['needs_attention', 'retrying'].includes(receipt.status) || !['needs_attention', ...(resuming ? ['queued'] : [])].includes(job.state)
         || !resuming && scope === 'integration' && !integrationBlocked
         || !recordEligible || record.jobId !== job.id || record.receiptId !== receipt.id
@@ -966,7 +967,7 @@ async function reviseJobAcceptanceOnce(root, jobId, { productAcceptance, reason,
       const record = state.integrations?.[receipt?.id], prior = receipt?.contractRevision;
       if (!job || !receipt?.eligible || !job.autoIntent?.eligible || receipt.id !== job.autoIntent.receiptId
         || receipt.business !== job.business || receipt.spec?.id !== job.id || receipt.spec.workspace !== job.workspace || receipt.spec.branch !== job.branch
-        || receipt.spec.destination?.repository !== job.destination?.repository || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
+        || !sameRepository(receipt.spec.destination?.repository, job.destination?.repository) || receipt.spec.destination?.baseBranch !== job.destination?.baseBranch
         || receipt.dispatchRecovery?.phase === 'ready') throw new Error('El recibo no corresponde al contrato y destino originales.');
       const resuming = prior && ['verified', 'lock_released'].includes(prior.phase);
       const replay = prior?.phase === 'ready' && receipt.status === 'pending' && job.state === 'queued';

@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { setTimeout as wait } from 'node:timers/promises';
 import { replaceLocalFile } from './atomic-file.mjs';
 import { containsSecret } from './redaction.mjs';
+import { sameRepository } from './repository-name.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { normalizeJobContract, validateContinuation, validateDelivery, IDENTIFIERS } from './workflow-contract.mjs';
 import { jobCoordination } from './coordination.mjs';
@@ -798,7 +799,7 @@ export function assertCommittedIntegrationRecord(job, record) {
   const validation = record?.validation, steps = integrationValidationSteps(job);
   const developer = steps.find(item => item.stage === 'developer');
   if (!record || !['pr_intent', 'pr_confirmed', 'checks_pending', 'merge_intent'].includes(record.phase)
-    || record.jobId !== job.id || record.receiptId !== job.autoIntent?.receiptId || record.repository !== job.destination?.repository
+    || record.jobId !== job.id || record.receiptId !== job.autoIntent?.receiptId || !sameRepository(record.repository, job.destination?.repository)
     || record.sourceBranch !== job.branch || record.baseBranch !== job.destination?.baseBranch || record.sourceBranch === record.baseBranch
     || !/^[a-f0-9]{40,64}$/.test(record.commitSha || '') || !/^[a-f0-9]{64}$/.test(record.manifest || '')
     || record.remoteBaseSha !== job.destination?.baseSha || record.baseline !== job.destination?.sha
@@ -823,7 +824,7 @@ export function assertIntegrationReconcileProof(job, recovery, proof) {
   const record = recovery.originalIntegrationRecord;
   assertCommittedIntegrationRecord(job, record);
   if (!proof || proof.kind !== 'committed_integration' || recovery.integrationRecordHash !== recoveryFingerprint(record)
-    || ['jobId', 'receiptId', 'commitSha', 'manifest', 'phase', 'repository', 'sourceBranch', 'baseBranch'].some(key => proof[key] !== record[key])
+    || ['jobId', 'receiptId', 'commitSha', 'manifest', 'phase', 'sourceBranch', 'baseBranch'].some(key => proof[key] !== record[key]) || !sameRepository(proof.repository, record.repository)
     || proof.baseSha !== record.remoteBaseSha || proof.prBaseSha !== record.remoteBaseSha || proof.prHeadSha !== record.commitSha
     || !Number.isInteger(proof.prNumber) || proof.prNumber < 1 || record.prNumber && proof.prNumber !== record.prNumber
     || typeof proof.prUrl !== 'string' || proof.prUrl.toLowerCase() !== `https://github.com/${record.repository}/pull/${proof.prNumber}`.toLowerCase()

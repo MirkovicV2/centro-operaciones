@@ -55,7 +55,8 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (checksTimeoutMs !== null && (!Number.isFinite(checksTimeoutMs) || checksTimeoutMs < 0 || checksTimeoutMs > 900_000)
     || !Number.isFinite(checksIntervalMs) || checksIntervalMs < 1 || checksIntervalMs > 30_000
     || noChecksGraceMs !== null && (!Number.isFinite(noChecksGraceMs) || noChecksGraceMs < 0)) throw new Error('Límites de espera de checks inválidos.');
-  if (previous && ['jobId', 'receiptId', 'repository', 'sourceBranch', 'baseBranch'].some(key => previous[key] !== ({ jobId: job.id, receiptId: intent.receiptId, repository: dest.repository, sourceBranch: job.branch, baseBranch: dest.baseBranch })[key])) throw new Error('El registro de integración pertenece a otro encargo o destino.');
+  if (previous && (['jobId', 'receiptId', 'sourceBranch', 'baseBranch'].some(key => previous[key] !== ({ jobId: job.id, receiptId: intent.receiptId, sourceBranch: job.branch, baseBranch: dest.baseBranch })[key])
+    || !sameRepository(previous.repository, dest.repository))) throw new Error('El registro de integración pertenece a otro encargo o destino.');
   if (previous?.commitSha && (!/^[a-f0-9]{64}$/i.test(previous.manifest || '') || previous.manifest !== job.integrationSnapshot)) throw new Error('Falta el manifest original del commit aprobado; no se sustituye por otro snapshot.');
   if (previous?.phase === 'complete') return previous;
   if (previous?.status === 'needs_attention' && !['commit_confirmed', 'push_intent', 'push_confirmed', 'pr_intent', 'pr_confirmed', 'checks_pending', 'merge_intent'].includes(previous.phase)) throw new Error('Integración previa requiere revisión manual; no se repetirá a ciegas.');

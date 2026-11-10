@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { githubRepository, sameRepository, verifyGitHubDestination } from '../project-destination.mjs';
 import { createProject, updateProject, loadDashboardState } from '../panel/agency-assistant/dashboard-state.mjs';
+import { integrateGitHub } from '../github-integration.mjs';
 
 // Improvement 13 (F9): owner/repo keeps its case; every comparison ignores it.
 test('githubRepository preserves case for HTTPS and SSH origins and sameRepository compares without it', () => {
@@ -40,4 +41,17 @@ test('the panel stores the repository exactly as typed', async t => {
   await updateProject(root, project.id, { repository: ' DaDaVL/Eoc-E2E-Sandbox ' });
   assert.equal((await loadDashboardState(root)).projects[0].repository, 'DaDaVL/Eoc-E2E-Sandbox');
   await assert.rejects(updateProject(root, project.id, { repository: 'not a repo' }), /Origin debe ser/);
+});
+
+test('integrateGitHub accepts a lower-case previous record for a destination in origin case and still rejects another repository', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'repo-case-int-'))); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspaces', 'checkout'); await fs.mkdir(workspace, { recursive: true });
+  const job = { id: 'j', state: 'running', title: 'T', autoIntent: { eligible: true, receiptId: 'r' }, workspace, branch: 'feature', destination: { repository: 'Owner/Repo', baseBranch: 'main' } };
+  const previous = { jobId: 'j', receiptId: 'r', repository: 'owner/repo', sourceBranch: 'feature', baseBranch: 'main', phase: 'validation_approved', status: 'validated' };
+  const stop = new Error('reached origin check');
+  const git = async args => { if (args[0] === 'remote') throw stop; assert.fail(args.join(' ')); };
+  await assert.rejects(integrateGitHub(job, { root }, { git, gh: async () => '', previous }), error => error === stop);
+  await assert.rejects(integrateGitHub(job, { root }, { git, gh: async () => '', previous: { ...previous, repository: 'owner/other' } }), /pertenece a otro encargo/);
+  const { repository, ...withoutRepository } = previous;
+  await assert.rejects(integrateGitHub(job, { root }, { git, gh: async () => '', previous: withoutRepository }), /pertenece a otro encargo/);
 });
