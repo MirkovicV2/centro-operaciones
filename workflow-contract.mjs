@@ -131,7 +131,7 @@ function normalizeUxAcceptanceDecision(value, expected) {
   return { ...value, decisions: value.decisions.map(item => item === matches[0] ? { ...item, value: serialized } : item) };
 }
 
-export function validateDelivery(value, expected = {}, { requireUxAcceptanceArray = false } = {}) {
+export function validateDelivery(value, expected = {}, { requireUxAcceptanceArray = false, strictReview = false } = {}) {
   if (!object(value) || value.version !== 1) throw new ContractError('La entrega debe usar el contrato version 1.');
   for (const key of ['jobId', 'runId', 'taskId', 'dispatchId']) {
     if (!IDENTIFIERS[key].test(value[key] ?? '') || (expected[key] && value[key] !== expected[key])) {
@@ -159,6 +159,33 @@ export function validateDelivery(value, expected = {}, { requireUxAcceptanceArra
     throw new ContractError('La entrega tiene campos ausentes o inválidos.');
   }
   if (new Set(value.questions.map(q => q.id)).size !== value.questions.length) throw new ContractError('Preguntas duplicadas en la entrega.');
+  // C (structured review): QA and Revisión may report findings with a severity and the candidate they judged.
+  // Both fields are optional, so a v1 delivery without them stays valid.
+  if (value.findings !== undefined && (!['qa', 'reviewer'].includes(value.stage) || !Array.isArray(value.findings) || value.findings.length > 50
+    || !value.findings.every(item => object(item) && FINDING_SEVERITIES.includes(item.severity) && nonempty(item.summary, 2000)
+      && typeof item.evidence === 'string' && item.evidence.length <= 4000
+      && (item.criterionId === undefined || /^crit_[a-f0-9]{16}$/.test(item.criterionId))))) {
+    throw new ContractError('Los hallazgos de la entrega son inválidos.');
+  }
+  if (value.candidate !== undefined && (!['qa', 'reviewer'].includes(value.stage) || !/^[a-f0-9]{64}$/.test(value.candidate))) {
+    throw new ContractError('La huella del candidato revisado es inválida.');
+  }
+  if (value.candidate !== undefined && expected.candidate && value.candidate !== expected.candidate) {
+    throw new ContractError('El veredicto corresponde a otro candidato; repite la etapa sobre el actual.', 'delivery_candidate_mismatch');
+  }
+  const blocking = (value.findings ?? []).filter(item => item.severity === 'blocking');
+  if (['qa', 'reviewer'].includes(value.stage) && value.approval === 'approved' && blocking.length) {
+    throw new ContractError('Una aprobación no puede tener hallazgos bloqueantes.');
+  }
+  // Stop only for something relevant: a product rejection needs a blocking finding or a failed criterion,
+  // each with evidence. Non-blocking findings are recorded and shown, never a reason to stop.
+  // Only for a fresh report (strictReview): stored deliveries keep validating as they did when accepted.
+  if (strictReview && ['qa', 'reviewer'].includes(value.stage) && value.outcome === 'blocked' && value.approval === 'blocked'
+    && !value.questions.some(q => q.required)
+    && !blocking.some(item => item.evidence.trim())
+    && !value.acceptance.some(item => item.status === 'failed' && item.evidence.trim())) {
+    throw new ContractError('Un rechazo necesita un hallazgo bloqueante o un criterio fallido, con evidencia. Un fallo propio de la etapa es outcome:failed.', 'delivery_block_unjustified');
+  }
   if (value.outcome === 'needs_input' && !value.questions.some(q => q.required)) throw new ContractError('needs_input requiere una pregunta imprescindible.');
   if (value.outcome === 'completed' && value.questions.some(q => q.required)) throw new ContractError('Una entrega completada no puede tener preguntas imprescindibles.');
   if (value.approval === 'approved' && (value.outcome !== 'completed' || value.scope !== 'complete'
@@ -179,7 +206,7 @@ export function validateDelivery(value, expected = {}, { requireUxAcceptanceArra
   return structuredClone(value);
 }
 
-export function parseDelivery(text, expected, { required = false, requireUxAcceptanceArray = false, preserveExplicitBlock = false } = {}) {
+export function parseDelivery(text, expected, { required = false, requireUxAcceptanceArray = false, preserveExplicitBlock = false, strictReview = false } = {}) {
   const source = String(text ?? '').trim();
   let value;
   if (source.startsWith('{')) {
@@ -197,7 +224,7 @@ export function parseDelivery(text, expected, { required = false, requireUxAccep
     && value.acceptance.some(item => item?.status === 'failed' && typeof item.evidence === 'string' && item.evidence.trim()
       && expected.acceptance?.some(criterion => matchesCriterion(item, criterion)))) value = { ...value, outcome: 'blocked' };
   const contractual = blocks.length || required || (object(value) && ('jobId' in value || 'dispatchId' in value || 'approval' in value));
-  if (value !== undefined && contractual) return validateDelivery(value, expected, { requireUxAcceptanceArray });
+  if (value !== undefined && contractual) return validateDelivery(value, expected, { requireUxAcceptanceArray, strictReview });
   if (required) throw new ContractError('Falta la entrega estructurada; conserva la evidencia y solicita revisión.', 'delivery_missing');
   return null;
 }
@@ -210,6 +237,7 @@ export function deliveryInstructions(job, stage, runId) {
     'taskId y dispatchId deben ser los de TU asignación Orca, nunca inventados ni tomados de otra etapa.',
     'outcome: completed|needs_input|blocked|failed; scope: complete|partial; summary: resumen; approval: approved|blocked|not_applicable. Si QA o Revisión rechazan el producto, usa outcome:blocked y approval:blocked aunque el informe esté completo.',
     'acceptance:[{criterion,criterionId,status:passed|failed|unverified,evidence}], evidence:[referencias o comprobaciones], questions:[{id,text,required,decisionKey}], decisions:[{key,value}]. Usa arrays vacíos cuando no correspondan.',
+    ...(['qa', 'reviewer'].includes(stage) ? ['QA/REVISIÓN: findings:[{severity:blocking|non_blocking,criterionId?,summary,evidence}] para lo que encuentres. Para solo por algo relevante: un rechazo (outcome:blocked, approval:blocked) necesita al menos un hallazgo blocking o un criterio failed, cada uno con evidencia reproducible. Lo non_blocking se registra y no impide aprobar. Si tú no pudiste completar la comprobación (entorno, herramienta, tiempo), usa outcome:failed: no es un rechazo del producto. Si el brief te da la huella del candidato, cópiala en candidate.'] : []),
     ...(job.contract?.acceptance?.length ? ['CRITERIOS DEL CONTRATO CON ID ESTABLE: ' + JSON.stringify(acceptanceCriteriaIds(job.contract.acceptance)) + '. En acceptance copia criterionId tal cual o el texto del criterio; el motor compara el texto sin distinguir tildes, mayúsculas ni espacios, pero no reinterpreta criterios distintos.'] : []),
     'Cada decisions[].value debe ser una cadena de texto. Los criterios de producto ya están en el contrato vigente. Referéncialos en texto sin volver a copiar el array dentro de decisions.',
     'La aceptación corresponde a TU etapa: outcome:completed y scope:complete acreditan que TU etapa terminó, no el cierre global del job. No atribuyas una implementación o prueba futura a UX. QA/Revisión solo aprueban con criterios comprobados y evidencia.',
@@ -224,14 +252,15 @@ export function deliveryInstructions(job, stage, runId) {
   ].join('\n');
 }
 
+export const FINDING_SEVERITIES = ['blocking', 'non_blocking'];
 export const deliveryApproved = delivery => delivery?.outcome === 'completed' && delivery.scope === 'complete' && delivery.approval === 'approved';
 export const fingerprint = value => createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest('hex');
 
 export function handoffText(output) {
   const report = output.artifact ? '\nInforme completo verificado: ' + output.artifact.path + '\nSHA256: ' + output.artifact.sha256 : '';
   if (output.delivery) {
-    const { summary, acceptance, decisions, evidence, questions, scope, outcome } = output.delivery;
-    return JSON.stringify({ summary, acceptance, decisions, evidence, questions, scope, outcome }, null, 2) + report;
+    const { summary, acceptance, decisions, evidence, questions, scope, outcome, findings, candidate } = output.delivery;
+    return JSON.stringify({ summary, acceptance, decisions, evidence, questions, scope, outcome, findings, candidate }, null, 2) + report;
   }
   // Legacy reports must retain their acceptance section; a prefix is not a summary.
   if (output.text.length <= 24000) return output.text + report;
