@@ -25,6 +25,11 @@ jobs:
           node-version: '24'
       - name: Verify pipeline and context contracts
         run: npm test
+      # The browser suites need a Playwright module and its Chromium build. The repository
+      # adds no dependency, so this step reports them as skipped unless PLAYWRIGHT_MODULE
+      # points to an installed module (see README, "Verificar sin consumo").
+      - name: Browser suites (skipped without Playwright)
+        run: npm run test:browser
       - name: Start a clean local panel
         shell: bash
         run: |

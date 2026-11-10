@@ -108,7 +108,9 @@ npm test
 npm run metrics
 ```
 
-Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace. `centro.cmd` usa el Node 24 portable existente si está disponible y, en su defecto, `node` del sistema.
+Las pruebas utilizan carpetas temporales y proveedores simulados: no llaman a OpenAI ni arrancan trabajadores Codex. La instalación inicial tampoco lo hace.
+
+Las siete suites de navegador (`panel/tests/*.browser.mjs`) necesitan Playwright con Chromium. Este repositorio no lo declara como dependencia: `npm run test:browser` las ejecuta cuando `PLAYWRIGHT_MODULE` apunta a `playwright/index.mjs` de un checkout que ya lo tenga (o existe el checkout histórico `workspaces/portfolio-motion`), y las omite con un aviso y salida 0 cuando no. El flujo de CI de Ubuntu llama a ese script, de modo que hoy las omite; para ejecutarlas en CI haría falta instalar Playwright y sus navegadores en el runner (propuesta en `PROPUESTA.md`). `centro.cmd` usa el Node 24 portable existente si está disponible y, en su defecto, `node` del sistema.
 
 ## Retirar falsos éxitos de código
 

@@ -3,6 +3,6 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "start": "node panel/dashboard.mjs", "test": "node tests/run-tests.mjs", "test:queue": "node --test tests/queue.test.mjs", "metrics": "node metrics.mjs" },
+  "scripts": { "start": "node panel/dashboard.mjs", "test": "node tests/run-tests.mjs", "test:queue": "node --test tests/queue.test.mjs", "test:browser": "node tests/run-browser-tests.mjs", "metrics": "node metrics.mjs" },
   "engines": { "node": ">=20" }
 }
