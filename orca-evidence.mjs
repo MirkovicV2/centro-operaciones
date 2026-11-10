@@ -14,7 +14,7 @@ export function isOrcaStatusReadError(code) {
 export function normalizeWorkerStatus(value) {
   if (!value || typeof value !== 'object') throw new ContractError('Estado Orca ilegible.', 'orca_status_invalid');
   if (!value.worker && !value.dispatch && !value.projection) return value;
-  const { worker = {}, dispatch = {}, projection = {}, terminal, observation = {} } = value;
+  const { worker = {}, dispatch = {}, projection = {}, terminal, observation = {}, terminalResource: resource } = value;
   const same = (name, values) => {
     const present = values.filter(item => item !== undefined && item !== null);
     if (present.some(item => typeof item !== 'string' || !item) || new Set(present).size > 1) {
@@ -38,15 +38,23 @@ export function normalizeWorkerStatus(value) {
   const terminalHandle = same('terminal', [dispatch.assigneeHandle, worker.agentTerminalHandle, terminal?.handle]);
   const worktreeId = same('workspace', [worker.worktreeId, projection.workspace?.id, terminal?.worktreeId]);
   const verdict = projection.liveness?.verdict;
-  const exactExit = observation.status === 'exited' && observation.exactWorker === true
-    && terminalHandle && terminal?.handle === terminalHandle && terminal.connected === false && terminal.writable === false;
+  const exactObservation = observation.status === 'exited' && observation.exactWorker === true && Boolean(terminalHandle);
+  const terminalExit = exactObservation && terminal?.handle === terminalHandle && terminal.connected === false && terminal.writable === false;
+  // 23 (D2): a structured (chat) worker has no terminal object. Orca still proves its exit
+  // with the exact observation, the projection verdict and the released resource of this dispatch.
+  const structuredExit = exactObservation && terminal == null && verdict === 'exited'
+    && resource?.ownerDispatchId === dispatchId && resource.terminalHandle === terminalHandle
+    && resource.ownershipState === 'released' && resource.releaseState === 'released';
+  const exactExit = terminalExit || structuredExit;
   if (exactExit && verdict === 'live') throw new ContractError('La evidencia Orca contradice el cierre del trabajador.', 'orca_liveness_conflict');
+  const worktreePath = typeof worktreeId === 'string' && worktreeId.includes('::') ? worktreeId.split('::').slice(1).join('::') : undefined;
   return {
     dispatchId, taskId, runId, state, dispatchStatus,
     liveness: exactExit ? 'exited' : verdict === 'exited' || verdict === 'live' && observation.exactWorker !== true ? 'unverifiable' : verdict ?? 'unverifiable',
-    terminal: terminalHandle, worktreeId, workspace: terminal?.worktreePath,
+    terminal: terminalHandle, worktreeId, workspace: terminal?.worktreePath ?? (structuredExit ? worktreePath : undefined),
     exactWorker: observation.exactWorker === true,
     exitEvidence: exactExit ? 'native_exact_observation' : null,
+    ...(structuredExit ? { surface: 'structured' } : {}),
   };
 }
 
