@@ -1002,7 +1002,7 @@ export function assertDeliveryTransportProof(job, proof) {
     return Object.fromEntries(fields.map(key => [key, proof[key]]));
   }
   const hashes = ['originalArtifactSha256', 'receiptSha256', 'transcriptSha256', 'deliverySha256'];
-  if (!isDeliveryTransportCheckpoint(job) || proof?.kind !== 'unicode_loss'
+  if (!isDeliveryTransportCheckpoint(job) || !['unicode_loss', 'criteria_normalized'].includes(proof?.kind)
     || proof.jobId !== job.id || proof.jobAttempt !== step.taskInputAttempt || proof.stage !== step.key
     || proof.runId !== job.workflow.runId || proof.runId !== step.runId || proof.taskId !== step.taskId || proof.dispatchId !== step.dispatchId
     || hashes.some(key => !/^[a-f0-9]{64}$/i.test(proof[key] || '')) || proof.originalArtifactSha256 !== step.artifact.sha256
