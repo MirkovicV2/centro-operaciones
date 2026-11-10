@@ -1,3 +1,4 @@
+import { normalizeProjectLevels, resolveLaunch, launchArgs } from './launch-choice.mjs';
 import { readStageContracts, contractsBrief } from './project-contracts.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -64,7 +65,7 @@ export function normalizeLaunchLevels(value) {
       agents[agent][level] = { ...(flags.model !== undefined ? { model: flags.model } : {}), ...(flags.effort !== undefined ? { effort: flags.effort } : {}) };
     }
   }
-  return { roles, agents };
+  return { roles, agents, projects: normalizeProjectLevels(value.projects, LAUNCH_LEVELS, fail) };
 }
 export async function readLaunchLevels(root) {
   let raw;
@@ -74,11 +75,8 @@ export async function readLaunchLevels(root) {
   try { value = JSON.parse(raw); } catch { throw new ProviderError('launch_levels_invalid', `data/${LAUNCH_LEVELS_FILE}: JSON ilegible.`, { uncertain: false }); }
   return normalizeLaunchLevels(value);
 }
-export function launchFlags(roleName, agent, levels = DEFAULT_LAUNCH_LEVELS) {
-  const level = levels.roles?.[roleName] ?? DEFAULT_LAUNCH_LEVELS.roles[roleName];
-  const flags = levels.agents?.[agent]?.[level];
-  if (!flags) return [];
-  return [...(flags.model ? ['--model', flags.model] : []), ...(flags.effort ? ['--effort', flags.effort] : [])];
+export function launchFlags(roleName, agent, levels = DEFAULT_LAUNCH_LEVELS, { projectId = null, jobLaunch = null } = {}) {
+  return launchArgs(resolveLaunch({ roleName, agent, levels, projectId, jobLaunch, fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles }));
 }
 
 function compactName(value, limit) {
@@ -397,8 +395,10 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     // Jobs predating agent selection always started with Codex.
     const orcaAgent = retry ? retry.orcaAgent ?? 'codex' : configuredOrcaAgent();
     const launchLevels = await readLaunchLevels(ctx.root);
-    const launchPreferences = launchFlags(roleKey, orcaAgent, launchLevels);
-    const launchLevel = launchLevels.roles[roleKey];
+    // Default → project → job: the most specific choice wins, and the stage records what it was launched with.
+    const launch = resolveLaunch({ roleName: roleKey, agent: orcaAgent, levels: launchLevels, projectId: job.projectId, jobLaunch: job.launch, fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+    const launchPreferences = launchArgs(launch);
+    const launchLevel = launch.level;
     if (retry && !['failed', 'cancelled', 'abandoned'].includes(retry.dispatchStatus)
       && !(role.stageKey === 'developer' && isStoppedDeveloperRetry(job, savedStep))) {
       throw new ProviderError('orca_retry_invalid', 'El intento anterior no permite un retry automático.', { uncertain: true });
@@ -410,7 +410,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
     const brief = retry ? null : dispatchBrief(specArtifact, specIdentity, orcaAgent);
-    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel,
+    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, launch,
       ...(role.stageKey === 'qa' && job.workflowV2Snapshot ? { workflowV2Snapshot: job.workflowV2Snapshot } : {}), inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
