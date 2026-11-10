@@ -17,6 +17,7 @@ import { ORCA_OUTPUT_LIMIT_BYTES, isOrcaStatusReadError, normalizeWorkerStatus, 
 
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 import { excerpt } from './redaction.mjs';
+import { runWorkflowV2Gate, workflowV2For } from './workflow-v2-gate.mjs';
 export { ORCA_EXE };
 const PROFILE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.codex', 'agents');
 const GAME_SKILL_DIR = path.resolve(PROFILE_DIR, '..', 'skills', 'game-production');
@@ -673,6 +674,7 @@ export async function runOrca(job, ctx, {
   inspectIntegration = inspectCommittedIntegration,
   polling = {},
   readArchivedFinal,
+  runWorkflowV2 = runWorkflowV2Gate,
 } = {}) {
   const startedAt = Date.now();
   const metrics = { orcaCliCalls: 0, dispatchStarts: 0, polls: 0, inputTokens: null, outputTokens: null };
@@ -721,6 +723,9 @@ export async function runOrca(job, ctx, {
     return { provider: 'orca-planificador', ...result, metrics: { ...metrics, elapsedMs: Date.now() - startedAt } };
   }
   if (job.kind !== 'code') throw new ProviderError('orca_unsupported_job', 'Tipo de trabajo no compatible con los perfiles Orca configurados.');
+  // Optional, off by default: a project listed in data/workflow-v2.json replaces the Revisión stage with
+  // Workflow V2 and is never integrated by the Centro (phase A). See workflow-v2-gate.mjs.
+  const workflowV2 = await workflowV2For(ctx.root, job);
 
   const design = job.business === 'games'
     ? 'Entrega una especificación de diseño jugable y verificable sin editar archivos. Define reglas, controles, ritmo, feedback y casos de prueba pertinentes.'
@@ -762,7 +767,7 @@ export async function runOrca(job, ctx, {
   if (previousIntegration?.commitSha && !/^[a-f0-9]{64}$/i.test(previousIntegration.manifest ?? '')) {
     throw new ProviderError('github_manifest_missing', 'El commit registrado no conserva el manifiesto aprobado; se requiere revisión antes de integrar.', { uncertain: true });
   }
-  const validation = job.autoIntent?.eligible === true ? await prepareIntegrationValidation(job, {
+  const validation = job.autoIntent?.eligible === true && !workflowV2 ? await prepareIntegrationValidation(job, {
     runId, developer, previous: previousIntegration, captureSnapshot, persist: record => persistIntegration(ctx.root, record),
   }) : null;
   const integrationSnapshot = validation?.snapshot ?? null;
@@ -773,6 +778,7 @@ export async function runOrca(job, ctx, {
       : 'Valida los cambios sin editarlos. Revisa los scripts del proyecto y ejecuta comprobaciones acotadas y relevantes de tipos, lint, compilación y comportamiento; no instales paquetes ni uses red. No añadas ni ejecutes suites de pruebas salvo que el encargo lo solicite expresamente. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO. Si la validación falla, aporta el comando y el error reproducible.',
     `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'developer', taskId: developer.taskId, dispatchId: developer.dispatchId });
   await enforceGate(ctx, 'qa', qa);
+  if (workflowV2) await runWorkflowV2(job, ctx, workflowV2, workspace); // always stops the job for the owner
   const review = await runStage(reviewed, ctx, 'revisor', workspace, runId,
     'Haz una revisión independiente y de solo lectura del diff, el encargo, la especificación UX y la evidencia de QA. Busca defectos funcionales, accesibilidad, regresiones y omisiones; no edites. Para devolver a Desarrollo un defecto reproducible, identifica en acceptance el criterio exacto del contrato como failed e incluye los pasos y la evidencia. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO.',
     `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}\n\nQA:\n${handoffText(qa)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'qa', taskId: qa.taskId, dispatchId: qa.dispatchId });
