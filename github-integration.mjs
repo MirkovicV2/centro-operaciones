@@ -36,15 +36,15 @@ function addField(hash, value) {
 
 // `git` and `gh` are injected command adapters. Tests use deterministic fakes;
 // production calls are only reached from the explicitly eligible auto-run path.
-// 17: a bounded default wait for checks (15 min, the maximum the validation below
-// allows) instead of an unbounded one, and an actionable no_checks state when the
-// PR never registers any check.
+// 17, revised with the owner: pending checks are awaited on the same PR and commit without a global
+// limit (checksTimeoutMs = null, as before 17). A caller may still pass a bound up to this maximum.
+// Distinct states: waiting, no_checks (no check ever registers) and no_permission (checks unreadable).
 export const DEFAULT_CHECKS_TIMEOUT_MS = 900_000;
 // Checks can register minutes after the push; only a PR still without any check after
 // this grace is reported as no_checks (before the generic timeout, with a clearer action).
 export const DEFAULT_NO_CHECKS_GRACE_MS = 600_000;
 export async function integrateGitHub(job, ctx, { git, gh, persist = async () => {}, previous = null, now = () => new Date().toISOString(),
-  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = DEFAULT_CHECKS_TIMEOUT_MS, checksIntervalMs = 15_000, noChecksGraceMs = DEFAULT_NO_CHECKS_GRACE_MS } = {}) {
+  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = null, checksIntervalMs = 15_000, noChecksGraceMs = DEFAULT_NO_CHECKS_GRACE_MS } = {}) {
   const intent = job.autoIntent;
   if (!intent || intent.eligible !== true || !intent.receiptId || job.state === 'cancelled') return { status: 'skipped', reason: 'not_eligible' };
   const dest = job.destination || {};
@@ -108,6 +108,15 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   if (!sha(base) || !sha(remoteHead) || (remoteHead !== job.destination?.remoteSha && !reconciledPush) || (base !== job.destination?.baseSha && !reconciledBase)) throw new Error('Baseline remoto divergente o desactualizado.');
   const behind = (await g(['rev-list', '--count', `HEAD..${remoteHead}`])).trim();
   if (behind !== '0') throw new Error('La rama remota diverge del checkout; sincroniza y revisa manualmente.');
+  // 38: before any effect, the credential must be able to read the checks of this repository, either as
+  // check runs or, with a fine-grained token, as Actions runs. Unreadable checks stop here, with nothing published.
+  if (job.branch !== dest.baseBranch && !record.checksSource) {
+    const readable = async args => { try { await h(args); return true; } catch (error) { if (checksPermissionDenied(error)) return false; throw error; } };
+    if (!await readable(['api', '--method', 'GET', `repos/${repo}/commits/${base}/check-runs`, '-f', 'per_page=1'])) {
+      if (!await readable(['api', '--method', 'GET', `repos/${repo}/actions/runs`, '-f', 'per_page=1'])) throw checksUnreadable(repo);
+      record.checksSource = 'actions';
+    }
+  }
   const existing = await h(['pr', 'list', '--repo', repo, '--head', job.branch, '--base', dest.baseBranch, '--state', 'open', '--limit', '100', '--json', pullRequestIdentityFields]);
   const prs = sameRepositoryPullRequests(JSON.parse(existing || '[]'), repo, job.branch, dest.baseBranch);
   if (job.branch !== dest.baseBranch && prs.length > 1) throw new Error('Más de una PR abierta para head/base; requiere revisión.');
@@ -182,7 +191,9 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
       }
     }
     const detail = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergeable,headRefOid,baseRefOid']));
-    const runs = JSON.parse(await h(['api', '--method', 'GET', `repos/${repo}/actions/runs`, '-f', `head_sha=${head}`, '-f', 'per_page=100']));
+    let runs;
+    try { runs = JSON.parse(await h(['api', '--method', 'GET', `repos/${repo}/actions/runs`, '-f', `head_sha=${head}`, '-f', 'per_page=100'])); }
+    catch (error) { throw checksPermissionDenied(error) ? checksUnreadable(repo) : error; }
     return { detail, checks: actionsRunsAsChecks(runs, head) };
   };
   const checkReadiness = async () => {
@@ -202,7 +213,12 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   const waitUntilReady = async () => {
     for (;;) {
       checkAbort();
-      const result = await checkReadiness();
+      let result;
+      try { result = await checkReadiness(); }
+      catch (error) {
+        if (error.code === 'github_checks_unreadable') await save('checks_pending', { prNumber: pr.number, prUrl: pr.url, checkState: 'no_permission', checkedAt: now(), error: error.message });
+        throw error;
+      }
       checkAbort();
       if (result.ready) {
         record.checks = result.checks;
@@ -223,7 +239,9 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
       if (result.failure) throw Object.assign(new Error(`PR pendiente de revisión: ${result.failure}`), { code: 'github_checks_blocked' });
       if (noChecks) throw Object.assign(new Error(`La PR ${pr.url} no tiene checks registrados: configura CI en la rama base o revisa y fusiona manualmente; la integración no fusiona sin checks aprobados.`), { code: 'github_no_checks' });
       if (clock() >= deadline) throw Object.assign(new Error('PR pendiente de checks al agotar la espera acotada; conserva esta PR para revisión.'), { code: 'github_checks_timeout' });
-      await wait(Math.min(checksIntervalMs, deadline - clock(), Math.max(1, noChecksAt - clock())), ctx.signal);
+      // Wake at the no_checks grace only while it is still ahead; afterwards poll at the normal interval
+      // (a past grace used to collapse the wait to 1 ms and poll GitHub in a tight loop).
+      await wait(Math.min(checksIntervalMs, deadline - clock(), noChecksAt > clock() ? noChecksAt - clock() : Infinity), ctx.signal);
     }
   };
   await waitUntilReady();
@@ -329,6 +347,12 @@ export function checksPermissionDenied(error) {
 // 38: GitHub Actions runs for the exact head, shaped like statusCheckRollup entries. Only the latest run of
 // each workflow and event counts (a new run replaces an older one); an incomplete listing fails closed.
 // Limitation: commit statuses and check runs from other CI apps are not visible through this API.
+// 38: the credential cannot read the checks in any supported way. A distinct state, never a timeout.
+function checksUnreadable(repo) {
+  return Object.assign(new Error(`La credencial de gh no puede leer los checks de ${repo} (ni check runs ni Actions). Usa la sesión normal de gh o da al token el permiso Actions: lectura; la integración no fusiona sin poder comprobar los checks.`),
+    { code: 'github_checks_unreadable' });
+}
+
 export function actionsRunsAsChecks(listing, head) {
   const runs = listing?.workflow_runs;
   if (!Array.isArray(runs) || !Number.isInteger(listing.total_count) || listing.total_count !== runs.length || runs.length >= 100) {

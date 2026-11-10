@@ -11,10 +11,10 @@ const base = 'b'.repeat(40);
 const denied = 'GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup.nodes.0)';
 const run = (id, extra = {}) => ({ id, workflow_id: 7, event: 'pull_request', name: 'ci', status: 'completed', conclusion: 'success', ...extra });
 
-async function fixture(t, { rollup = 'denied', runs = () => [], viewError = null } = {}) {
+async function fixture(t, { rollup = 'denied', runs = () => [], viewError = null, actions = 'allowed' } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'checks-actions-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const workspace = path.join(root, 'workspaces', 'checkout'); await fs.mkdir(workspace, { recursive: true });
-  const state = { head: 'a'.repeat(40), remoteSource: 'a'.repeat(40), pr: null, merged: false, merges: 0, rollupCalls: 0, actionsCalls: 0, records: [] };
+  const state = { head: 'a'.repeat(40), remoteSource: 'a'.repeat(40), pr: null, merged: false, merges: 0, rollupCalls: 0, actionsCalls: 0, probes: [], pushes: 0, records: [] };
   const git = async args => {
     if (args[0] === 'remote') return 'https://github.com/owner/repo.git';
     if (args[0] === 'symbolic-ref') return 'feature';
@@ -27,7 +27,7 @@ async function fixture(t, { rollup = 'denied', runs = () => [], viewError = null
     if (args[0] === 'rev-list') return '0';
     if (['ls-files', 'add'].includes(args[0])) return '';
     if (args[0] === 'commit') { state.head = 'd'.repeat(40); return ''; }
-    if (args[0] === 'push') { state.remoteSource = state.head; if (state.pr) state.pr.headRefOid = state.head; return 'ok'; }
+    if (args[0] === 'push') { state.pushes++; state.remoteSource = state.head; if (state.pr) state.pr.headRefOid = state.head; return 'ok'; }
     throw new Error(`unexpected git ${args.join(' ')}`);
   };
   const identity = { isCrossRepository: false, headRepository: { name: 'repo' }, headRepositoryOwner: { login: 'owner' }, headRefName: 'feature', baseRefName: 'main', state: 'OPEN' };
@@ -35,7 +35,10 @@ async function fixture(t, { rollup = 'denied', runs = () => [], viewError = null
   const answer = async (exe, args) => {
     const out = value => ({ stdout: Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)) });
     if (args[0] === 'api' && args[1] === 'user') return out('owner');
+    if (args[0] === 'api' && args.includes(`repos/owner/repo/commits/${base}/check-runs`)) { state.probes.push('check-runs'); return rollup === 'denied' ? fail(denied) : out({ total_count: 0, check_runs: [] }); }
+    if (args[0] === 'api' && args.includes(`repos/owner/repo/actions/runs`) && args.includes('per_page=1')) { state.probes.push('actions'); return actions === 'denied' ? fail(denied.replace('statusCheckRollup', 'actions')) : out({ total_count: 0, workflow_runs: [] }); }
     if (args[0] === 'api' && args.includes(`repos/owner/repo/actions/runs`)) {
+      if (actions === 'denied-later') fail('HTTP 403: Resource not accessible by personal access token');
       assert.ok(args.includes(`head_sha=${state.head}`));
       state.actionsCalls++; const workflow_runs = runs(state.actionsCalls, state.head);
       return out({ total_count: workflow_runs.length, workflow_runs });
@@ -72,7 +75,8 @@ test('with a fine-grained token the checks come from Actions for the exact head 
   assert.equal(record.phase, 'complete'); assert.equal(f.state.merges, 1);
   assert.equal(record.checksSource, 'actions'); assert.equal(record.checkState, 'passed');
   assert.deepEqual(record.checks, [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }]);
-  assert.equal(f.state.rollupCalls, 1, 'statusCheckRollup is tried once; the record then stays on Actions');
+  assert.deepEqual(f.state.probes, ['check-runs', 'actions'], 'the credential is probed before any effect');
+  assert.equal(f.state.rollupCalls, 0, 'the probe already chose Actions; statusCheckRollup is not attempted');
   assert.ok(f.state.records.some(item => item.phase === 'checks_pending' && item.checkState === 'waiting' && item.checksSource === 'actions'));
 });
 
@@ -91,7 +95,8 @@ test('with access to check runs, or on any other gh failure, Actions is never co
   const keyring = await fixture(t, { rollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }] });
   const record = await integrateGitHub(keyring.job, keyring.ctx, keyring.options);
   assert.equal(record.phase, 'complete'); assert.equal(record.checksSource, undefined); assert.equal(keyring.state.actionsCalls, 0);
-  const other = await fixture(t, { viewError: 'HTTP 502: Bad Gateway' });
+  assert.deepEqual(keyring.state.probes, ['check-runs']);
+  const other = await fixture(t, { rollup: [], viewError: 'HTTP 502: Bad Gateway' });
   await assert.rejects(integrateGitHub(other.job, other.ctx, other.options), /gh falló o la respuesta fue ambigua.*502/);
   assert.equal(other.state.actionsCalls, 0); assert.equal(other.state.merges, 0);
 });
@@ -105,4 +110,21 @@ test('only the fine-grained permission error switches to Actions; an incomplete 
   assert.throws(() => actionsRunsAsChecks({ workflow_runs: [] }, head), /incompleta/);
   assert.throws(() => actionsRunsAsChecks({ total_count: 100, workflow_runs: Array.from({ length: 100 }, (_, i) => run(i + 1, { head_sha: head })) }, head), /limitada/);
   assert.deepEqual(actionsRunsAsChecks({ total_count: 0, workflow_runs: [] }, head), []);
+});
+
+// Owner's condition: unreadable checks are their own state, and the credential is tested before publishing.
+test('a credential that can read neither check runs nor Actions stops before commit, push or PR', async t => {
+  const f = await fixture(t, { actions: 'denied' });
+  const error = await integrateGitHub(f.job, f.ctx, f.options).then(() => assert.fail('must stop'), error => error);
+  assert.equal(error.code, 'github_checks_unreadable'); assert.match(error.message, /Actions: lectura/);
+  assert.equal(f.state.pushes, 0); assert.equal(f.state.pr, null); assert.equal(f.state.head, 'a'.repeat(40), 'no commit');
+  assert.equal(f.state.records.some(item => ['commit_intent', 'push_intent', 'pr_intent'].includes(item.phase)), false);
+});
+
+test('Actions access lost after the PR exists becomes no_permission on the same PR, never a merge', async t => {
+  const f = await fixture(t, { actions: 'denied-later' });
+  await assert.rejects(integrateGitHub(f.job, f.ctx, f.options), { code: 'github_checks_unreadable' });
+  const last = f.state.records.at(-1);
+  assert.equal(last.phase, 'checks_pending'); assert.equal(last.checkState, 'no_permission'); assert.equal(last.prNumber, 5);
+  assert.equal(f.state.merges, 0);
 });

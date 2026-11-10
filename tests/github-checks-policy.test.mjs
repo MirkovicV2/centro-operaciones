@@ -60,16 +60,27 @@ test('a mergeable PR still without any check after the grace stops with github_n
   await assert.rejects(integrateGitHub(quick.job, quick.ctx, { ...quick.options, noChecksGraceMs: 30_000 }), { code: 'github_no_checks' });
   assert.equal(quick.waits.reduce((sum, ms) => sum + ms, 0), 30_000);
   const legacy = await fixture(t);
-  await assert.rejects(integrateGitHub(legacy.job, legacy.ctx, { ...legacy.options, noChecksGraceMs: null }), { code: 'github_checks_timeout' });
+  await assert.rejects(integrateGitHub(legacy.job, legacy.ctx, { ...legacy.options, noChecksGraceMs: null, checksTimeoutMs: DEFAULT_CHECKS_TIMEOUT_MS }), { code: 'github_checks_timeout' });
 });
 
-test('a check that registers late is awaited and merged; the default wait is bounded to 15 minutes', async t => {
+test('a check that registers late is awaited and merged; pending checks are awaited without a global limit unless a bound is passed', async t => {
   const late = await fixture(t, { checks: views => views < 10 ? [] : [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }] });
   const record = await integrateGitHub(late.job, late.ctx, late.options);
   assert.equal(record.phase, 'complete'); assert.equal(late.state.merges, 1); assert.equal(late.state.records.some(item => item.checkState === 'no_checks'), false);
   assert.equal(DEFAULT_CHECKS_TIMEOUT_MS, 900_000);
+  // Owner's choice (revised 17): by default a running check keeps the same PR and commit under watch.
+  const running = await fixture(t, { checks: [{ name: 'ci', status: 'IN_PROGRESS', conclusion: null }] });
+  const stop = new AbortController(); let polls = 0, elapsed = 0; const intervals = new Set();
+  const watched = integrateGitHub(running.job, { ...running.ctx, signal: stop.signal }, { ...running.options, wait: async ms => {
+    running.advance(ms); elapsed += ms; intervals.add(ms); if (++polls === 300) stop.abort(new Error('stop watching')); } });
+  await assert.rejects(watched, /stop watching/);
+  assert.ok(elapsed >= 300 * 15_000 - 15_000, `still polling after ${elapsed} ms (about 75 minutes), no timeout`);
+  assert.deepEqual([...intervals], [15_000], 'normal interval, never a tight loop after the no_checks grace');
+  assert.equal(running.state.merges, 0);
+  assert.ok(running.state.records.every(item => item.prNumber === undefined || item.prNumber === 4));
+  assert.equal(running.state.records.at(-1).checkState, 'waiting'); assert.equal(running.state.records.at(-1).waitTimedOut, undefined);
   const pending = await fixture(t, { checks: [{ name: 'ci', status: 'IN_PROGRESS', conclusion: null }] });
-  const error = await integrateGitHub(pending.job, pending.ctx, pending.options).then(() => assert.fail('must time out'), error => error);
+  const error = await integrateGitHub(pending.job, pending.ctx, { ...pending.options, checksTimeoutMs: DEFAULT_CHECKS_TIMEOUT_MS }).then(() => assert.fail('must time out'), error => error);
   assert.equal(error.code, 'github_checks_timeout');
   assert.equal(pending.waits.reduce((sum, ms) => sum + ms, 0), DEFAULT_CHECKS_TIMEOUT_MS);
   assert.equal(pending.state.records.at(-1).checkState, 'waiting'); assert.equal(pending.state.records.at(-1).waitTimedOut, true);
