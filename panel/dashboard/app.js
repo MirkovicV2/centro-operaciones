@@ -199,7 +199,7 @@ function attentionItems(data) {
       what: job.error?.message || 'El trabajo se detuvo y necesita revisión.',
       why: `Etapa ${step?.label || job.workflow?.currentStage || 'sin confirmar'} · intento ${job.attempts}/${job.maxAttempts}. Hasta que decidas, el trabajo no sigue.`,
       where: 'Las opciones (reintentar, retomar o cerrar) están en la ficha del trabajo y piden confirmación.',
-      action: ['Abrir el trabajo', () => { location.hash = '#trabajos'; focusJob(job.id); }], evidence, job,
+      action: ['Abrir el trabajo', () => openRun(job.id)], evidence, job,
     });
   }
   for (const question of data.questions.filter(item => item.status === 'pending')) {
@@ -266,6 +266,177 @@ function renderAttention(data) {
   }
   const button = el('button', 'button primary', selected.action[0]); button.type = 'button'; button.onclick = selected.action[1];
   detail.append(button);
+}
+
+// Run Detail: one page per job. Ejecución → Revisión → Aceptación → Integración, the real stages, the
+// report facts with who stated each one, and the same actions as the job card (jobActionButtons).
+const levelText = { observed: 'Comprobado por el Centro', reported: 'Declarado por el agente', unknown: 'Sin registro', na: 'No aplica' };
+function openRun(id) { location.hash = `#trabajo/${encodeURIComponent(id)}`; }
+function provenance(level) {
+  const mark = el('span', `pv pv-${level}`);
+  mark.title = levelText[level] || level;
+  mark.setAttribute('aria-label', levelText[level] || level);
+  return mark;
+}
+function lifecycle(job, report, integrationRecord) {
+  const step = key => job.workflow?.steps?.find(item => item.key === key);
+  const dev = step('developer') || step('planner');
+  const review = step('reviewer');
+  const v2 = review?.workflowV2;
+  const phase = (s, map) => map[s?.status] || ['wait', s ? (workflowStatusNames[s.status] || s.status) : 'Sin iniciar'];
+  const exec = phase(dev, { succeeded: ['done', 'Terminada'], running: ['active', 'En curso'], blocked: ['fail', 'Detenida'], failed: ['fail', 'Falló'] });
+  let rev;
+  if (v2) rev = v2.outcome === 'rejected' ? ['fail', 'Rechazada (Workflow V2)'] : v2.outcome === 'owner_pending' ? ['ok', 'Recomienda aceptar (Workflow V2)'] : ['unk', 'Workflow V2 · ' + (v2.status || 'sin estado')];
+  else rev = phase(review, { succeeded: ['ok', 'Aprobada'], running: ['active', 'En curso'], blocked: ['fail', 'Rechazada'], failed: ['fail', 'Falló'] });
+  const acceptance = v2
+    ? (v2.status === 'aprobado' ? ['ok', 'Aceptada por ti'] : ['wait', 'Pendiente de tu decisión en V2'])
+    : ['na', 'No aplica · el Centro integra tras su Revisión'];
+  const integ = report?.integration;
+  let integration;
+  if (!job.autoIntent?.eligible) integration = ['na', 'Manual · fuera del Centro'];
+  else if (!integrationRecord && !integ?.phase) integration = ['unk', 'Sin registro'];
+  else if ((integrationRecord?.phase || integ?.phase) === 'complete') integration = ['ok', 'Integrada'];
+  else integration = ['active', integrationRecord?.phase || integ?.phase];
+  const note = { exec: dev ? (dev.dispatchId ? `Dispatch ${dev.dispatchId}` : dev.label) : 'Sin etapa de ejecución',
+    rev: review?.delivery?.findings?.length ? `${review.delivery.findings.length} hallazgos` : review ? review.label : 'Sin revisión todavía',
+    acc: v2 ? `Tarea ${v2.task || ''}` : 'Solo en proyectos gobernados por Workflow V2',
+    int: integrationRecord?.mergeSha ? `Merge ${integrationRecord.mergeSha.slice(0, 7)}` : integrationRecord?.prUrl ? 'PR abierta' : '' };
+  const level = (tone, exact) => tone === 'na' ? 'na' : tone === 'unk' || tone === 'wait' ? 'unknown' : exact ? 'observed' : 'reported';
+  return [
+    ['Ejecución', exec, note.exec, level(exec[0], dev?.dispatchId)],
+    ['Revisión', rev, note.rev, level(rev[0], review?.dispatchId || v2)],
+    ['Aceptación', acceptance, note.acc, level(acceptance[0], v2)],
+    ['Integración', integration, note.int, level(integration[0], true)],
+  ];
+}
+
+function renderRun(data) {
+  const root = $('#run-page');
+  const job = (data.jobs || []).find(item => item.id === state.runId) || (state.raw?.jobs || []).find(item => item.id === state.runId);
+  const report = (data.requestTraces || []).flatMap(trace => trace.reports || []).find(item => item.jobId === state.runId);
+  const receipt = data.automation?.receipts?.find(item => item.jobId === state.runId);
+  const integrationRecord = job?.autoIntent?.eligible ? data.automation?.integrations?.[job.autoIntent.receiptId] : null;
+  const signature = JSON.stringify([state.runId, job, report, receipt, integrationRecord, data.executor?.available, state.runProvenance]);
+  if (root.dataset.signature === signature) return;
+  const restore = capturePanelDetails(root);
+  root.dataset.signature = signature;
+  root.replaceChildren();
+  if (!job) {
+    root.append(el('p', 'attention-empty', state.runId ? `No hay ningún trabajo #${state.runId} en este negocio.` : 'Elige un trabajo en Trabajos o en el Overview.'));
+    const back = el('a', 'button secondary', 'Volver a Trabajos'); back.href = '#trabajos'; root.append(back);
+    return;
+  }
+  root.classList.toggle('show-provenance', Boolean(state.runProvenance));
+  const main = el('div', 'run-main'), side = el('aside', 'run-side');
+  side.setAttribute('aria-label', 'Propiedades del trabajo');
+
+  const toolbar = el('div', 'run-toolbar');
+  const back = el('a', 'run-crumb', 'Trabajos'); back.href = '#trabajos';
+  const toggle = el('button', `run-toggle${state.runProvenance ? ' on' : ''}`, 'Procedencia'); toggle.type = 'button';
+  toggle.setAttribute('aria-pressed', String(Boolean(state.runProvenance)));
+  toggle.prepend(provenance('observed'));
+  toggle.onclick = () => { state.runProvenance = !state.runProvenance; renderRun(data); };
+  toolbar.append(back, el('span', 'run-crumb-sep', '›'), el('span', 'run-crumb-id', `#${job.id}`), el('span', 'spacer'), toggle);
+  main.append(toolbar);
+
+  const head = el('header', 'run-head');
+  head.append(el('p', 'run-kicker', `${job.projectName || businessNames[job.business]} · ${statusNames[job.state] || job.state}`));
+  const title = el('h2', 'run-title', job.title); title.id = 'run-title';
+  head.append(title);
+  const meta = el('p', 'run-meta');
+  for (const part of [`#${job.id}`, job.branch && `Rama ${job.branch}`, job.destination?.baseBranch && `Base ${job.destination.baseBranch}`, `Creado ${formatDate(job.createdAt)}`, `Intento ${job.attempts}/${job.maxAttempts}`]) if (part) meta.append(el('span', '', part));
+  head.append(meta);
+  const objective = report?.asked?.objective || job.contract?.objective || job.prompt;
+  if (objective) { const block = el('div', 'run-objective'); block.append(el('span', 'run-label', 'Objetivo'), el('p', '', objective)); head.append(block); }
+  main.append(head);
+
+  const bar = el('div', 'lifebar'); bar.setAttribute('role', 'list'); bar.setAttribute('aria-label', 'Ejecución, revisión, aceptación e integración');
+  for (const [name, [tone, text], note, level] of lifecycle(job, report, integrationRecord)) {
+    const cell = el('div', `life life-${tone}`); cell.setAttribute('role', 'listitem');
+    const k = el('span', 'life-k', name); k.append(provenance(level));
+    cell.append(k, el('span', 'life-s', text));
+    if (note) cell.append(el('span', 'life-note', note));
+    cell.append(el('span', 'prov-text', levelText[level]));
+    bar.append(cell);
+  }
+  main.append(bar);
+
+  if (job.state === 'needs_attention') {
+    const callout = el('section', 'run-callout');
+    callout.append(el('h3', '', 'Este trabajo espera tu decisión'), el('p', '', job.error?.message || 'Revisa la etapa y sus informes antes de continuar.'));
+    if (data.executor?.reason) callout.append(el('p', 'microcopy', data.executor.reason));
+    const actions = el('div', 'run-actions'); actions.append(...jobActionButtons(job, data, receipt));
+    callout.append(actions);
+    main.append(callout);
+  }
+
+  main.append(el('h3', 'run-h3', 'Etapas'));
+  const stages = el('ol', 'run-stages');
+  for (const [index, step] of (job.workflow?.steps || []).filter(item => item.status !== 'skipped').entries()) {
+    const li = el('li', `run-stage is-${step.status}`);
+    li.append(el('span', 'run-stage-n', String(index + 1)));
+    const body = el('div', 'run-stage-body');
+    body.append(el('div', 'run-stage-name', step.label));
+    const kv = el('dl', 'run-kv');
+    const add = (k, v, level) => { const dd = el('dd'); if (level) dd.append(provenance(level)); dd.append(el('span', '', v)); if (level) dd.append(el('span', 'prov-text', levelText[level])); kv.append(el('dt', '', k), dd); };
+    if (step.profile) add('Perfil', step.profile);
+    if (step.launch) add('Modelo', [step.launch.agent, step.launch.model, step.launch.effort && `esfuerzo ${step.launch.effort}`].filter(Boolean).join(' · '), 'observed');
+    else add('Modelo', 'No registrado', 'unknown');
+    if (step.authorization) add('Autorizado por', step.authorization.coordinatorName || 'coordinador', 'observed');
+    if (step.dispatchId) add('Dispatch', step.dispatchId, 'observed');
+    body.append(kv);
+    const summary = step.delivery?.summary || step.summary;
+    if (summary) { const details = el('details', 'run-report'); details.dataset.panelDetail = `run-${job.id}-${step.key}`; details.append(el('summary', '', 'Informe de la etapa'), el('pre', 'workflow-stage-report', summary)); body.append(details); }
+    li.append(body, el('span', `job-state ${step.status === 'succeeded' ? 'succeeded' : step.status === 'running' ? 'running' : ['blocked', 'failed'].includes(step.status) ? 'needs_attention' : 'queued'}`, workflowStatusNames[step.status] || step.status));
+    stages.append(li);
+  }
+  if (!stages.children.length) stages.append(el('li', 'attention-empty', 'Sin etapas registradas todavía.'));
+  main.append(stages);
+
+  const findings = (job.workflow?.steps || []).flatMap(step => (step.delivery?.findings || []).map(finding => ({ ...finding, stage: step.label })));
+  main.append(el('h3', 'run-h3', 'Revisión'));
+  if (findings.length) {
+    const list = el('ul', 'run-findings');
+    for (const finding of findings) {
+      const li = el('li', '');
+      li.append(el('span', `request-state ${finding.severity === 'blocking' ? 'is-attention' : 'is-active'}`, finding.severity === 'blocking' ? 'Bloqueante' : 'Menor'));
+      const text = el('div', ''); text.append(el('p', '', finding.summary || ''), el('small', '', [finding.stage, finding.evidence].filter(Boolean).join(' · ')));
+      li.append(text, provenance('reported'));
+      list.append(li);
+    }
+    main.append(list);
+  } else main.append(el('p', 'attention-empty', 'Sin hallazgos registrados.'));
+
+  if (report?.criteria?.length) {
+    main.append(el('h3', 'run-h3', 'Criterios del encargo'));
+    const list = el('ul', 'run-criteria');
+    for (const item of report.criteria) {
+      const li = el('li', '');
+      li.append(provenance(item.level), el('span', '', item.criterion), el('span', `request-state ${item.status === 'passed' ? 'is-done' : item.status === 'failed' ? 'is-attention' : 'is-active'}`, item.status === 'passed' ? 'Cumple' : item.status === 'failed' ? 'No cumple' : 'Sin verificar'));
+      list.append(li);
+    }
+    main.append(list);
+  }
+  if (job.result?.text) { const details = el('details', 'run-report'); details.dataset.panelDetail = `run-${job.id}-result`; details.append(el('summary', '', 'Resultado completo'), el('pre', 'job-output', job.result.text)); main.append(details); }
+
+  side.append(el('h3', 'run-side-title', 'Propiedades'));
+  const props = el('dl', 'run-props');
+  const prop = (k, v, level) => { if (!v) return; const dd = el('dd'); if (level) dd.append(provenance(level)); dd.append(el('span', '', v)); props.append(el('dt', '', k), dd); };
+  prop('Proyecto', job.projectName); prop('Negocio', businessNames[job.business]); prop('Tipo', job.kind === 'code' ? 'Código' : 'Análisis');
+  prop('Estado', statusNames[job.state] || job.state, 'observed'); prop('Proveedor', job.provider); prop('Creado por', job.actor);
+  prop('Checkout', job.workspace); prop('Destino', job.destination?.repository); prop('Recibo', job.autoIntent?.receiptId);
+  prop('Tokens y coste', 'Sin registro fiable', 'unknown');
+  side.append(props);
+  if (report) side.append(el('p', 'run-totals', `${report.totals.observed} comprobados · ${report.totals.reported} declarados · ${report.totals.unknown} sin registro`));
+  const legend = el('div', 'run-legend');
+  for (const level of ['observed', 'reported', 'unknown', 'na']) { const item = el('span', ''); item.append(provenance(level), ' ', levelText[level]); legend.append(item); }
+  legend.append(el('p', '', 'La marca dice de dónde sale un dato, no si es bueno.'));
+  side.append(legend);
+  const open = el('a', 'button secondary', 'Ver en la lista de Trabajos'); open.href = '#trabajos'; open.onclick = () => setTimeout(() => focusJob(job.id), 0);
+  side.append(open);
+
+  root.append(main, side);
+  restore();
 }
 
 function renderJobs(data) {
@@ -367,6 +538,7 @@ function renderJobs(data) {
     summary.append(el('span', 'job-chevron', '⌄'));
     card.append(summary);
     const detail = el('div', 'job-detail');
+    const pageLink = el('a', 'run-open-link', 'Abrir la ficha completa'); pageLink.href = `#trabajo/${encodeURIComponent(job.id)}`; detail.append(pageLink);
     detail.append(el('div', '', `Tipo: ${job.kind === 'code' ? 'código' : 'análisis'}  ·  Intentos: ${job.attempts}/${job.maxAttempts}  ·  Creado: ${formatDate(job.createdAt)}`));
     if (job.workflow?.steps?.length) {
       const workflow = el('section', 'job-workflow');
@@ -435,37 +607,7 @@ function renderJobs(data) {
     detail.append(el('div', '', `Proveedor: ${job.provider || 'sin configurar'}`));
     if (job.state === 'needs_attention') {
       detail.append(el('p', '', `Etapa: ${job.workflow?.currentStage || 'sin confirmar'} · Intento ${job.attempts}/${job.maxAttempts}. ${data.executor?.reason || 'Revisa los dispatches y confirma que no queda un agente activo antes de decidir.'}`));
-      const interruptedDevelopment = job.provider === 'orca' && job.autoIntent?.eligible && receipt?.status === 'needs_attention'
-        && job.error?.code === 'timeout' && job.workflow?.currentStage === 'developer';
-      const qa = job.workflow?.steps?.find(step => step.key === 'qa');
-      const qaRevalidations = job.livenessRecoveryHistory?.filter(item => item.mode === 'same_attempt_integration_validation' && item.stage === 'qa').length ?? 0;
-      const revalidate = job.autoIntent?.eligible && receipt?.status === 'needs_attention' && qaRevalidations < job.maxAttempts - 1
-        && job.error?.code === 'delivery_incomplete' && job.workflow?.currentStage === 'qa' && qa?.dispatchSettled
-        && ['blocked', 'failed'].includes(qa.delivery?.outcome) && qa.delivery.scope === 'complete' && qa.resultMessageId;
-      const retryLabel = revalidate ? 'Revalidar QA' : interruptedDevelopment ? 'Retomar Desarrollo' : 'Reintentar después de revisar';
-      for (const [action, label] of [['retry', retryLabel], ['resolve', 'Cerrar trabajo']]) {
-        const button = el('button', 'button secondary', label);
-        button.disabled = !data.executor?.available || (action === 'retry' && !revalidate && job.attempts >= job.maxAttempts);
-        button.title = !data.executor?.available ? data.executor?.reason : action === 'retry' && !revalidate && job.attempts >= job.maxAttempts ? 'Máximo de intentos alcanzado' : '';
-        button.addEventListener('click', async () => {
-          const autoRetry = action === 'retry' && job.autoIntent?.eligible && receipt?.status === 'needs_attention';
-          const reviewText = action === 'retry' && revalidate
-            ? 'El panel comprobará el candidato y volverá a ejecutar QA conservando Desarrollo y el informe anterior.'
-            : action === 'retry' && interruptedDevelopment
-            ? 'El panel verificará en Orca que el trabajador anterior salió y retomará la misma tarea con los cambios guardados.'
-            : autoRetry
-            ? 'Consulta Orca y confirma que no hay Run ni dispatch para este intento y que no hay agentes activos. El mismo trabajo se reintentará una vez con su recibo confirmado.'
-            : 'Confirma que revisaste los efectos y que no queda ningún agente activo.';
-          if (!confirm(`${label}: ${job.title} (${job.id}).\nMotivo: ${job.error?.message || 'Requiere revisión'}.\n${reviewText} ${action === 'retry' ? 'Se volverá a encolar este trabajo.' : 'Se cerrará sin cancelar dispatches de Orca.'}`)) return;
-          button.disabled = true;
-          try {
-            await api(`/api/jobs/${encodeURIComponent(job.id)}/${action}`, { method: 'POST', body: JSON.stringify({ confirmReviewed: true, noDispatchConfirmed: autoRetry && !interruptedDevelopment && !revalidate }) });
-            state.highlightJob = job.id;
-            await refresh();
-          } catch (error) { notify(error.message, true); button.disabled = false; }
-        });
-        detail.append(button);
-      }
+      detail.append(...jobActionButtons(job, data, receipt));
     }
     card.append(detail);
     if (job.autoIntent) detail.append(el('p', '', `Recibo: ${job.autoIntent.receiptId} · ${job.autoIntent.eligible ? 'Elegible al confirmar' : 'Manual al confirmar'}`));
@@ -477,6 +619,43 @@ function renderJobs(data) {
   }
   if (!list.children.length) list.append(el('div', 'empty-state', 'No hay trabajos abiertos en esta vista. Los cerrados est?n en Historial.'));
   restoreDetails();
+}
+
+// Retry / resolve for a job that needs review. Shared by the job card and the job page, so each action has one implementation.
+function jobActionButtons(job, data, receipt) {
+  const buttons = [];
+  const interruptedDevelopment = job.provider === 'orca' && job.autoIntent?.eligible && receipt?.status === 'needs_attention'
+    && job.error?.code === 'timeout' && job.workflow?.currentStage === 'developer';
+  const qa = job.workflow?.steps?.find(step => step.key === 'qa');
+  const qaRevalidations = job.livenessRecoveryHistory?.filter(item => item.mode === 'same_attempt_integration_validation' && item.stage === 'qa').length ?? 0;
+  const revalidate = job.autoIntent?.eligible && receipt?.status === 'needs_attention' && qaRevalidations < job.maxAttempts - 1
+    && job.error?.code === 'delivery_incomplete' && job.workflow?.currentStage === 'qa' && qa?.dispatchSettled
+    && ['blocked', 'failed'].includes(qa.delivery?.outcome) && qa.delivery.scope === 'complete' && qa.resultMessageId;
+  const retryLabel = revalidate ? 'Revalidar QA' : interruptedDevelopment ? 'Retomar Desarrollo' : 'Reintentar después de revisar';
+  for (const [action, label] of [['retry', retryLabel], ['resolve', 'Cerrar trabajo']]) {
+    const button = el('button', 'button secondary', label);
+    button.disabled = !data.executor?.available || (action === 'retry' && !revalidate && job.attempts >= job.maxAttempts);
+    button.title = !data.executor?.available ? data.executor?.reason : action === 'retry' && !revalidate && job.attempts >= job.maxAttempts ? 'Máximo de intentos alcanzado' : '';
+    button.addEventListener('click', async () => {
+      const autoRetry = action === 'retry' && job.autoIntent?.eligible && receipt?.status === 'needs_attention';
+      const reviewText = action === 'retry' && revalidate
+        ? 'El panel comprobará el candidato y volverá a ejecutar QA conservando Desarrollo y el informe anterior.'
+        : action === 'retry' && interruptedDevelopment
+        ? 'El panel verificará en Orca que el trabajador anterior salió y retomará la misma tarea con los cambios guardados.'
+        : autoRetry
+        ? 'Consulta Orca y confirma que no hay Run ni dispatch para este intento y que no hay agentes activos. El mismo trabajo se reintentará una vez con su recibo confirmado.'
+        : 'Confirma que revisaste los efectos y que no queda ningún agente activo.';
+      if (!confirm(`${label}: ${job.title} (${job.id}).\nMotivo: ${job.error?.message || 'Requiere revisión'}.\n${reviewText} ${action === 'retry' ? 'Se volverá a encolar este trabajo.' : 'Se cerrará sin cancelar dispatches de Orca.'}`)) return;
+      button.disabled = true;
+      try {
+        await api(`/api/jobs/${encodeURIComponent(job.id)}/${action}`, { method: 'POST', body: JSON.stringify({ confirmReviewed: true, noDispatchConfirmed: autoRetry && !interruptedDevelopment && !revalidate }) });
+        state.highlightJob = job.id;
+        await refresh();
+      } catch (error) { notify(error.message, true); button.disabled = false; }
+    });
+    buttons.push(button);
+  }
+  return buttons;
 }
 
 function renderIntegration(integration, job, receipt) {
@@ -1112,6 +1291,7 @@ async function refresh() {
     ideaCheckoutHint();
     renderJobs(data);
     renderAttention(data);
+    if (state.visibleSection === 'trabajo' || location.hash.startsWith('#trabajo/')) renderRun(data);
     renderQuestions(data);
     window.RequestsView?.render(data, state.business);
     renderIdeas(data);
@@ -1158,8 +1338,13 @@ for (const selector of ['#project-search', '#project-business-filter', '#project
   $(selector).addEventListener('change', () => { if (state.data) renderProjects(state.data); });
 }
 
-$('#show-new-job').addEventListener('click', () => { $('#job-form').hidden = false; $('#job-form').scrollIntoView({ behavior: 'smooth', block: 'center' }); });
-$('#hide-new-job').addEventListener('click', () => { $('#job-form').hidden = true; });
+$('#show-new-job').addEventListener('click', () => { $('#job-form').hidden = false; $('#job-form').querySelector('select, input, textarea')?.focus(); });
+$('#hide-new-job').addEventListener('click', () => { $('#job-form').hidden = true; $('#show-new-job').focus(); });
+// The new-job form is shown as a sheet: Escape closes it and focus returns to the button that opened it.
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || $('#job-form').hidden || document.querySelector('dialog[open]')) return;
+  $('#job-form').hidden = true; $('#show-new-job').focus();
+});
 $('#job-business').addEventListener('change', () => refreshProjectSelectors(state.data?.projects || []));
 $('#idea-business').addEventListener('change', () => refreshProjectSelectors(state.data?.projects || []));
 $('#job-kind').addEventListener('change', event => document.querySelectorAll('.workspace-field').forEach(field => { field.hidden = event.target.value !== 'code'; }));
@@ -1286,12 +1471,14 @@ function applyBusinessContext() {
   document.querySelector('.status-grid').hidden = true; // Action cards carry scoped counts without repeating integration notices.
 }
 function showSection() {
-  const id = location.hash.slice(1) || 'inicio';
-  const selected = ['inicio', 'atencion', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
+  const [id = 'inicio', runId] = (location.hash.slice(1) || 'inicio').split('/');
+  if (id === 'trabajo') { state.runId = decodeURIComponent(runId || ''); if (state.data) renderRun(state.data); }
+  const selected = ['inicio', 'trabajo', 'atencion', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
   if (state.visibleSection === selected) return;
   state.visibleSection = selected;
+  const navSection = selected === 'trabajo' ? 'trabajos' : selected;
   document.querySelectorAll('.page-section').forEach(section => { section.hidden = section.id !== selected; });
-  document.querySelectorAll('.nav-link').forEach(link => { const active = link.hash === `#${selected}`; link.classList.toggle('active', active); if (active) { link.setAttribute('aria-current', 'page'); $('#page-name').textContent = link.textContent.trim().replace(/\d+$/, '').trim(); } else link.removeAttribute('aria-current'); });
+  document.querySelectorAll('.nav-link').forEach(link => { const active = link.hash === `#${navSection}`; link.classList.toggle('active', active); if (active) { link.setAttribute('aria-current', 'page'); $('#page-name').textContent = link.textContent.trim().replace(/\d+$/, '').trim(); } else link.removeAttribute('aria-current'); });
   const nav = $('.nav'), current = nav.querySelector('[aria-current="page"]');
   if (current && nav.scrollWidth > nav.clientWidth) {
     const strip = nav.getBoundingClientRect(), link = current.getBoundingClientRect();
@@ -1417,7 +1604,7 @@ function renderActionSummary(raw, data) {
         const when = item.job.finishedAt || item.job.startedAt || item.job.createdAt;
         if (when) row.append(el('span', 'overview-row-when', formatDate(when)));
       }
-      row.onclick = () => item.job ? focusJob(item.job.id) : (location.hash = item.href);
+      row.onclick = () => item.job ? openRun(item.job.id) : (location.hash = item.href);
       section.append(row);
     }
     $('#overview-' + tone).replaceChildren(section);
