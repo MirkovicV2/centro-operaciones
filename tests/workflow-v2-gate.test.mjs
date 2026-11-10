@@ -142,3 +142,8 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
   assert.equal(other.gates.length, 0);
   assert.equal(other.outcome, 'succeeded');
 });
+
+test('the shipped example is a valid configuration', async () => {
+  const example = JSON.parse(await fs.readFile(new URL('../ejemplos/workflow-v2.example.json', import.meta.url), 'utf8'));
+  assert.ok(normalizeWorkflowV2(example).projects['id-del-proyecto']);
+});
