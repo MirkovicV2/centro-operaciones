@@ -2,6 +2,7 @@
 // in panel/dashboard/app.js: same endpoints, same payloads, same stable operation ids on retry.
 import { h, icon, pill, pv, mono, initial, when, relativeTime, stageTrack, levelText, BUSINESSES } from './lib.js';
 import { api } from './domain.js';
+import { requestActions, requestMessage } from './views-ops.js';
 
 const done = new Set(['answered', 'succeeded', 'completed', 'merged', 'integrated', 'delivered', 'published', 'withdrawn', 'cancelled']);
 const attention = new Set(['needs_attention', 'blocked', 'failed', 'awaiting_answer', 'waiting_user', 'questions_pending', 'unavailable']);
@@ -58,7 +59,7 @@ export function requests(ctx) {
   if (selected) {
     const related = questionsFor(data, selected);
     const request = (data.coordinatorRequests || []).find(value => value.id === selected.requestId);
-    const uncertain = request?.status !== 'answered' && (request?.answerNotices || []).some(notice => ['unknown', 'needs_attention', 'sending'].includes(notice.notification?.status));
+    const uncertain = ['routed', 'withdrawn'].includes(request?.status) && (request?.answerNotices || []).some(notice => ['unknown', 'needs_attention', 'sending'].includes(notice.notification?.status));
     const check = uncertain ? h('button', { type: 'button', class: 'btn', text: 'Consultar entrega de respuestas' }) : null;
     check?.addEventListener('click', async () => { check.disabled = true; try { await api(`/api/coordinator/requests/${encodeURIComponent(selected.requestId)}/notify`, { method: 'POST', body: '{}' }); await ctx.done('Consulta de entrega registrada.'); } catch (error) { await ctx.done(error.message, true); check.disabled = false; } });
     const jobIds = selected.ids?.jobIds || [];
@@ -71,6 +72,7 @@ export function requests(ctx) {
       selected.nextAction ? h('p', { class: 'next', text: selected.nextAction }) : null,
       related.filter(q => q.status === 'pending').length ? h('div', { class: 'actions' }, h('a', { class: 'btn primary', href: `#atencion/${encodeURIComponent('question-' + related.find(q => q.status === 'pending').id)}`, text: 'Responder en Atención' })) : null,
       check ? h('div', { class: 'actions' }, check) : null,
+      request && !['routed', 'withdrawn', 'answered'].includes(request.status) ? h('div', { class: 'decision' }, h('b', { text: 'Con el coordinador' }), h('p', { class: 'soft', text: requestMessage(request) }), h('div', { class: 'actions' }, requestActions(ctx, request))) : null,
       jobIds.length ? h('div', { class: 'actions' }, jobIds.map(id => h('a', { class: 'btn', href: `#trabajo/${encodeURIComponent(id)}` }, 'Abrir el trabajo ', mono(`#${id}`)))) : null,
       selected.response?.text ? h('section', { class: 'answer' }, h('h4', { text: 'Respuesta del coordinador' }), prose(selected.response.text),
         (selected.response.sources || []).map(source => h('p', { class: 'soft small' }, `${source.label || 'Referencia declarada'}: ${source.title || source.path || source.url || ''}`,

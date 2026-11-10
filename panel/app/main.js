@@ -4,6 +4,7 @@ import { h, icon, BUSINESSES, scopeData, initial } from './lib.js';
 import { api, attentionItems } from './domain.js';
 import * as views from './views.js';
 import { requests, openNewJob } from './views-requests.js';
+import { projects, settings } from './views-ops.js';
 
 const $ = selector => document.querySelector(selector);
 const store = { get: (key, fallback) => { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }, set: (key, value) => { try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch {} } };
@@ -15,10 +16,11 @@ const ROUTES = {
   peticiones: { title: 'Peticiones', icon: 'requests', view: requests },
   trabajos: { title: 'Trabajos', icon: 'jobs', view: views.jobs },
   historial: { title: 'Historial', icon: 'history', view: views.history },
-  proyectos: { title: 'Proyectos', icon: 'projects', group: 'Operaciones', view: views.classic('Proyectos', '#proyectos', 'La lista de proyectos con su edición llegará en la siguiente entrega del panel nuevo.') },
+  proyectos: { title: 'Proyectos', icon: 'projects', group: 'Operaciones', view: projects },
   ideas: { title: 'Ideas y preguntas', icon: 'ideas', view: views.classic('Ideas y preguntas', '#ideas', 'La captura de ideas y la bandeja de preguntas llegarán en la siguiente entrega. Las preguntas pendientes ya se pueden responder desde Atención.') },
   conocimiento: { title: 'Conocimiento', icon: 'knowledge', view: views.classic('Conocimiento', '#conocimiento', 'El mapa de notas de Obsidian llegará en la siguiente entrega del panel nuevo.') },
   dominios: { title: 'Dominios', icon: 'domains', view: views.classic('Dominios', '#dominios', 'El inventario de dominios llegará en la siguiente entrega del panel nuevo.') },
+  ajustes: { title: 'Ajustes', icon: 'settings', view: settings },
 };
 const ALIASES = { trabajo: 'trabajos', inicio: 'overview' };
 
@@ -87,7 +89,8 @@ function sidebar(data, current) {
     h('div', { class: 'sidelabel', text: 'Operaciones' }),
     ['proyectos', 'ideas', 'conocimiento', 'dominios'].map(nav),
     h('div', { class: 'sidefoot' },
-      h('div', { class: 'srcline' }, h('span', { class: `dot${state.error ? ' bad' : ''}` }), state.error ? 'Sin conexión con el panel' : automation ? 'Autoejecución activa' : 'Autoejecución pausada'),
+      nav('ajustes'),
+      h('a', { class: 'srcline link', href: '#ajustes/autoejecucion' }, h('span', { class: `dot${state.error ? ' bad' : automation ? '' : ' off'}` }), state.error ? 'Sin conexión con el panel' : automation ? 'Autoejecución activa' : 'Autoejecución pausada'),
       h('a', { class: 'srcline link', href: '/' }, 'Panel clásico'),
       h('div', { class: 'themes', role: 'group', 'aria-label': 'Apariencia' }, [['light', 'Claro'], ['dark', 'Oscuro'], ['system', 'Sistema']].map(([value, label]) => {
         const button = h('button', { type: 'button', class: 'tbtn', 'data-theme-choice': value, text: label });
@@ -106,18 +109,18 @@ function render(force = true) {
   const openDetails = new Set([...document.querySelectorAll('details[data-key][open]')].map(node => node.dataset.key));
   const scroll = [...document.querySelectorAll('.scroll')].map(node => node.scrollTop);
   const focusedId = document.activeElement?.id;
-  const draft = $('#answer')?.value; const askDraft = $('#ask')?.value;
+  const draft = $('#answer')?.value; const askDraft = $('#ask')?.value; const searchCaret = document.activeElement?.id === 'project-search' ? document.activeElement.selectionStart : null;
   const app = $('#app');
   let screen;
   if (!data) screen = { toolbar: [h('h1', { text: ROUTES[key].title })], body: h('div', { class: 'body' }, h('div', { class: 'scroll' }, h('div', { class: 'col' }, h('div', { class: 'empty' }, h('b', { text: state.error ? 'No se pudo leer el estado del panel.' : 'Leyendo el estado…' }), state.error ? ` ${state.error}` : '')))) };
-  else { const ctx = { data, param, state, confirm: confirmAction, done, openSearch, rerender: () => render(true) }; ctx.openNewJob = () => openNewJob(ctx); screen = ROUTES[key].view(ctx); }
+  else { const ctx = { data, param, state, confirm: confirmAction, done, openSearch, rerender: () => render(true), theme: () => store.get('operations-theme', 'system'), setTheme: value => { const chosen = applyTheme(value); store.set('operations-theme', chosen === 'system' ? null : chosen); } }; ctx.openNewJob = () => openNewJob(ctx); screen = ROUTES[key].view(ctx); }
   app.replaceChildren(h('div', { class: 'window' }, sidebar(data, key), h('main', { class: 'main' }, h('header', { class: 'toolbar' }, screen.toolbar), screen.body)));
   applyTheme(store.get('operations-theme', 'system'));
   for (const node of document.querySelectorAll('details[data-key]')) if (openDetails.has(node.dataset.key)) node.open = true;
   document.querySelectorAll('.scroll').forEach((node, index) => { if (scroll[index]) node.scrollTop = scroll[index]; });
   if (draft && $('#answer')) $('#answer').value = draft;
   if (askDraft && $('#ask')) $('#ask').value = askDraft;
-  if (focusedId && document.getElementById(focusedId)) document.getElementById(focusedId).focus({ preventScroll: true });
+  if (focusedId && document.getElementById(focusedId)) { const node = document.getElementById(focusedId); node.focus({ preventScroll: true }); if (searchCaret !== null) node.setSelectionRange(searchCaret, searchCaret); }
   document.title = `${ROUTES[key].title} · Centro de Operaciones`;
 }
 

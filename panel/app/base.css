@@ -449,3 +449,40 @@ dialog.sheet { width: 600px; max-width: calc(100vw - 32px); position: fixed; ins
 .form-error { margin: 0; color: var(--danger); font-size: 12.5px; }
 .form-error:empty { display: none; }
 .sheet .props { margin-bottom: 6px; }
+
+/* ---- Proyectos y Ajustes */
+.col.wide{max-width:1000px}
+.pad-top{margin-top:14px}
+.searchin{font:inherit;width:220px;height:28px;padding:0 10px;border-radius:7px;border:0;background:var(--chip);color:var(--text);box-shadow:inset 0 0 0 1px var(--line)}
+.searchin:focus{outline:2px solid var(--accent);outline-offset:0}
+button.prow{text-align:left;display:grid}
+.prow .pid{display:flex;gap:10px;align-items:center;min-width:0}
+.prow .pid .mono-sq{width:28px;height:28px;font-size:12.5px;border-radius:8px}
+.prow .m{display:flex;gap:6px;align-items:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prow .nx{display:block;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prow .mono{font-size:11px;color:var(--text2)}
+.setrow.top{align-items:flex-start}
+.setrow .grow{gap:2px}
+.setrow .actions{margin-top:8px}
+.setrow .m.inline{display:inline;font-weight:400}
+.setlist.spaced{margin-top:22px}
+.form.narrow{max-width:480px}
+.fit{width:fit-content}
+.seg.fit{display:inline-flex}
+.hint{font-size:11.5px;font-weight:400;color:var(--text3)}
+.sidefoot .nav{margin:0 -6px;width:calc(100% + 12px)}
+a.srcline.link{color:var(--text3);text-decoration:none}
+a.srcline.link:hover{color:var(--text)}
+.sheet-body .h3{margin:6px 0 0}
+@media (max-width:1200px){.searchin{width:160px}}
+@media (max-width:760px){
+  .phead{display:none}
+  .phead+*,.prow{grid-template-columns:minmax(0,1fr) auto}
+  .prow>:nth-child(3),.prow>:nth-child(4){grid-column:1 / -1}
+  .searchin{display:none}
+  .setside{width:auto;flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);padding:8px}
+  .setside .setnav{width:auto;white-space:nowrap;display:flex;align-items:center}
+  .body:has(.setside){flex-direction:column}
+}
+a.setnav{display:flex;align-items:center;text-decoration:none}
+@media (max-width:760px){.toolbar{overflow-x:auto;scrollbar-width:none}.toolbar>*{flex:none}.toolbar .spacer{flex:1 0 8px}}
