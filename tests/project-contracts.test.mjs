@@ -36,9 +36,20 @@ test('oversized files and links fail closed with an actionable error', async t =
   const dir = await root(t);
   await write(dir, 'global', 'qa', 'x'.repeat(CONTRACT_MAX_BYTES + 1));
   await assert.rejects(readStageContracts(dir, { stage: 'qa' }), error => error.code === 'project_contract_invalid' && /supera/.test(error.message));
-  await fs.rm(path.join(dir, 'data', 'contracts', 'global', 'qa.md'));
-  await fs.writeFile(path.join(dir, 'outside.md'), 'secreto');
-  await fs.symlink(path.join(dir, 'outside.md'), path.join(dir, 'data', 'contracts', 'global', 'qa.md'));
+  const scope = path.join(dir, 'data', 'contracts', 'global');
+  await fs.unlink(path.join(scope, 'qa.md'));
+  if (process.platform === 'win32') {
+    // Directory junctions exercise the linked-scope guard without Windows symlink privileges.
+    const outside = path.join(dir, 'outside');
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, 'qa.md'), 'secreto');
+    await fs.rmdir(scope);
+    await fs.symlink(outside, scope, 'junction');
+  } else {
+    const outside = path.join(dir, 'outside.md');
+    await fs.writeFile(outside, 'secreto');
+    await fs.symlink(outside, path.join(scope, 'qa.md'));
+  }
   await assert.rejects(readStageContracts(dir, { stage: 'qa' }), error => error.code === 'project_contract_invalid' && /enlace/.test(error.message));
 });
 
