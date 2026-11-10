@@ -21,7 +21,8 @@
 //   { "version": 1, "engineeringSystem": "<checkout of engineering-system>", "python": "python3",
 //     "projects": { "<projectId>": { "stateRoot": "<dir outside the checkout>",
 //       "reviewerConfig": "<reviewer.json>" | null, "allowedPaths": ["src/"], "checks": ["unit-tests"],
-//       "risks": [], "declaredTier": null, "timeoutMs": 3600000, "integrateAfterApproval": false } } }
+//       "risks": [], "declaredTier": null, "timeoutMs": 3600000, "integrateAfterApproval": false,
+//       "pythonEnv": "<virtualenv for checks declaring python_env>" | null } } }
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -55,11 +56,12 @@ export function normalizeWorkflowV2(value) {
     if (!strings(entry.risks ?? [], s => NAME.test(s))) fail(`${id}: risks debe ser una lista de nombres.`);
     if (entry.declaredTier != null && !TIERS.has(entry.declaredTier)) fail(`${id}: declaredTier debe ser FAST, STANDARD, CRITICAL o null.`);
     if (entry.integrateAfterApproval != null && typeof entry.integrateAfterApproval !== 'boolean') fail(`${id}: integrateAfterApproval debe ser true o false.`);
+    if (entry.pythonEnv != null && !absolute(entry.pythonEnv)) fail(`${id}: pythonEnv debe ser una ruta absoluta o null.`);
     const timeoutMs = entry.timeoutMs ?? 3_600_000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 4 * 3_600_000) fail(`${id}: timeoutMs entre 60000 y 14400000.`);
     projects[id] = { stateRoot: entry.stateRoot, reviewerConfig: entry.reviewerConfig ?? null, allowedPaths: [...entry.allowedPaths],
       checks: [...(entry.checks ?? [])], risks: [...(entry.risks ?? [])], declaredTier: entry.declaredTier ?? null, timeoutMs,
-      integrateAfterApproval: entry.integrateAfterApproval === true };
+      integrateAfterApproval: entry.integrateAfterApproval === true, pythonEnv: entry.pythonEnv ?? null };
   }
   return { engineeringSystem: value.engineeringSystem, python, projects };
 }
@@ -168,7 +170,8 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
     const taskFile = path.join(temp, 'task.json');
     await fs.writeFile(taskFile, JSON.stringify(task, null, 2));
     const argv = [entry.python, '-m', 'wfv2.cli', '--repo', entry.stateRoot, 'submit', task.id,
-      '--worktree', workspace, '--task-file', taskFile, ...(entry.reviewerConfig ? ['--reviewer-config', entry.reviewerConfig] : [])];
+      '--worktree', workspace, '--task-file', taskFile, ...(entry.reviewerConfig ? ['--reviewer-config', entry.reviewerConfig] : []),
+      ...(entry.pythonEnv ? ['--python-env', entry.pythonEnv] : [])];
     result = await run(argv, { cwd: entry.engineeringSystem, timeoutMs: entry.timeoutMs, signal: ctx.signal });
   } catch (error) {
     await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: 'No se pudo ejecutar Workflow V2.', error: 'workflow_v2_unavailable' });

@@ -11,7 +11,8 @@
       "risks": [],
       "declaredTier": null,
       "timeoutMs": 3600000,
-      "integrateAfterApproval": false
+      "integrateAfterApproval": false,
+      "pythonEnv": null
     }
   }
 }

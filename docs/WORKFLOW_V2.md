@@ -4,6 +4,10 @@ Opcional y apagado por defecto. Sin `data/workflow-v2.json`, o para un proyecto 
 
 En un proyecto gobernado, después de QA el Centro no lanza su Revisión. Entrega el checkout a `wfv2 submit` (Engineering System), que congela el candidato, ejecuta las comprobaciones en el sandbox y lanza el revisor aislado. El resultado es una recomendación: solo decide el owner, en V2.
 
+## Entorno Python para las comprobaciones (`"pythonEnv"`)
+
+Las comprobaciones de V2 se ejecutan en un sandbox que solo ve `/usr` y los archivos del candidato, así que, por sí solo, no puede ejecutar los tests de un proyecto con dependencias en un virtualenv (Django, por ejemplo). Si el proyecto indica `"pythonEnv": "/ruta/absoluta/.venv"`, el Centro lo pasa a `wfv2 submit --python-env`, que lo monta en solo lectura, sin red, para las comprobaciones de la política que declaren `"python_env": true`. Necesita Engineering System con esa opción.
+
 ## Fase A (por defecto)
 
 El trabajo se detiene con el estado de V2 y el siguiente paso del owner. El Centro nunca integra un trabajo gobernado.
