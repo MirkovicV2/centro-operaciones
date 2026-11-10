@@ -302,16 +302,17 @@ function lifecycle(job, report, integrationRecord) {
   const phase = (s, map) => map[s?.status] || ['wait', s ? (workflowStatusNames[s.status] || s.status) : 'Sin iniciar'];
   const exec = phase(dev, { succeeded: ['done', 'Terminada'], running: ['active', 'En curso'], blocked: ['fail', 'Detenida'], failed: ['fail', 'Falló'] });
   let rev;
-  if (v2) rev = v2.outcome === 'rejected' ? ['fail', 'Rechazada (Workflow V2)'] : v2.outcome === 'owner_pending' ? ['ok', 'Recomienda aceptar (Workflow V2)'] : ['unk', 'Workflow V2 · ' + (v2.status || 'sin estado')];
+  if (v2) rev = v2.outcome === 'approved' ? ['ok', 'Aprobada (Workflow V2)'] : v2.outcome === 'rejected' ? ['fail', 'Rechazada (Workflow V2)'] : v2.outcome === 'owner_pending' ? ['ok', 'Recomienda aceptar (Workflow V2)'] : ['unk', 'Workflow V2 · ' + (v2.status || 'sin estado')];
   else rev = phase(review, { succeeded: ['ok', 'Aprobada'], running: ['active', 'En curso'], blocked: ['fail', 'Rechazada'], failed: ['fail', 'Falló'] });
   const acceptance = v2
-    ? (v2.status === 'aprobado' ? ['ok', 'Aceptada por ti'] : ['wait', 'Pendiente de tu decisión en V2'])
+    ? (v2.outcome === 'approved' && v2.status === 'aprobado' ? ['ok', 'Aceptada por ti'] : ['wait', 'Pendiente de tu decisión en V2'])
     : ['na', 'No aplica'];
   const integ = report?.integration;
   let integration;
   if (!job.autoIntent?.eligible) integration = ['na', 'Manual'];
   else if (!integrationRecord && !integ?.phase) integration = ['unk', 'Sin registro'];
   else if ((integrationRecord?.phase || integ?.phase) === 'complete') integration = ['ok', 'Integrada'];
+  else if (['blocked', 'failed'].includes(step('integration')?.status)) integration = ['fail', workflowStatusNames[step('integration').status]];
   else integration = ['active', integrationRecord?.phase || integ?.phase];
   const note = { exec: dev ? (dev.dispatchId ? `Dispatch ${dev.dispatchId}` : dev.label) : 'Sin etapa de ejecución',
     rev: review?.delivery?.findings?.length ? `${review.delivery.findings.length} hallazgos` : review ? review.label : 'Sin revisión todavía',
@@ -328,7 +329,7 @@ function lifecycle(job, report, integrationRecord) {
 
 function renderRun(data) {
   const root = $('#run-page');
-  const job = (data.jobs || []).find(item => item.id === state.runId) || (state.raw?.jobs || []).find(item => item.id === state.runId);
+  const job = (data.jobs || []).find(item => item.id === state.runId);
   const report = (data.requestTraces || []).flatMap(trace => trace.reports || []).find(item => item.jobId === state.runId);
   const receipt = data.automation?.receipts?.find(item => item.jobId === state.runId);
   const integrationRecord = job?.autoIntent?.eligible ? data.automation?.integrations?.[job.autoIntent.receiptId] : null;
@@ -479,7 +480,7 @@ function renderHistory(data) {
   const closed = (data.jobs || []).filter(job => ['succeeded', 'cancelled'].includes(job.state)).sort((a, b) => String(b.finishedAt || b.createdAt).localeCompare(String(a.finishedAt || a.createdAt)));
   const reports = (data.requestTraces || []).flatMap(trace => trace.reports || []);
   const selected = closed.find(job => job.id === state.historySelected) || closed[0];
-  const signature = JSON.stringify([closed.map(job => [job.id, job.state, job.finishedAt]), selected?.id, reports.length]);
+  const signature = JSON.stringify([closed, selected?.id, reports]);
   if (root.dataset.signature === signature) return;
   root.dataset.signature = signature;
   root.replaceChildren();
@@ -508,6 +509,7 @@ function renderHistory(data) {
     for (const step of selected.workflow?.steps || []) fact(step.label, `${workflowStatusNames[step.status] || step.status}${step.launch?.model ? ` · ${step.launch.model}` : ''}`, step.dispatchId ? 'observed' : 'unknown');
     for (const item of report?.criteria || []) fact('Criterio', `${item.criterion} · ${item.status === 'passed' ? 'cumple' : item.status === 'failed' ? 'no cumple' : 'sin verificar'}`, item.level);
     if (report?.integration?.applies) for (const item of report.integration.facts) fact(item.label, item.value, item.level);
+    else if (selected.autoIntent?.eligible) fact('Integración', 'Sin registro', 'unknown');
     else fact('Integración', 'Manual · fuera del Centro', 'na');
     fact('Tokens y coste', 'Sin registro fiable', 'unknown');
     panel.append(facts);
@@ -1659,8 +1661,8 @@ function renderOverviewRail(data, traces) {
     if (project.nextAction) card.append(el('span', 'rail-next', `Siguiente: ${project.nextAction}`));
     const checkout = (data.checkouts || []).find(item => item.projectId === project.id);
     const source = el('span', 'rail-source');
-    const mark = el('span', `pv pv-${project.workspace || checkout ? 'observed' : 'unknown'}`); mark.setAttribute('aria-hidden', 'true');
-    source.append(mark, project.workspace || checkout ? 'Checkout configurado' : 'Sin checkout');
+    const mark = el('span', `pv pv-${project.checkout || checkout ? 'observed' : 'unknown'}`); mark.setAttribute('aria-hidden', 'true');
+    source.append(mark, project.checkout || checkout ? 'Checkout configurado' : 'Sin checkout');
     card.append(source);
     projects.append(card);
   }

@@ -1275,9 +1275,13 @@ button.history-row { cursor: pointer; } button.history-row:hover { background: v
 .idea-form .idea-focus { padding: 8px; }
 .idea-form .idea-focus label { min-height: 36px; font-size: 13px !important; }
 .idea-actions { grid-template-columns: minmax(0, 1fr); }
-@media (max-width: 1060px) { .idea-layout > .idea-form { order: 0; position: static; } }
+@media (max-width: 1060px) {
+  .idea-layout { grid-template-columns: minmax(0, 1fr); }
+  .idea-layout > .idea-form { order: 0; position: static; }
+}
 /* Conocimiento: el mapa ocupa la pantalla, Obsidian en una columna. */
 .knowledge-layout { grid-template-columns: minmax(0, 1fr) 300px; }
+@media (max-width: 1060px) { .knowledge-layout { grid-template-columns: minmax(0, 1fr); } }
 .graph-view, .graph-view svg, .empty-graph { min-height: 520px; height: 520px; }
 .graph-card { border-radius: 12px; }
 
