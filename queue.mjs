@@ -36,6 +36,9 @@ export class QueueError extends Error {
 const emptyState = () => ({ schema: 1, revision: 0, jobs: [], budget: { limitUsd: 0, reservedUsd: 0, estimatedSpentUsd: 0, model: '', inputPerMillion: 0, outputPerMillion: 0 } });
 const dir = root => path.join(root, 'data');
 const ledger = root => path.join(dir(root), 'events.jsonl');
+const LEDGER_GENESIS = '0'.repeat(64);
+const lineHash = line => createHash('sha256').update(line, 'utf8').digest('hex');
+const ledgerHeads = new WeakMap();
 const stamp = () => new Date().toISOString();
 // 7: who acts. The panel and the CLI run their work inside actorContext.run({ actor, role });
 // ledger events and new jobs record the actor when present. Old entries simply lack it.
@@ -57,18 +60,36 @@ async function readLedger(root, repair = false) {
   try { raw = await fs.readFile(ledger(root), 'utf8'); }
   catch (e) {
     if (e.code !== 'ENOENT') throw e;
-    try { await fs.access(path.join(dir(root), 'state.json')); } catch (err) { if (err.code === 'ENOENT') return emptyState(); throw err; }
+    try { await fs.access(path.join(dir(root), 'state.json')); } catch (err) { if (err.code === 'ENOENT') { const fresh = emptyState(); ledgerHeads.set(fresh, LEDGER_GENESIS); return fresh; } throw err; }
     throw new QueueError('Falta el registro de eventos, pero existe una instantánea. Revisión manual necesaria.', 'ledger_missing');
   }
   const state = emptyState();
   const complete = raw.lastIndexOf('\n') + 1;
+  let previous = null;
   for (const line of raw.slice(0, complete).split('\n').filter(Boolean)) {
     let event;
     try { event = JSON.parse(line); } catch { throw new QueueError('Registro de eventos dañado. Revisión manual necesaria.', 'ledger_corrupt'); }
+    // D: every event the Centro writes names the hash of the exact previous line, so altering, removing or
+    // reordering any line before it is detected. Lines without `prev` (history before D, or a manual append at
+    // the end) stay valid; the next Centro write chains over them.
+    if (event.prev !== undefined && event.prev !== (previous ? lineHash(previous) : LEDGER_GENESIS)) {
+      throw new QueueError('El registro de eventos no encadena con la línea anterior: se alteró, se borró o se reordenó una entrada. Revisión manual necesaria.', 'ledger_chain_broken');
+    }
     applyEvent(state, event);
+    previous = line;
   }
+  ledgerHeads.set(state, previous ? lineHash(previous) : LEDGER_GENESIS);
   // A torn final write was never committed. Only the lock owner may trim it.
   if (repair && complete < raw.length) await fs.truncate(ledger(root), Buffer.byteLength(raw.slice(0, complete)));
+  // D: the snapshot is written after each append, so it can never be ahead of the ledger. If it is, committed
+  // events were cut from the end of the ledger. Checked by the lock owner before any new write.
+  if (repair) {
+    let snapshot;
+    try { snapshot = JSON.parse(await fs.readFile(path.join(dir(root), 'state.json'), 'utf8')); } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+    if (Number.isInteger(snapshot?.revision) && snapshot.revision > state.revision) {
+      throw new QueueError(`Al registro de eventos le faltan entradas finales (instantánea en la revisión ${snapshot.revision}, registro en la ${state.revision}). Revisión manual necesaria.`, 'ledger_truncated');
+    }
+  }
   return state;
 }
 
@@ -90,10 +111,13 @@ function commit(root, state, type, patch = {}, details = {}) {
 }
 async function writeCommit(root, state, type, patch = {}, details = {}) {
   const actor = currentActor();
-  const event = { schema: 1, revision: state.revision + 1, at: stamp(), type, details, patch, ...(actor ? { actor } : {}) };
+  const head = ledgerHeads.get(state);
+  const event = { schema: 1, revision: state.revision + 1, at: stamp(), type, details, patch, ...(actor ? { actor } : {}), ...(head ? { prev: head } : {}) };
+  const line = JSON.stringify(event);
   const handle = await fs.open(ledger(root), 'a');
-  try { await handle.writeFile(JSON.stringify(event) + '\n'); await handle.sync(); } finally { await handle.close(); }
+  try { await handle.writeFile(line + '\n'); await handle.sync(); } finally { await handle.close(); }
   applyEvent(state, event);
+  if (head) ledgerHeads.set(state, lineHash(line));
   // Ledger is authoritative if the process dies before snapshot replacement.
   await atomicSnapshot(root, state);
 }
