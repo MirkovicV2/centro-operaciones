@@ -124,7 +124,7 @@ function dispatchBrief(artifact, identity) {
     'SPEC_SHA256: ' + artifact.sha256,
     'IDENTIDAD: ' + JSON.stringify(identity),
     'El archivo contiene el perfil, alcance, restricciones, decisiones y contrato de entrega obligatorios. Este mensaje es solo su referencia, no un resumen que sustituya instrucciones. Usa los Task/Dispatch nativos de TU asignación y conserva el intento de entrada indicado; no inventes IDs ni delegues.',
-    'COMANDOS: ejecuta un comando simple por llamada, sin ;, &&, |, variables ni cd. Para leer y verificar el encargo usa literalmente: sha256sum ' + JSON.stringify(artifact.path) + ' y después cat ' + JSON.stringify(artifact.path) + '. Las reglas de permisos del checkout solo reconocen comandos simples; un comando encadenado se bloquea o pide aprobación.',
+    'COMANDOS: ejecuta un comando simple por llamada, sin ;, &&, |, variables ni cd. Verifica la huella con literalmente: sha256sum ' + JSON.stringify(artifact.path) + ' y lee el archivo con tu herramienta de lectura de archivos (Read), no con cat. Las reglas de permisos del checkout solo reconocen comandos simples; un comando encadenado se bloquea o pide aprobación.',
     'No modifiques este archivo. Aplica el encargo completo y reporta con worker_done según su contrato.',
   ].join('\n');
 }

@@ -22,6 +22,8 @@ test('the permissions template allows what a worker needs and denies effects, ot
   for (const rule of allow) assert.equal(deny.includes(rule), false, rule);
   assert.ok(allow.every(rule => !/git (push|commit)|\bgh\b|sudo|\brm\b/.test(rule)));
   assert.ok(!allow.some(rule => rule.includes('https://') || rule.includes('localhost')));
+  // Unscoped readers would bypass the Read() path rules.
+  for (const rule of allow) assert.equal(/^Bash\((cat|ls|head|tail|less|more|find|grep)\b/.test(rule), false, rule);
   const text = JSON.stringify(example);
   assert.ok(!text.includes('/home/') && !text.includes('C:\\\\'), 'the template carries placeholders, not personal paths');
 });
@@ -47,7 +49,9 @@ test('the dispatch brief and the spec ask for one simple command per call and a 
   for (const brief of briefs) {
     assert.match(brief, /COMANDOS: ejecuta un comando simple por llamada, sin ;, &&, \|, variables ni cd\./);
     const file = JSON.parse(brief.match(/^SPEC_FILE: (.+)$/m)[1]);
-    assert.ok(brief.includes('sha256sum ' + JSON.stringify(file)) && brief.includes('cat ' + JSON.stringify(file)));
+    assert.ok(brief.includes('sha256sum ' + JSON.stringify(file)));
+    assert.match(brief, /herramienta de lectura de archivos \(Read\), no con cat/);
+    assert.equal(brief.includes('cat ' + JSON.stringify(file)), false);
   }
   for (const spec of specs) assert.match(spec, /Ejecuta la consulta como un único comando curl, sin encadenarlo con otros comandos ni variables\./);
 });

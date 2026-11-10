@@ -62,11 +62,11 @@ Claude Code lee `.claude/settings.local.json` del checkout en el que trabaja. La
 | Permitido | Denegado |
 | --- | --- |
 | Leer su encargo en `data/dispatch-specs/**` y los informes en `data/stage-reports/**` | `git push`, `git commit`, `gh`, `sudo`, `rm`, `wget` |
-| `sha256sum`, `wc -c`, `cat`, `ls`, `npm test`, `node --test`, `git status`, `git diff` | `curl` a otros hosts y a `localhost` (solo `127.0.0.1:<PUERTO>`) |
+| `sha256sum`, `wc -c`, `npm test`, `node --test`, `git status`, `git diff`; lectura con la herramienta Read solo en las rutas permitidas | `curl` a otros hosts y a `localhost` (solo `127.0.0.1:<PUERTO>`); `cat` y `ls`, que leerían cualquier ruta |
 | `curl -X POST http://127.0.0.1:<PUERTO>/api/jobs/*/context` | Escribir en `data/` y `.artifacts/` del centro |
 | `orca orchestration send --type worker_done`, `ask`, `dispatch-show` | `worker-start`, `run-create`, `task-create`, `dispatch`, `worker-stop`, `coordinator-start`, `worktree`, `agent`, `terminal`, `repo` |
 
-Las reglas `Bash(...)` solo reconocen comandos simples. Por eso el brief pide a los trabajadores un comando por llamada, sin `;`, `&&`, `|`, variables ni `cd` (por ejemplo `sha256sum <ruta>` y luego `cat <ruta>`), y una única llamada `curl` para la consulta de contexto. En la prueba E2E los comandos encadenados con `cd …; cat …` fueron los que provocaron diálogos de aprobación o denegaciones del modo automático.
+Las reglas `Bash(...)` solo reconocen comandos simples. Por eso el brief pide a los trabajadores un comando por llamada, sin `;`, `&&`, `|`, variables ni `cd` (por ejemplo `sha256sum <ruta>` y la lectura del encargo con la herramienta Read), y una única llamada `curl` para la consulta de contexto. En la prueba E2E los comandos encadenados con `cd …; cat …` fueron los que provocaron diálogos de aprobación o denegaciones del modo automático.
 
 ## Niveles por rol: modelo y esfuerzo
 

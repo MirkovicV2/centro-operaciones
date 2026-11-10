@@ -1,5 +1,5 @@
 {
-  "_comentario": "Plantilla de permisos por rol para trabajadores Claude Code lanzados por Orca. Copiala a <CHECKOUT>/.claude/settings.local.json del checkout aislado y sustituye <RAIZ> (carpeta del centro de operaciones), <CHECKOUT> (ruta absoluta del checkout), <PUERTO> (CENTRO_OPERATIONS_PORT) y <ORCA_CLI> (ruta del ejecutable orca que usa Orca; en Ubuntu suele ser ~/.config/orca/linux-orca-cli-shim/orca). No se aplica automaticamente a checkouts ajenos. Las reglas Bash solo reconocen comandos simples: el brief pide a los trabajadores un comando por llamada, sin ; && | variables ni cd.",
+  "_comentario": "Plantilla de permisos por rol para trabajadores Claude Code lanzados por Orca. Copiala a <CHECKOUT>/.claude/settings.local.json del checkout aislado y sustituye <RAIZ> (carpeta del centro de operaciones), <CHECKOUT> (ruta absoluta del checkout), <PUERTO> (CENTRO_OPERATIONS_PORT) y <ORCA_CLI> (ruta del ejecutable orca que usa Orca; en Ubuntu suele ser ~/.config/orca/linux-orca-cli-shim/orca). No se aplica automaticamente a checkouts ajenos. Las reglas Bash solo reconocen comandos simples: el brief pide a los trabajadores un comando por llamada, sin ; && | variables ni cd, y leer archivos con la herramienta Read (acotada por las reglas Read) en lugar de cat: Bash(cat:*) permitiria leer cualquier archivo del equipo.",
   "permissions": {
     "defaultMode": "acceptEdits",
     "allow": [
@@ -10,8 +10,6 @@
       "Read(//<RAIZ>/data/stage-reports/**)",
       "Bash(sha256sum:*)",
       "Bash(wc -c:*)",
-      "Bash(cat:*)",
-      "Bash(ls:*)",
       "Bash(npm test:*)",
       "Bash(node --test:*)",
       "Bash(git status:*)",
