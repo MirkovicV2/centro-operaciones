@@ -330,6 +330,18 @@ test('worker receipts accept native string/object payload and reject a foreign T
   assert.throws(() => matchingCompletion([{ ...receipt, payload: { ...receipt.payload, taskId: 'task_foreign1' } }], identity), /Task/);
 });
 
+// 34: in the E2E the UX worker sent worker_done twice for the same dispatch. The live pipeline is
+// idempotent for an exact repeat (one delivery) and fails closed when the repeats disagree.
+test('a repeated worker_done for the same dispatch yields one delivery; contradictory repeats block', () => {
+  const receipt = { type: 'worker_done', body: 'Entrega UX', payload: { ...identity, outcome: 'succeeded' } };
+  const twice = [{ ...receipt, id: 'msg_2' }, { ...receipt, id: 'msg_1', body: '  Entrega UX\n' }];
+  assert.deepEqual(matchingCompletion(twice, identity, { strict: true }), { text: 'Entrega UX', messageId: 'msg_2' });
+  const otherDispatch = { ...receipt, id: 'msg_3', body: 'Otra etapa', payload: { ...receipt.payload, dispatchId: 'ctx_other01' } };
+  assert.equal(matchingCompletion([otherDispatch, ...twice], identity, { strict: true }).text, 'Entrega UX');
+  assert.throws(() => matchingCompletion([...twice, { ...receipt, id: 'msg_0', body: 'Entrega UX distinta' }], identity, { strict: true }),
+    error => error.code === 'orca_receipt_ambiguous');
+});
+
 test('unavailable token measurements remain null and long legacy context is not cut silently', () => {
   assert.deepEqual(measuredUsage(undefined), { inputTokens: null, cachedInputTokens: null, outputTokens: null });
   assert.equal(measuredUsage({ input_tokens: 120, output_tokens: 9 }).inputTokens, 120);
