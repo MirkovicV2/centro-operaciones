@@ -1,3 +1,4 @@
+import { jobReport } from './job-report.mjs';
 import fs from 'node:fs/promises';
 import { sameRepository } from '../repository-name.mjs';
 import path from 'node:path';
@@ -405,7 +406,7 @@ function projectTrace(request, inputs, prepared) {
   if (currentStage === 'queue') steps.push({ key: 'queue', label: 'Entrada en la cola', status: status === 'blocked' ? 'blocked' : 'queued', summary: nextAction, agent: owner, at: date(receipts.at(-1)?.confirmedAt) });
   return { requestId: request.id, kind: request.kind || null, intent: request.intent || 'task', title: text(request.snapshot?.title || request.snapshot?.text || 'Solicitud', 160), business: request.business,
     projectId, projectName: primary?.projectName || request.projectName || request.snapshot?.projectName || '', status, statusLabel: statusLabels[status], currentStage, nextAction, responsible: owner,
-    steps, events: sortedEvents.slice(-500), questions: relatedQuestions, answerNotices, response, knowledge: relatedKnowledge,
+    steps, reports: linked.map(job => jobReport(job, integrationFor(job, automation, receipts))), events: sortedEvents.slice(-500), questions: relatedQuestions, answerNotices, response, knowledge: relatedKnowledge,
     ids: { requestId: request.id, ideaId: request.ideaId || null, jobIds: [...jobIds], receiptIds: [...receiptIds], runId: notice.runId || null, eventsTruncated: sortedEvents.length > 500 } };
 }
 

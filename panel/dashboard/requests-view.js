@@ -61,6 +61,20 @@
     }
     return section;
   }
+  // E: per-job report. Every fact says whether the Centro verified it, an agent reported it, or nobody showed it.
+  const levelLabels = { observed: 'Comprobado', reported: 'Según el agente', unknown: 'Sin evidencia' };
+  function jobReportSection(report) {
+    const section = make('section', 'job-report'); section.setAttribute('aria-label', `Informe del encargo ${report.title}`);
+    section.append(make('h4', '', `Informe del encargo · ${report.title}`),
+      make('p', 'microcopy', `${report.totals.observed} comprobados · ${report.totals.reported} según el agente · ${report.totals.unknown} sin evidencia`));
+    if (report.asked.objective) section.append(make('p', 'request-prose', `Se pidió: ${report.asked.objective}`));
+    const fact = item => { const row = make('li', `report-fact level-${item.level}`); row.append(make('span', 'report-level', levelLabels[item.level] || item.level), make('strong', '', item.label || item.criterion), make('span', '', item.value ?? item.status ?? ''));
+      if (item.evidence) row.append(make('small', '', item.evidence)); return row; };
+    if (report.criteria.length) { const list = make('ul', 'report-facts'); list.setAttribute('aria-label', 'Criterios del encargo'); for (const item of report.criteria) list.append(fact({ ...item, value: `${item.status}${item.stage ? ` · ${item.stage}` : ''}` })); section.append(make('h5', '', 'Criterios'), list); }
+    for (const stage of report.stages) { if (!stage.facts.length) continue; const list = make('ul', 'report-facts'); for (const item of stage.facts) list.append(fact(item)); section.append(make('h5', '', stage.label), list); }
+    if (report.integration.applies) { const list = make('ul', 'report-facts'); for (const item of report.integration.facts) list.append(fact(item)); section.append(make('h5', '', 'Integración'), list); }
+    return section;
+  }
   function card(trace) {
     const item = make('article', 'request-card'); item.id = `request-${trace.requestId}`;
     const header = make('div', 'request-card-header');
@@ -110,6 +124,7 @@
     for (const q of relatedQuestions) {
       const decision = make('div', 'request-decision'); decision.append(make('strong', '', q.question), make('p', 'request-prose', q.answer ? `Tu respuesta: ${q.answer}` : q.closedByResponseId ? 'Pregunta opcional cerrada al responder la consulta.' : 'Esperando tu respuesta.')); details.append(decision);
     }
+    for (const report of trace.reports || []) details.append(jobReportSection(report));
     for (const receipt of trace.knowledge || []) details.append(sourceDetails(receipt, trace.requestId));
     if (!(trace.knowledge || []).length) details.append(make('p', 'microcopy', 'Todavía no hay una consulta de Obsidian registrada para esta petición.'));
     const ids = make('details', 'request-technical'); ids.dataset.panelDetail = `request-${trace.requestId}-identifiers`;

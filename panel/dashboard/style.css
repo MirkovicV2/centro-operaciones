@@ -525,3 +525,7 @@ dialog::backdrop { background: #070606cd; }
   .idea-context-fields { grid-template-columns: minmax(0, 1fr); }
   .idea-workspace-rail #idea-filters { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* E: per-job report inside Peticiones. Levels differ in text, not only in colour. */
+.job-report{margin-top:14px;padding:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}.job-report h4{margin:0 0 4px}.job-report h5{margin:12px 0 6px;font-size:14px;color:var(--muted)}.report-facts{list-style:none;margin:0;padding:0;display:grid;gap:6px}.report-fact{display:grid;grid-template-columns:130px minmax(0,180px) minmax(0,1fr);gap:4px 10px;font-size:14px;overflow-wrap:anywhere}.report-fact small{grid-column:2/-1;color:var(--muted)}.report-level{font:12px ui-monospace,monospace;color:var(--soft)}.level-observed .report-level{color:var(--green)}.level-reported .report-level{color:var(--blue)}.level-unknown .report-level{color:var(--amber)}
+@media(max-width:760px){.report-fact{grid-template-columns:1fr}.report-fact small{grid-column:auto}}
