@@ -80,6 +80,14 @@ Cada rol tiene un nivel (`ligero`, `estandar`, `profundo`) que cada agente tradu
 
 Para cambiar niveles o definir flags de Claude, copia [ejemplos/orca-launch-levels.example.json](../ejemplos/orca-launch-levels.example.json) a `data/orca-launch-levels.json` (no versionado). Solo se aplican las entradas que escribas; un archivo inválido detiene el despacho con el error `launch_levels_invalid` en lugar de lanzar con flags adivinados. El nivel usado queda en `jobs[].workflow.steps[].launchLevel`.
 
+**Tres capas de elección (gana la más concreta):**
+
+1. **Por defecto:** `roles` → nivel → `agents.<agente>.<nivel>` en `data/orca-launch-levels.json`.
+2. **Por proyecto:** `"projects": { "<id del proyecto>": { "roles": { "revisor": "profundo" } } }` en el mismo archivo.
+3. **Por encargo:** al crearlo, `launch: { "agent": "claude", "roles": { "revisor": { "model": "opus", "effort": "medium" }, "qa": { "model": "sonnet", "effort": "high" } } }`. Desde la CLI: `node cli.mjs add ... --launch-file modelos.json`. Como los nombres de modelo dependen del agente, una elección para `claude` no se aplica si el encargo corre con Codex.
+
+Cada etapa guarda en `steps[].launch` con qué se lanzó (`agent`, `model`, `effort`, `level` y `source`: `por defecto`, `proyecto` o `encargo`), y el informe del encargo en Peticiones y la ficha de la etapa lo muestran. Sin el archivo y sin elección en el encargo, Claude no recibe flags y Codex usa sus valores de siempre.
+
 ## Prueba en dos pasos
 
 1. En **Peticiones → Nueva consulta → Preguntar al coordinador**, envía «Resume qué dice Obsidian sobre el color principal del Proyecto de prueba». Mira **Peticiones** para ver el aviso, las fuentes y la respuesta. Esta opción abre una consulta.

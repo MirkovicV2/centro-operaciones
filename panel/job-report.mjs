@@ -10,12 +10,26 @@ const STAGES = [['ux', 'UX'], ['developer', 'Desarrollo'], ['qa', 'QA'], ['revie
 const isSha = value => /^[a-f0-9]{40}$/i.test(value ?? '');
 const clip = (value, limit = 600) => String(value ?? '').slice(0, limit);
 
+// What the Centro launched the stage with. Older stages only recorded the agent and level: the model is unknown.
+const sources = { encargo: 'elegido en el encargo', proyecto: 'por defecto del proyecto', 'por defecto': 'por defecto' };
+function launchText(step) {
+  const launch = step.launch;
+  if (launch?.agent) {
+    const model = launch.model ? `${launch.model}${launch.effort ? ` · esfuerzo ${launch.effort}` : ''}` : `modelo por defecto de ${launch.agent}${launch.effort ? ` · esfuerzo ${launch.effort}` : ''}`;
+    return { value: `${launch.agent} · ${model} (${sources[launch.source] || launch.source}${launch.level ? `, nivel ${launch.level}` : ''})`, level: 'observed' };
+  }
+  if (step.orcaAgent) return { value: `${step.orcaAgent}${step.launchLevel ? ` · nivel ${step.launchLevel}` : ''} · modelo no registrado`, level: 'unknown' };
+  return null;
+}
+
 function stageReport(job, key, label) {
   const step = job.workflow?.steps?.find(item => item.key === key);
   if (!step) return { key, label, status: 'not_started', level: 'unknown', facts: [] };
   const exact = Boolean(step.runId && step.taskId && step.dispatchId);
   const facts = [{ label: 'Estado', value: step.status, level: exact && ['succeeded', 'blocked', 'failed'].includes(step.status) ? 'observed' : 'unknown' }];
   if (exact) facts.push({ label: 'Dispatch', value: step.dispatchId, level: 'observed' });
+  const launched = launchText(step);
+  if (launched) facts.push({ label: 'Modelo', ...launched });
   const delivery = step.delivery;
   if (delivery?.summary) facts.push({ label: 'Resumen del agente', value: clip(delivery.summary), level: 'reported' });
   else if (step.summary) facts.push({ label: 'Resumen', value: clip(step.summary), level: 'reported' });

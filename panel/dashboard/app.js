@@ -257,6 +257,7 @@ function renderJobs(data) {
         header.append(el('span', 'workflow-stage-label', label), el('span', `workflow-stage-status ${step.status}`, workflowStatusNames[step.status] || step.status));
         stage.append(header);
         if (profileName) stage.append(el('span', 'workflow-stage-profile', `Perfil: ${profileName}`));
+        if (step.launch?.agent) stage.append(el('span', 'workflow-stage-profile', `Modelo: ${step.launch.agent} · ${step.launch.model || 'por defecto del agente'}${step.launch.effort ? ` · ${step.launch.effort}` : ''}${step.launch.source === 'encargo' ? ' (elegido en el encargo)' : step.launch.source === 'proyecto' ? ' (del proyecto)' : ''}`));
         if (profileName !== step.profile) { const technical = el('details'); technical.dataset.panelDetail = `${card.id}-${step.key}-profile`; technical.append(el('summary', '', 'Identificador del perfil'), el('span', '', step.profile)); stage.append(technical); }
         if (step.authorization) stage.append(el('span', 'workflow-stage-profile', `Autorizado por ${step.authorization.coordinatorName}`));
         if (step.dispatchId) { const technical = el('details'); technical.dataset.panelDetail = `${card.id}-${step.key}-dispatch`; technical.append(el('summary', '', 'Detalle técnico'), el('span', 'workflow-stage-dispatch', `Dispatch: ${step.dispatchId} · ${step.dispatchStatus || 'sin estado confirmado'}`)); stage.append(technical); }
