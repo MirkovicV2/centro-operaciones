@@ -829,6 +829,7 @@ function renderProjects(data) {
     });
     card.append(stages);
 
+    if (project.nextAction) card.append(el('p', 'project-next', project.nextAction));
     card.append(el('div', 'project-activity', `${project.jobCount || 0} trabajos · ${project.openJobCount || 0} abiertos`));
     const latest = project.recentJobs || [];
     if (latest.length) {
@@ -912,7 +913,12 @@ function renderProjects(data) {
         await refresh();
       } catch (error) { notify(error.message, true); save.disabled = false; }
     });
-    card.append(form);
+    // As in the mockup the card reads as a row; editing lives in a disclosure that survives refreshes.
+    const edit = el('details', 'project-edit');
+    edit.open = state.openProjects?.has(project.id) || state.projectDrafts.has(project.id);
+    edit.addEventListener('toggle', () => { state.openProjects ||= new Set(); edit.open ? state.openProjects.add(project.id) : state.openProjects.delete(project.id); });
+    edit.append(el('summary', '', 'Editar etapa, siguiente paso y destino'), form);
+    card.append(edit);
     grid.append(card);
   }
 }
