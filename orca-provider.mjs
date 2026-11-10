@@ -538,10 +538,11 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
         const uxProof = marker?.mode === 'same_attempt_delivery_transport' && marker.phase === 'consumed'
           && marker.stage === 'ux' && marker.dispatchId === dispatchId && marker.deliveryTransport?.kind === 'ux_product_acceptance_array'
           ? marker.deliveryTransport : null;
-        const normalized = parseDelivery(text, { ...identity, acceptance: job.contract?.acceptance }, {
+        const normalized = parseDelivery(text, { ...identity, acceptance: job.contract?.acceptance, ...(['qa', 'reviewer'].includes(identity.stage) && job.reviewCandidate ? { candidate: job.reviewCandidate } : {}) }, {
           required: Boolean(uxProof) || job.contract?.version === 1 && savedStep?.deliveryVersion !== null,
           requireUxAcceptanceArray: Boolean(uxProof),
           preserveExplicitBlock: true,
+          strictReview: true,
         });
         if (uxProof && (uxProof.originalArtifactSha256 !== savedStep?.artifact?.sha256 || uxProof.reportSha256 !== fingerprint(text)
           || uxProof.deliverySha256 !== fingerprint(normalized))) {
@@ -639,19 +640,23 @@ export function approved(text) {
   const finalLine = String(text ?? '').trim().split(/\r?\n/).at(-1)?.trim() ?? '';
   return finalLine === 'RESULTADO: APROBADO';
 }
-async function enforceGate(ctx, roleKey, output) {
+export async function enforceGate(ctx, roleKey, output) {
   const persistedApproval = output.approvalOutcome === 'approved'
     && output.approvalDispatchId
     && output.approvalDispatchId === output.dispatchId;
   if (output.delivery ? deliveryApproved(output.delivery) && output.delivery.dispatchId === output.dispatchId : output.recovered ? persistedApproval : approved(output.text)) return;
   const role = ROLES[roleKey];
-  await ctx.reportStage?.({ key: role.stageKey, status: 'blocked', ...summarizeStage(output.text) });
+  // C: a stage that could not finish its own check (outcome failed) did not judge the product. It stops as an
+  // operational failure, distinct from a rejection, so the panel offers a retry over the same candidate.
+  const operational = output.delivery?.outcome === 'failed';
+  await ctx.reportStage?.({ key: role.stageKey, status: 'blocked', ...summarizeStage(output.text), ...(operational ? { error: 'quality_gate_operational' } : {}) });
   const sequence = ['ux', 'desarrollador', 'qa', 'revisor'];
   const blockedAt = sequence.indexOf(roleKey);
   for (const laterRole of sequence.slice(blockedAt + 1)) {
     const later = ROLES[laterRole];
     await ctx.reportStage?.({ key: later.stageKey, status: 'skipped', summary: `No iniciada: ${role.label} bloqueó la entrega.` });
   }
+  if (operational) throw new ProviderError('quality_gate_operational', `${role.label} no pudo completar su comprobación: es un fallo operativo, no un rechazo del producto. Reintenta la etapa sobre el mismo candidato.`, { uncertain: false });
   throw new ProviderError('quality_gate_blocked', `${role.label} no aprobó la entrega; la cola queda pendiente de revisión y el informe está en el panel.`, { uncertain: false });
 }
 
@@ -756,15 +761,16 @@ export async function runOrca(job, ctx, {
     runId, developer, previous: previousIntegration, captureSnapshot, persist: record => persistIntegration(ctx.root, record),
   }) : null;
   const integrationSnapshot = validation?.snapshot ?? null;
-  const qa = await runStage(job, ctx, 'qa', workspace, runId,
+  const reviewed = integrationSnapshot ? { ...job, reviewCandidate: integrationSnapshot } : job;
+  const qa = await runStage(reviewed, ctx, 'qa', workspace, runId,
     job.business === 'games'
       ? 'Valida la escena y el comportamiento en el motor del encargo. Ejecuta los tests locales relevantes y conserva sus resultados. No edites archivos del juego ni instales herramientas. Termina con RESULTADO: APROBADO o RESULTADO: BLOQUEADO; identifica cualquier comprobación esencial ausente.'
       : 'Valida los cambios sin editarlos. Revisa los scripts del proyecto y ejecuta comprobaciones acotadas y relevantes de tipos, lint, compilación y comportamiento; no instales paquetes ni uses red. No añadas ni ejecutes suites de pruebas salvo que el encargo lo solicite expresamente. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO. Si la validación falla, aporta el comando y el error reproducible.',
     `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'developer', taskId: developer.taskId, dispatchId: developer.dispatchId });
   await enforceGate(ctx, 'qa', qa);
-  const review = await runStage(job, ctx, 'revisor', workspace, runId,
+  const review = await runStage(reviewed, ctx, 'revisor', workspace, runId,
     'Haz una revisión independiente y de solo lectura del diff, el encargo, la especificación UX y la evidencia de QA. Busca defectos funcionales, accesibilidad, regresiones y omisiones; no edites. Para devolver a Desarrollo un defecto reproducible, identifica en acceptance el criterio exacto del contrato como failed e incluye los pasos y la evidencia. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO.',
-    `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}\n\nQA:\n${handoffText(qa)}`, command, { stage: 'qa', taskId: qa.taskId, dispatchId: qa.dispatchId });
+    `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}\n\nQA:\n${handoffText(qa)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'qa', taskId: qa.taskId, dispatchId: qa.dispatchId });
   await enforceGate(ctx, 'revisor', review);
   if (validation) previousIntegration = await sealIntegrationValidation(job, validation, {
     qa, review, captureSnapshot, persist: record => persistIntegration(ctx.root, record),
