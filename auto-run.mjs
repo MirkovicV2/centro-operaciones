@@ -4,11 +4,13 @@ import { randomUUID, createHash } from 'node:crypto';
 import { QUEUE_BUSINESSES, addJob, loadState, runQueue, recoverDashboardQueue, retryJob, validateSpec, acquireLock, acquireLedgerLock, releaseLock, queueKnownLivenessResume, elapsedAttemptMs, executionTimeExhausted, isEffectFreeLivenessPreflight, isSameAttemptRecoveryMode, deliveryTransportError, assertDeliveryTransportProof, recoveryFingerprint, integrationValidationSteps, assertIntegrationValidationProof, queueIntegrationValidationResume, assertCommittedIntegrationRecord, assertIntegrationReconcileProof, queueIntegrationReconcileResume } from './queue.mjs';
 import { verifyGitHubDestination } from './project-destination.mjs';
 import { sameRepository } from './repository-name.mjs';
-import { captureIntegrationSnapshot } from './github-integration.mjs';
+import { captureIntegrationSnapshot, pullRequestIdentityFields, sameRepositoryPullRequest } from './github-integration.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { inspectCommittedIntegration, inspectEffectFreeIntegration, effectFreeIntegrationRecord } from './integration-recovery.mjs';
 import { replaceLocalFile } from './atomic-file.mjs';
 import { assertQualityAction, queueContractRevisionRetry, recoverableChecksTimeout, uxReturnSource, developerDecisionSource, stageDecisionSource, isPartialStageResume, settledOrcaObservation, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
-import { currentActor } from './queue.mjs';
+import { currentActor, settleOwnerMergedJob } from './queue.mjs';
 import { createContractRevision, assertContractRevisionCheckpoint, assertContractRevisionProof, contractRevisionHash, originalContractRevisionJob } from './contract-revision.mjs';
 import { workflowV2Resumable, workflowV2Readmissible } from './workflow-v2-gate.mjs';
 
@@ -1099,6 +1101,43 @@ export async function readmitWorkflowV2Receipt(root, jobId, { confirm = false } 
     audit(state, 'retry_authorized', { receiptId: receipt.id, jobId, attempt: job.attempts, workflowV2: true, readmitted: true });
     return receipt;
   });
+}
+
+const runGh = async (args, cwd) => (await promisify(execFile)('gh', args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 1 << 20 })).stdout;
+const OWNER_MERGE_PHASES = new Set(['pr_confirmed', 'checks_pending', 'merge_intent']);
+
+// The owner merged the integration PR by hand while the Centro waited for checks (repositories
+// without CI end there). Confirms on GitHub that exactly that PR, with exactly the recorded commit,
+// is merged into the confirmed base, then records the integration and the job as delivered.
+// Read-only towards GitHub: it never pushes, merges or dispatches anything.
+export async function reconcileOwnerMergedIntegration(root, jobId, { confirm = false, gh = runGh } = {}) {
+  if (!confirm) throw new Error('Confirma que fusionaste tú la PR de este trabajo.');
+  root = path.resolve(root);
+  const job = (await loadState(root)).jobs.find(item => item.id === jobId);
+  const saved = await readAutoRun(root);
+  const receipt = saved.receipts.find(item => item.jobId === jobId);
+  const record = receipt ? saved.integrations?.[receipt.id] : null;
+  if (!job || job.kind !== 'code' || !['needs_attention', 'queued'].includes(job.state) || !receipt?.eligible || job.autoIntent?.receiptId !== receipt.id
+    || !['blocked', 'needs_attention'].includes(receipt.status) || !record || !OWNER_MERGE_PHASES.has(record.phase)
+    || !Number.isInteger(record.prNumber) || !/^[a-f0-9]{40}$/i.test(record.commitSha || '') || record.sourceBranch !== job.branch) {
+    throw new Error('Este trabajo no tiene una PR de integración esperando checks o merge; revisa su estado.');
+  }
+  const repo = String(record.repository || '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '');
+  const pr = JSON.parse(await gh(['pr', 'view', String(record.prNumber), '--repo', repo, '--json', `${pullRequestIdentityFields},mergedAt,mergeCommit`], job.workspace));
+  if (!sameRepositoryPullRequest(pr, repo, record.sourceBranch, record.baseBranch) || pr.number !== record.prNumber || pr.headRefOid !== record.commitSha) {
+    throw new Error('La PR observada no coincide con la PR y el commit registrados; no se reconcilia.');
+  }
+  if (pr.state !== 'MERGED' || !pr.mergedAt || !/^[a-f0-9]{40,64}$/i.test(pr.mergeCommit?.oid || '')) throw new Error(`La PR #${record.prNumber} no está fusionada; no hay nada que reconciliar.`);
+  const integration = await persistIntegration(root, { ...record, phase: 'complete', status: 'completed', needsAttention: false, error: null,
+    mergeSha: pr.mergeCommit.oid, mergedAt: pr.mergedAt, reconciled: true, mergedBy: 'owner', updatedAt: now() });
+  const settled = await settleOwnerMergedJob(root, jobId, integration, { confirm: true });
+  await change(root, state => {
+    const current = state.receipts.find(item => item.id === receipt.id);
+    current.status = 'completed'; current.reason = integratedReason; current.updatedAt = now();
+    delete current.workflowV2Resume;
+    audit(state, 'owner_merge_reconciled', { receiptId: receipt.id, jobId, prNumber: record.prNumber, mergeSha: pr.mergeCommit.oid });
+  });
+  return settled;
 }
 
 export async function retryAutoReceipt(root, jobId, { confirm = false, noDispatchConfirmed = false } = {}) {
