@@ -1,3 +1,4 @@
+import { readStageContracts, contractsBrief } from './project-contracts.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -301,6 +302,9 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
       throw new ProviderError('orca_game_skill_missing', `Falta la guía de videojuegos del perfil ${role.name}.`);
     }
   }
+  let roleContracts = '';
+  try { roleContracts = contractsBrief(await readStageContracts(ctx.root, { business: job.business, projectId: job.projectId, stage: role.stageKey })); }
+  catch (error) { throw new ProviderError('project_contract_invalid', error.code === 'project_contract_invalid' ? error.message : 'No se pudieron leer los contratos de rol del Centro.', { uncertain: false }); }
   const savedStep = job.workflow?.steps?.find(step => step.key === role.stageKey);
   // A native retry reuses the immutable Task spec; its input attempt is stable.
   const taskInputAttempt = savedStep?.retryOf?.taskInputAttempt ?? savedStep?.taskInputAttempt ?? job.attempts;
@@ -345,6 +349,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     `PERFIL EXISTENTE: ${role.name}. Respeta el alcance del perfil y no crees ni delegues en otros agentes.`,
     profile,
     gameSkill,
+    roleContracts,
     `EMPRESA: ${job.business}.`,
     job.branch ? `DESTINO CONFIRMADO: ${workspace}; rama ${job.branch}. No crees ni cambies ramas.` : '',
     job.business === 'games' && job.kind === 'code' && job.branch
