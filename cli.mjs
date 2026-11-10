@@ -17,7 +17,8 @@ node cli.mjs status
 node cli.mjs add --business games|agency --kind analysis|code --title "Título" --prompt-file "instruccion.txt" [--id identificador]
   [--provider orca|auto|api|codex] [--max-attempts 1-5] [--timeout-seconds SEGUNDOS] [--max-usd 0.10]
   Intentos por defecto: Orca 5; otros proveedores 2. Orca no tiene límite de duración por defecto.
-  Código: --workspace "${path.join(ROOT, 'workspaces', 'checkout-aislado')}" --isolated
+  Código: --workspace "${path.join(ROOT, 'workspaces', 'checkout-aislado')}" --isolated [--branch RAMA_OBSERVADA]
+  Criterios: --acceptance-file "criterios.json" (lista JSON de criterios, o un criterio por línea en texto plano)
 node cli.mjs run                       Simulación: no ejecuta trabajadores ni modifica estado
 node cli.mjs run --execute [--max-jobs 5] [--id IDENTIFICADOR]
   Con el panel abierto en el puerto configurado (CENTRO_OPERATIONS_PORT, 4187 por defecto) la CLI no despacha:
@@ -39,7 +40,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -54,6 +55,32 @@ function parse(args) {
   return { command, options };
 }
 const numeric = (value, fallback) => value === undefined ? fallback : Number(value);
+
+// 6 (F5): the CLI accepts the same structured criteria as the coordinated path.
+// A JSON array of strings, or one criterion per non-empty line of plain text.
+export function parseAcceptanceFile(text) {
+  const source = String(text ?? '').replace(/^\uFEFF/, '').trim();
+  if (!source) throw new QueueError('El archivo de criterios está vacío.');
+  let items;
+  if (source.startsWith('[') || source.startsWith('{')) {
+    try { items = JSON.parse(source); } catch { throw new QueueError('El archivo de criterios no es una lista JSON válida.'); }
+    if (!Array.isArray(items)) throw new QueueError('El archivo de criterios debe ser una lista JSON de cadenas.');
+  } else items = source.split(/\r?\n/).map(line => line.replace(/^\s*(?:\d+[.)]|[-*+•])\s+/, '').trim()).filter(Boolean);
+  if (!items.length || items.length > 50 || items.some(item => typeof item !== 'string' || !item.trim() || item.length > 2000 || /[\r\n]/.test(item))) {
+    throw new QueueError('Los criterios deben ser entre 1 y 50 cadenas de una línea, de hasta 2000 caracteres.');
+  }
+  const normalized = items.map(item => item.trim());
+  if (new Set(normalized.map(item => item.replace(/\s+/g, ' ').toLowerCase())).size !== normalized.length) throw new QueueError('Los criterios no pueden repetirse.');
+  return normalized;
+}
+export function validateBranchOption(branch) {
+  if (branch === undefined) return undefined;
+  const value = String(branch).trim();
+  if (!value || value.length > 200 || value.includes('..') || /[\\\x00\r\n\s~^:?*[]/.test(value) || value.startsWith('-') || value.startsWith('/') || value.endsWith('/') || value.endsWith('.lock')) {
+    throw new QueueError('--branch debe ser una rama Git válida existente en el checkout.');
+  }
+  return value;
+}
 
 // 16 + 19: Orca accepts one consumer per Run. A live panel already consumes the
 // configured Runs, so a CLI dispatch would be fenced (consumer_fenced) after
@@ -164,7 +191,16 @@ async function main() {
       if ((await fs.stat(promptPath)).size > 12_000) throw new QueueError('La instrucción supera los 12.000 bytes.');
       const timeoutSeconds = o['timeout-seconds'] === undefined && (o.provider ?? 'orca') === 'orca'
         ? null : numeric(o['timeout-seconds'], 180);
-      result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], undefined), timeoutMs: timeoutSeconds === null ? undefined : timeoutSeconds * 1000, maxUsd: numeric(o['max-usd'], 0.1) });
+      let acceptance;
+      if (o['acceptance-file']) {
+        const acceptancePath = path.resolve(o['acceptance-file']);
+        if ((await fs.stat(acceptancePath)).size > 64_000) throw new QueueError('El archivo de criterios supera los 64.000 bytes.');
+        acceptance = parseAcceptanceFile(await fs.readFile(acceptancePath, 'utf8'));
+      }
+      const branch = validateBranchOption(o.branch);
+      if (branch && o.kind !== 'code') throw new QueueError('--branch solo aplica a trabajos de código.');
+      result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], undefined), timeoutMs: timeoutSeconds === null ? undefined : timeoutSeconds * 1000, maxUsd: numeric(o['max-usd'], 0.1),
+        ...(branch ? { branch } : {}), ...(acceptance ? { contract: { version: 1, acceptance } } : {}) });
       break;
     }
     case 'run':
