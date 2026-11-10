@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { githubRepository, sameRepository } from './project-destination.mjs';
+import { excerpt } from './redaction.mjs';
 
 const sha = value => /^[a-f0-9]{40,64}$/i.test(String(value || ''));
 const branchOk = value => typeof value === 'string' && value.length > 0 && !value.includes('..') && !/[\\\x00\r\n]/.test(value) && !value.startsWith('-');
@@ -316,7 +317,14 @@ export function createIntegrationCommandAdapters({ signal, executeCommand = exec
     catch (error) {
       const unknownField = /Unknown JSON field:?\s*"?([A-Za-z]+)"?/.exec(decode(error?.stderr));
       if (exe === 'gh' && unknownField) throw ghError('gh_version_unsupported', `gh no admite el campo JSON ${unknownField[1]} que usa la integración. ${GH_INSTALL_HINT}`, { missing: unknownField[1] });
-      throw new Error(`${exe} falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar.`);
+      // 39: keep what failed (subcommand, exit code or signal, bounded and redacted stderr) instead of a
+      // bare generic message. The outcome stays uncertain: the remote must still be checked before continuing.
+      const command = [exe, ...args.slice(0, exe === 'gh' ? 2 : 1).filter(arg => /^[a-z][a-z-]{0,30}$/.test(arg))].join(' ');
+      const exit = Number.isInteger(error?.code) ? `salida ${error.code}` : error?.signal ? `señal ${error.signal}` : typeof error?.code === 'string' ? error.code : 'sin código';
+      const stderr = excerpt(decode(error?.stderr), 300);
+      const message = `${exe} falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar. (${command}: ${exit}${stderr ? ` · ${stderr}` : ''})`;
+      throw Object.assign(new Error(message), { code: 'github_integration_needs_attention', safeMessage: message,
+        details: { cause: 'command_failed', command, exit, ...(stderr ? { stderr } : {}) } });
     }
   };
   return { git: (args, cwd) => invoke('git', args, cwd), gh: (args, cwd) => invoke('gh', args, cwd) };

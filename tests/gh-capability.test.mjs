@@ -36,6 +36,30 @@ test('a real gh call rejected for an unknown JSON field becomes the same typed e
   await assert.rejects(git(['status'], '/tmp'), /git falló o la respuesta fue ambigua/);
 });
 
+// 39: a failed gh or git call keeps the subcommand, the exit code and a bounded, redacted stderr.
+test('a failed integration command keeps subcommand, exit code and redacted stderr, never argument values', async () => {
+  const secret = 'ghp_' + 'A'.repeat(36);
+  const { gh, git } = createIntegrationCommandAdapters({ executeCommand: async (exe, args) => {
+    if (exe === 'gh') throw Object.assign(new Error('exit 1'), { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(`HTTP 403: Resource not accessible by personal access token (${secret})\n` + 'x'.repeat(2000)) });
+    throw Object.assign(new Error('killed'), { code: null, signal: 'SIGTERM', stderr: Buffer.alloc(0) });
+  } });
+  const error = await gh(['pr', 'view', '7', '--json', 'statusCheckRollup', '--body', 'texto-privado'], '/tmp').then(() => assert.fail('must fail'), error => error);
+  assert.equal(error.code, 'github_integration_needs_attention');
+  assert.equal(error.details.cause, 'command_failed');
+  assert.equal(error.details.command, 'gh pr view');
+  assert.equal(error.details.exit, 'salida 1');
+  assert.match(error.details.stderr, /Resource not accessible by personal access token/);
+  assert.ok(error.details.stderr.length <= 300);
+  for (const text of [error.message, error.safeMessage, JSON.stringify(error.details)]) {
+    assert.equal(text.includes(secret), false); assert.equal(text.includes('texto-privado'), false);
+  }
+  assert.match(error.safeMessage, /^gh falló o la respuesta fue ambigua; consulta el estado remoto antes de continuar\. \(gh pr view: salida 1 · HTTP 403/);
+  const killed = await git(['push', 'origin', 'feature'], '/tmp').then(() => assert.fail('must fail'), error => error);
+  assert.equal(killed.details.command, 'git push');
+  assert.equal(killed.details.exit, 'señal SIGTERM');
+  assert.equal(killed.details.stderr, undefined);
+});
+
 test('integrateGitHubDefault runs the preflight before touching the integration and skips it for non-eligible jobs', async () => {
   const calls = [];
   const executeCommand = async (exe, args) => { calls.push([exe, ...args]); return fakeGh()(exe, args); };
