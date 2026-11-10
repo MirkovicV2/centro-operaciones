@@ -4,8 +4,9 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { addJob, loadState } from '../../queue.mjs';
-import { authorizeWorkerHandoff, workerHandoffContext, verifyWorkerQuestion, deliverWorkerDecisions, questionsForEscalation } from '../worker-decisions.mjs';
+import { authorizeWorkerHandoff, recoverSettledUxHandoff, workerHandoffContext, verifyWorkerQuestion, deliverWorkerDecisions, questionsForEscalation } from '../worker-decisions.mjs';
 import { notifyCoordinatorRequest } from '../coordinator-bridge.mjs';
+import { syncQualityHandoffs } from '../quality-handoff.mjs';
 import { captureJobQuestions, changeDashboardState, loadDashboardState } from '../agency-assistant/dashboard-state.mjs';
 
 const coordination = { requestId: 'coord-request-fixture', business: 'games', projectId: 'project-game', runId: 'run_owned123', senderId: 'terminal_owner123' };
@@ -188,4 +189,48 @@ test('capturing escalated questions twice and after needs_input settlement prese
   assert.ok(saved.every(question => question.jobId === job.id && question.rootJobId === job.id && question.roundId === `${job.id}:${origin.dispatchId}`));
   assert.deepEqual(saved.map(question => question.decisionKey), humanQuestions.map(question => question.decisionKey));
   assert.equal((await loadState(root)).jobs.length, 1, 'capture must not create a new job');
+});
+
+test('sync recovers a missing UX handoff from the exact settled ask and native authorization', async t => {
+  const { root, job } = await fixture(t, { recorded: false, stage: 'developer' });
+  const receipt = { id: 'receipt-ux-return', jobId: job.id, eligible: true, status: 'needs_attention' };
+  const question = { id: 'review-i2', decisionKey: 'UX-I2-return', text: 'Evaluar la medición física.', required: true };
+  const delivery = { version: 1, jobId: job.id, jobAttempt: 1, stage: 'developer', runId: origin.runId,
+    taskId: origin.taskId, dispatchId: origin.dispatchId, outcome: 'blocked', scope: 'partial', approval: 'blocked',
+    summary: 'Medición completada. Falta dictamen de Diseño.', acceptance: [], evidence: [], decisions: [], questions: [question] };
+  Object.assign(job, { state: 'needs_attention', error: { code: 'delivery_incomplete' }, autoIntent: { eligible: true, receiptId: receipt.id } });
+  job.workflow.steps = [
+    { key: 'ux', status: 'succeeded', artifact: { path: 'previous-ux.json' } },
+    { ...job.workflow.steps[0], status: 'blocked', dispatchStatus: 'failed', dispatchSettled: true, delivery, artifact: { path: 'developer.json' } },
+    ...['qa', 'reviewer', 'integration'].map(key => ({ key, status: 'queued' })),
+  ];
+  const state = await loadState(root);
+  await fs.appendFile(path.join(root, 'data', 'events.jsonl'), JSON.stringify({ schema: 1, revision: state.revision + 1, patch: { jobs: [job] } }) + '\n');
+  const request = { id: coordination.requestId, jobId: job.id, status: 'routed', business: 'games', projectId: job.projectId,
+    notification: { status: 'sent', runId: origin.runId, senderId: coordination.senderId } };
+  await changeDashboardState(root, state => state.coordinatorRequests.push(request));
+  await fs.writeFile(path.join(root, 'data', 'auto-run.json'), JSON.stringify({ schema: 1, businesses: { games: true }, receipts: [receipt], history: [] }));
+  const note = 'Revisar la pasada técnica sin dar por validada la parte humana.';
+  const reply = { id: 'msg_approval123', type: 'status', thread_id: origin.messageId, run_id: origin.runId,
+    from_handle: 'run:' + origin.runId, to_handle: 'dispatch:' + origin.dispatchId, body: '[CENTRO_TRASPASO:ux]\r\n' + note };
+  const opts = (replies, changes = {}) => ({
+    command: simulator({ replies, messagePatch: { body: JSON.stringify({ ...delivery, outcome: 'needs_input' }), ...changes },
+      workerPatch: { state: 'failed', liveness: 'exited' } }).command,
+    verifyOwner: async () => ({ ok: true }),
+  });
+  await assert.rejects(recoverSettledUxHandoff(root, job, opts([{ ...reply, thread_id: 'msg_unrelated123' }])), /Falta la respuesta/);
+  await assert.rejects(recoverSettledUxHandoff(root, job, opts([reply], {
+    body: JSON.stringify({ ...delivery, outcome: 'needs_input', questions: [{ ...question, id: 'other-ask' }] }),
+  })), /no coincide/);
+  assert.equal((await loadDashboardState(root)).coordinatorRequests[0].workerHandoffs, undefined);
+  let handedOff;
+  await syncQualityHandoffs(root, {
+    recoverUx: (dir, candidate) => recoverSettledUxHandoff(dir, candidate, opts([reply])),
+    resume: async (_root, id, { uxHandoff }) => { assert.equal(id, job.id); handedOff = uxHandoff; },
+  });
+  assert.equal(handedOff.approvalMessageId, reply.id);
+  assert.equal(handedOff.messageId, origin.messageId);
+  assert.equal(handedOff.note, note);
+  assert.deepEqual(await recoverSettledUxHandoff(root, job, opts([reply])), handedOff);
+  assert.deepEqual((await loadDashboardState(root)).coordinatorRequests[0].workerHandoffs, [handedOff]);
 });

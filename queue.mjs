@@ -1030,22 +1030,27 @@ export function settledOrcaObservation(job, code = job?.error?.code) {
   return null;
 }
 
-export function uxReturnSource(job, handoff) {
+export function settledUxReturnStep(job) {
   const workflow = job?.workflow;
   const step = workflow?.steps?.find(item => item.key === 'developer');
-  if (!handoff || job?.state !== 'needs_attention' || job.error?.code !== 'delivery_incomplete'
+  if (job?.state !== 'needs_attention' || job.error?.code !== 'delivery_incomplete'
     || job.business !== 'games' || job.kind !== 'code' || job.provider !== 'orca' || !job.autoIntent?.eligible
     || workflow?.currentStage !== 'developer' || step?.status !== 'blocked' || step.dispatchSettled !== true
     || step.dispatchStatus !== 'failed' || !step.artifact || step.delivery?.scope !== 'partial'
     || step.delivery.outcome !== 'blocked' || !step.delivery.questions.some(item => item.required)
     || step.delivery.questions.some(item => item.required && !/^UX-I[1-3]-return$/i.test(item.decisionKey || ''))
-    || handoff.jobId !== job.id || handoff.business !== job.business || handoff.projectId !== (job.projectId || null)
-    || handoff.runId !== workflow.runId || handoff.runId !== job.coordination?.runId || handoff.authorizedBy !== job.coordination?.senderId
-    || handoff.fromStage !== 'developer' || handoff.toStage !== 'ux' || handoff.taskId !== step.taskId || handoff.dispatchId !== step.dispatchId
-    || handoff.attempt !== job.attempts || !/^msg_[a-zA-Z0-9_-]{6,100}$/.test(handoff.approvalMessageId ?? '')
     || !workflow.steps.some(item => item.key === 'ux' && item.status === 'succeeded' && item.artifact)
     || !['qa', 'reviewer', 'integration'].every(key => workflow.steps.some(item => item.key === key && item.status === 'queued' && !item.dispatchId))
     || (job.livenessRecoveryHistory || []).filter(item => item.mode === 'same_attempt_ux_return').length >= 6) return null;
+  return step;
+}
+
+export function uxReturnSource(job, handoff) {
+  const step = settledUxReturnStep(job);
+  if (!step || !handoff || handoff.jobId !== job.id || handoff.business !== job.business || handoff.projectId !== (job.projectId || null)
+    || handoff.runId !== job.workflow.runId || handoff.runId !== job.coordination?.runId || handoff.authorizedBy !== job.coordination?.senderId
+    || handoff.fromStage !== 'developer' || handoff.toStage !== 'ux' || handoff.taskId !== step.taskId || handoff.dispatchId !== step.dispatchId
+    || handoff.attempt !== job.attempts || !/^msg_[a-zA-Z0-9_-]{6,100}$/.test(handoff.approvalMessageId ?? '')) return null;
   return step;
 }
 

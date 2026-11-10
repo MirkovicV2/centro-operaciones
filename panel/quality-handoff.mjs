@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { loadState, qualityCorrection, recoverableChecksTimeout, settledOrcaObservation, settledQaRevalidation, settledReviewerRevalidation, uxReturnSource } from '../queue.mjs';
+import { loadState, qualityCorrection, recoverableChecksTimeout, settledOrcaObservation, settledQaRevalidation, settledReviewerRevalidation, settledUxReturnStep, uxReturnSource } from '../queue.mjs';
 import { readAutoRun } from '../auto-run.mjs';
 import { resumeCoordinatedDispatch } from './dispatch-recovery.mjs';
+import { recoverSettledUxHandoff } from './worker-decisions.mjs';
 import { changeDashboardState, loadDashboardState } from './agency-assistant/dashboard-state.mjs';
 import { safeMarkdownText } from './agency-assistant/knowledge.mjs';
 import { withInboxLock } from './agency-assistant/inbox-lock.mjs';
@@ -105,7 +106,9 @@ export function nextQualityAction(job, request, questions) {
   return answers.length && (settledQaRevalidation(job, true) || settledReviewerRevalidation(job)) ? { ...binding, type: 'answer' } : null;
 }
 
-export async function syncQualityHandoffs(root, { resume = resumeCoordinatedDispatch, handoff = checkQualityHandoff } = {}) {
+const uxRecoveryChecks = new Map();
+
+export async function syncQualityHandoffs(root, { resume = resumeCoordinatedDispatch, handoff = checkQualityHandoff, recoverUx = recoverSettledUxHandoff } = {}) {
   const [queue, inbox, automation] = await Promise.all([loadState(root), loadDashboardState(root), readAutoRun(root)]);
   for (const job of queue.jobs) {
     const stage = qualityBlock(job);
@@ -122,9 +125,24 @@ export async function syncQualityHandoffs(root, { resume = resumeCoordinatedDisp
       && !job.livenessRecoveryHistory?.some(item => item.dispatchId === unread.dispatchId && item.error === observationError)));
     const checksPending = (job.state === 'needs_attention' || resuming)
       && recoverableChecksTimeout(job, automation.integrations?.[receipt?.id], resuming ? recovery.originalError : job.error?.code);
-    const uxHandoff = request?.status === 'routed' && request.jobId === job.id
+    const routed = request?.status === 'routed' && request.jobId === job.id;
+    let uxHandoff = routed
       ? (resuming && recovery.mode === 'same_attempt_ux_return' ? recovery.uxHandoff
         : request.workerHandoffs?.findLast(item => uxReturnSource(job, item))) : null;
+    const recoverableUx = routed && !uxHandoff && receipt?.eligible && receipt.status === 'needs_attention'
+      && automation.businesses[job.business] && settledUxReturnStep(job);
+    const uxKey = `${root}:${job.id}`;
+    if (!recoverableUx) uxRecoveryChecks.delete(uxKey);
+    else {
+      const previous = uxRecoveryChecks.get(uxKey);
+      if (previous?.dispatchId !== recoverableUx.dispatchId || Date.now() - previous.at >= 60_000) {
+        uxRecoveryChecks.set(uxKey, { dispatchId: recoverableUx.dispatchId, at: Date.now() });
+        try {
+          const restored = await recoverUx(root, job);
+          if (uxReturnSource(job, restored)) uxHandoff = restored;
+        } catch { /* Wait for a verifiable native authorization. */ }
+      }
+    }
     const developerDecision = resuming && recovery.mode === 'same_attempt_developer_decision' ? recovery.developerDecision : null;
     const stageDecision = resuming && recovery.mode === 'same_attempt_stage_decision' ? recovery.stageDecision : null;
     const durableReplay = resuming && receipt?.eligible && job.state === 'queued' && job.livenessResume?.id === recovery.id;
