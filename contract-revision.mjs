@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { sameRepository } from './project-destination.mjs';
 import { IDENTIFIERS, normalizeJobContract, validateDelivery } from './workflow-contract.mjs';
 
 export const contractRevisionHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -42,7 +43,7 @@ export function contractRevisionSteps(job) {
 export function assertContractRevisionRecord(job, record) {
   const steps = contractRevisionSteps(job), developer = steps.find(item => item.stage === 'developer'), validation = record?.validation;
   if (!record || record.phase !== 'validation_pending' || record.status !== 'validating' || record.jobId !== job.id || record.receiptId !== job.autoIntent?.receiptId
-    || record.repository !== job.destination?.repository || record.sourceBranch !== job.branch || record.baseBranch !== job.destination?.baseBranch
+    || !sameRepository(record.repository, job.destination?.repository) || record.sourceBranch !== job.branch || record.baseBranch !== job.destination?.baseBranch
     || ['manifest', 'commitSha', 'prNumber', 'prUrl', 'mergeSha', 'pushedAt', 'mergedAt'].some(key => record[key] !== undefined)
     || !validation || !hash(validation.snapshot) || validation.jobId !== job.id || validation.receiptId !== record.receiptId || validation.attempt !== job.attempts
     || validation.runId !== job.workflow.runId || validation.workspace !== job.workspace || validation.branch !== job.branch

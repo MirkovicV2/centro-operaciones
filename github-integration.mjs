@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
-import { githubRepository } from './project-destination.mjs';
+import { githubRepository, sameRepository } from './project-destination.mjs';
 
 const sha = value => /^[a-f0-9]{40,64}$/i.test(String(value || ''));
 const branchOk = value => typeof value === 'string' && value.length > 0 && !value.includes('..') && !/[\\\x00\r\n]/.test(value) && !value.startsWith('-');
@@ -63,7 +63,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   const g = args => { checkAbort(); return git(args, workspace); }, h = args => { checkAbort(); return gh(args, workspace); };
   const repo = githubRepository(`https://github.com/${dest.repository}`);
   const origin = githubRepository(await g(['remote', 'get-url', 'origin']));
-  if (repo.toLowerCase() !== origin.toLowerCase()) throw new Error('Origin GitHub y mapping confirmado no coinciden.');
+  if (!sameRepository(repo, origin)) throw new Error('Origin GitHub y mapping confirmado no coinciden.');
   const branch = (await g(['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim();
   if (branch !== job.branch) throw new Error('Branch activa no coincide con la fuente confirmada.');
   if ((await g(['check-ref-format', '--branch', job.branch])).trim() !== job.branch || (await g(['check-ref-format', '--branch', dest.baseBranch])).trim() !== dest.baseBranch) throw new Error('Rama fuente/base inválida.');

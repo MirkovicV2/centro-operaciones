@@ -186,7 +186,7 @@ test('inspectEffectFreeIntegration confirms unchanged remote refs, unchanged HEA
   };
   const gh = async args => { assert.deepEqual(args.slice(0, 2), ['pr', 'list']); assert.ok(args.includes(pullRequestIdentityFields)); return JSON.stringify(remote.prs); };
   const proof = await inspectEffectFreeIntegration(root, job, record, { git, gh });
-  assert.deepEqual(proof, { kind: 'effect_free_integration', jobId: 'j1', receiptId: 'r1', phase: 'validation_approved', repository: 'owner/repo', sourceBranch: 'feature', baseBranch: 'main', headSha: SHA.local, remoteSourceSha: SHA.local, remoteBaseSha: SHA.base, openPullRequests: 0 });
+  assert.deepEqual(proof, { kind: 'effect_free_integration', jobId: 'j1', receiptId: 'r1', phase: 'validation_approved', repository: 'Owner/Repo', sourceBranch: 'feature', baseBranch: 'main', headSha: SHA.local, remoteSourceSha: SHA.local, remoteBaseSha: SHA.base, openPullRequests: 0 });
   const pr = { number: 4, url: 'https://github.com/Owner/Repo/pull/4', state: 'OPEN', headRefOid: 'd'.repeat(40), baseRefOid: SHA.base, headRefName: 'feature', baseRefName: 'main', isCrossRepository: false, headRepository: { name: 'Repo' }, headRepositoryOwner: { login: 'Owner' } };
   for (const [label, change, pattern] of [
     ['moved remote source', () => { remote.feature = 'd'.repeat(40); }, /rama remota cambió/],

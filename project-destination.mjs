@@ -45,11 +45,13 @@ export async function inspectDestination(root, checkout, expectedBranch = '') {
   return { checkout, workspace, branch, checkedAt: new Date().toISOString(), valid: true };
 }
 
+// 13 (F9): the owner/repo keeps the case GitHub shows; comparisons use sameRepository.
 export function githubRepository(origin) {
   const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(origin || '');
   if (!match || match[1].split('/').some(part => part === '.' || part === '..')) throw new Error('Origin debe ser un repositorio GitHub HTTPS o SSH, sin credenciales ni rutas locales.');
-  return match[1].toLowerCase();
+  return match[1];
 }
+export const sameRepository = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 
 // Inject Git in tests. Production only observes the configured existing remote;
 // it never fetches, changes refs, creates branches, or writes to GitHub.
@@ -79,7 +81,7 @@ export async function verifyGitHubDestination(root, job, { git, inspect = inspec
   });
   const origin = await run(['remote', 'get-url', 'origin']);
   const repository = githubRepository(origin);
-  if (repository !== githubRepository(`https://github.com/${job.destination.repository}`)) throw new DestinationError('destination_origin_mismatch', 'Origin no coincide con el repositorio GitHub confirmado. Revisa el proyecto.', { expected: job.destination.repository, observed: repository });
+  if (!sameRepository(repository, githubRepository(`https://github.com/${job.destination.repository}`))) throw new DestinationError('destination_origin_mismatch', 'Origin no coincide con el repositorio GitHub confirmado. Revisa el proyecto.', { expected: job.destination.repository, observed: repository });
   const branch = await run(['symbolic-ref', '--quiet', '--short', 'HEAD']);
   if (branch !== job.branch) throw new DestinationError('destination_branch_changed', 'Rama cambiada o HEAD separado; restaura manualmente el checkout confirmado.', { expected: job.branch, observed: branch });
   const sha = await run(['rev-parse', '--verify', 'HEAD']);

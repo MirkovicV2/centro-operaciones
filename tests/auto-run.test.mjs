@@ -341,7 +341,7 @@ test('GitHub verification uses only mocked read-only Git commands and rejects ba
   for (const bad of ['C:/repo', '../repo', 'https://gitlab.com/owner/repo', 'https://github.com.evil/owner/repo', 'https://token@github.com/owner/repo']) await assert.rejects(verify({ 0: bad }));
   for (const overrides of [{ 0: 'git@github.com:other/repo.git' }, { 1: 'other' }, { 1: '' }, { 3: '' }, { 3: `${'b'.repeat(40)}\trefs/heads/main` }, { throwAt: 3 }]) await assert.rejects(verify(overrides));
   await fs.writeFile(path.join(workspace, '.git', 'index.lock'), ''); await assert.rejects(verify(), /bloqueo/);
-  assert.equal(githubRepository('git@github.com:Owner/Repo.git'), 'owner/repo');
+  assert.equal(githubRepository('git@github.com:Owner/Repo.git'), 'Owner/Repo');
 });
 
 test('verified automatic destination preserves its base branch through queue admission', async t => {
