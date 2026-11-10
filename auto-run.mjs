@@ -10,7 +10,7 @@ import { replaceLocalFile } from './atomic-file.mjs';
 import { assertQualityAction, queueContractRevisionRetry, recoverableChecksTimeout, uxReturnSource, developerDecisionSource, stageDecisionSource, isPartialStageResume, settledOrcaObservation, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
 import { currentActor } from './queue.mjs';
 import { createContractRevision, assertContractRevisionCheckpoint, assertContractRevisionProof, contractRevisionHash, originalContractRevisionJob } from './contract-revision.mjs';
-import { workflowV2Resumable } from './workflow-v2-gate.mjs';
+import { workflowV2Resumable, workflowV2Readmissible } from './workflow-v2-gate.mjs';
 
 const location = root => path.join(path.resolve(root), 'data', 'auto-run.json');
 const empty = () => ({ schema: 1, businesses: { agency: false, games: false }, receipts: [], history: [], integrations: {} });
@@ -251,6 +251,9 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
                   assertRecoveryDestination(destination, observed);
                 }
                 // Recovery observes the original baseline; it does not approve a new one.
+              } else if (receipt.workflowV2Resume?.attempt === job.attempts && workflowV2Readmissible(job)) {
+                // The approved candidate is still uncommitted: same baseline (branch, SHAs), dirty tree allowed.
+                assertRecoveryDestination(receipt.workflowV2Resume.destination, await verify(root, admittedJob, { requireClean: false }));
               } else destination = await verify(root, admittedJob);
               lockPath = path.join(destination.workspace, '.git', 'centro-executor.lock');
               try { checkoutLock = await fs.open(lockPath, 'wx'); }
@@ -1098,6 +1101,7 @@ export async function resumeWorkflowV2Receipt(root, jobId, { confirm = false } =
       const receipt = state.receipts.find(item => item.id === candidate.receiptId);
       if (!receipt || receipt.status !== 'retrying') throw new Error('El recibo cambió durante la reanudación; requiere revisión.');
       receipt.status = 'pending'; receipt.retryAuthorizedAttempt = job.attempts; receipt.updatedAt = now();
+      receipt.workflowV2Resume = { attempt: job.attempts, destination: receipt.destination };
       audit(state, 'retry_authorized', { receiptId: receipt.id, jobId, attempt: job.attempts, workflowV2: true });
     });
     return job;
@@ -1108,6 +1112,24 @@ export async function resumeWorkflowV2Receipt(root, jobId, { confirm = false } =
     });
     throw error;
   }
+}
+
+// Recovery for a V2 resume that a previous version blocked at admission because the approved
+// candidate made the checkout dirty. Nothing ran: the job is still queued for the same attempt.
+export async function readmitWorkflowV2Receipt(root, jobId, { confirm = false } = {}) {
+  if (!confirm) throw new Error('Confirma que aprobaste este candidato en Workflow V2 antes de readmitirlo.');
+  return change(root, async state => {
+    const receipt = state.receipts.find(item => item.jobId === jobId);
+    const job = (await loadState(root)).jobs.find(item => item.id === jobId);
+    if (!receipt || receipt.status !== 'blocked' || !receipt.eligible || !job || job.autoIntent?.receiptId !== receipt.id
+      || receipt.retryAuthorizedAttempt !== job.attempts || !workflowV2Readmissible(job) || !receipt.destination) {
+      throw new Error('Este recibo no es una reanudación de Workflow V2 bloqueada en la admisión; revisa su estado.');
+    }
+    receipt.status = 'pending'; receipt.updatedAt = now();
+    receipt.workflowV2Resume = { attempt: job.attempts, destination: receipt.destination };
+    audit(state, 'retry_authorized', { receiptId: receipt.id, jobId, attempt: job.attempts, workflowV2: true, readmitted: true });
+    return receipt;
+  });
 }
 
 export async function retryAutoReceipt(root, jobId, { confirm = false, noDispatchConfirmed = false } = {}) {

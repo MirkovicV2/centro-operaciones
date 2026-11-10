@@ -300,6 +300,17 @@ export async function bindWorkflowV2Approval(job, approval, { previous, persist 
   return record;
 }
 
+// Phase B: a job the owner resumed after approving in V2 is admitted again with its candidate still
+// uncommitted in the checkout, so admission must not demand a clean tree. Integration later checks
+// that the checkout is exactly the QA snapshot V2 reviewed. Pure.
+export function workflowV2Readmissible(job) {
+  if (job?.state !== 'queued' || job.kind !== 'code') return false;
+  const steps = job.workflow?.steps ?? [];
+  const v2 = steps.find(step => step.key === 'reviewer')?.workflowV2;
+  return Boolean(v2?.task && v2.identity && v2.evidenceId && HEX64.test(v2.qaSnapshot ?? '') && HEX64.test(v2.candidate ?? '')
+    && steps.find(step => step.key === 'qa')?.status === 'succeeded');
+}
+
 // Phase B: whether a stopped job can be resumed to read the owner's V2 approval and integrate. Pure.
 // Either the job stopped waiting for the owner, or the approval was already seen and the integration
 // step stopped (interrupted by a restart, or blocked); integration resumes from its own record.

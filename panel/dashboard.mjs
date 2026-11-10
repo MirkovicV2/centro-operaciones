@@ -9,9 +9,9 @@ import { resolveOperationsRoot } from './operations-root.mjs';
 import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
 import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, cancelQueuedJob, settledQaRevalidation, stoppedDeveloperCheckpoint, isDeliveryTransportCheckpoint, actorContext } from './queue.mjs';
 import { parseTailscaleAccess, assertRoleAllows } from './access-control.mjs';
-import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt, resumeWorkflowV2Receipt, retryDestinationAdmission } from '../auto-run.mjs';
+import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt, resumeWorkflowV2Receipt, readmitWorkflowV2Receipt, retryDestinationAdmission } from '../auto-run.mjs';
 import { destinationCheck, createMissingRemote } from '../project-remote.mjs';
-import { workflowV2Resumable } from '../workflow-v2-gate.mjs';
+import { workflowV2Resumable, workflowV2Readmissible } from '../workflow-v2-gate.mjs';
 import { createWorker } from '../providers.mjs';
 import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
 import { submitTaskToCoordinator, routeTaskFromCoordinator, checkCoordinatorRequestNotice } from './agency-assistant/coordinator-inbox.mjs';
@@ -464,6 +464,8 @@ async function handleApi(request, response, url, tailscale = null) {
       } else if (receipt?.status === 'needs_attention' && workflowV2Resumable(current)) {
         // Workflow V2 phase B: read the owner's approval and integrate only that candidate.
         job = await resumeWorkflowV2Receipt(QUEUE_ROOT, current.id, { confirm });
+      } else if (receipt?.status === 'blocked' && workflowV2Readmissible(current)) {
+        job = await readmitWorkflowV2Receipt(QUEUE_ROOT, current.id, { confirm });
       } else {
         job = receipt?.status === 'needs_attention'
           ? await retryAutoReceipt(QUEUE_ROOT, reviewedJob[1], { confirm, noDispatchConfirmed: body.noDispatchConfirmed === true })
