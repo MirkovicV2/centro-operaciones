@@ -63,6 +63,7 @@ Arreglos hechos durante esa prueba (autorizados y con tests y mutación): `9f9a2
 - **34 (pendiente)**: el trabajador UX envió `worker_done` dos veces en el mismo dispatch. Verificar que el motor es idempotente ante entregas duplicadas y añadir test.
 - **35 (documentación)**: en modo Auto («Approve for me») Claude aprobó un `ls` que no estaba en la lista allow del sandbox: en Auto la lista allow es orientativa y solo `deny` es una barrera dura. Lo crítico debe ir en `deny`.
 - **37 (pendiente)**: opción local para silenciar el aviso del preflight cuando se trabaja en Full access a propósito.
+- **40 (hipótesis, sin probar en Codex)**: el brief de los trabajadores es el mismo para Claude y Codex, y desde `de68d9f` dice «lee el archivo con tu herramienta de lectura (Read), no con cat». Read es una herramienta de Claude; en Codex la instrucción puede no tener sentido. Propuesta: texto neutral («con tu herramienta de lectura de archivos») o generado según el agente, y comprobar en Windows con Codex que el trabajador lee y verifica el encargo igual que antes.
 
 ## Antes de fusionar (comprobaciones del dueño)
 
