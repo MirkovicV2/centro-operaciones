@@ -986,3 +986,67 @@ dialog::backdrop { background: rgba(20,20,24,.32); }
 .overview-main, .overview-rail { grid-template-columns: minmax(0, 1fr); }
 .overview-list, .overview-request .overview-row-text { min-width: 0; }
 @media (max-width: 760px) { .overview-rail { grid-template-columns: minmax(0, 1fr); } .overview-intro .button { min-height: 40px; } }
+
+/* Capa 3 · Atención: bandeja con lista y detalle. */
+.attention-layout { display: grid; grid-template-columns: minmax(260px, 380px) minmax(0, 1fr); border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; min-height: 420px; }
+.attention-list { border-right: 1px solid var(--line); padding: 8px; background: var(--surface-inset); min-width: 0; }
+.attention-group { margin: 0; padding: 12px 10px 6px; color: var(--soft); font-size: 12px; font-weight: 600; }
+.attention-row { display: flex; gap: 11px; align-items: flex-start; width: 100%; padding: 10px; border: 0; border-radius: 9px; background: none; color: inherit; text-align: left; cursor: pointer; }
+.attention-row:hover { background: var(--hover); }
+.attention-row.selected { background: var(--sel); }
+.attention-row .overview-row-mark { margin-top: 6px; }
+.attention-row.is-attention .overview-row-mark { background: var(--amber); }
+.attention-row.is-question .overview-row-mark { background: var(--accent); }
+.attention-row .overview-row-title { white-space: normal; line-height: 1.35; }
+.attention-detail { padding: 26px 32px 32px; min-width: 0; max-width: 760px; }
+.attention-kicker { margin: 0; color: var(--muted); font-size: 12.5px; font-weight: 500; }
+.attention-title { margin: 8px 0 12px; font-size: 21px; line-height: 1.25; font-weight: 620; letter-spacing: -.02em; }
+.attention-label { margin: 22px 0 6px; color: var(--soft); font-size: 12px; font-weight: 600; }
+.attention-text { margin: 0; color: var(--text); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+.attention-evidence { list-style: none; margin: 0 0 22px; padding: 0; border: 1px solid var(--line-strong); border-radius: 10px; overflow: hidden; }
+.attention-evidence li { display: flex; gap: 10px; align-items: center; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
+.attention-evidence li:last-child { border-bottom: 0; }
+.attention-level { margin-left: auto; flex: none; color: var(--soft); font-size: 12px; }
+.attention-detail .button { margin-top: 24px; }
+.attention-empty { margin: 0; padding: 18px 10px; color: var(--soft); font-size: 13.5px; }
+
+/* Capa 3 · Peticiones: tarjeta como entrada de una lista; etapas como pastillas; línea de tiempo. */
+.request-feed .request-card { padding: 18px 20px; }
+.request-card-header h3 { font-size: 17px; font-weight: 620; letter-spacing: -.01em; }
+.request-state { font-weight: 550; padding: 3px 10px; font-size: 12px; }
+.request-owner { font-size: 13px; color: var(--soft); margin: 4px 0 14px; }
+.request-feed .request-flow { display: flex; flex-wrap: wrap; gap: 6px; counter-reset: route-stage; }
+.request-flow > .request-step { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface); box-shadow: none; grid-template-columns: none; }
+.request-flow > .request-step::before { grid-row: auto; font-size: 11px; color: var(--soft); }
+.request-flow > .request-step strong { font-size: 12.5px; font-weight: 550; }
+.request-flow > .request-step span, .request-flow > .request-step small { font-size: 11.5px; color: var(--soft); }
+.request-step.step-running { border-color: var(--accent-line); background: var(--accent-wash); }
+.request-step.step-succeeded, .request-step.step-completed { border-color: var(--green-line); background: var(--green-wash); }
+.request-step.step-blocked, .request-step.step-failed { border-color: var(--amber-line); background: var(--amber-wash); }
+.request-next { font-size: 13.5px; color: var(--muted); }
+.request-timeline { border-left: 1px solid var(--line-strong); padding-left: 20px; gap: 16px; }
+.request-timeline li::before { left: -25px; top: 5px; width: 9px; height: 9px; background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--soft); }
+.request-timeline li:last-child::before { background: var(--accent); box-shadow: none; }
+.request-timeline time { font-size: 12px; color: var(--soft); }
+.request-answer { border-left: 3px solid var(--accent-line); border-radius: 10px; }
+.consultation-form textarea { min-height: 110px; }
+
+/* Capa 3 · Ideas, Proyectos, Dominios: listas limpias. */
+.recent-ideas { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.recent-idea { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: none; padding: 12px 0; }
+.recent-idea b { font-size: 14px; font-weight: 550; }
+.question-card { border-radius: 10px; }
+.domains-list { grid-template-columns: minmax(0, 1fr); gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.domain-card { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+.domain-card:last-child { border-bottom: 0; }
+.domain-orb { background: var(--surface-2); color: var(--muted); }
+.assistant-tasks { grid-template-columns: minmax(0, 1fr); }
+.project-card { padding: 18px; }
+.project-stages { gap: 4px; }
+.project-stage { font-size: 11.5px; border-radius: 999px; }
+
+@media (max-width: 860px) {
+  .attention-layout { grid-template-columns: minmax(0, 1fr); }
+  .attention-list { border-right: 0; border-bottom: 1px solid var(--line); }
+  .attention-detail { padding: 18px; }
+}
