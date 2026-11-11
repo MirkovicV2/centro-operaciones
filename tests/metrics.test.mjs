@@ -133,3 +133,25 @@ test('invalid ledger is rejected without repair and empty folders report no inve
   await assert.rejects(readMetrics(root), /inconsistente/);
   assert.equal(await fs.readFile(file, 'utf8'), raw);
 });
+
+test('pipeline metrics count what each role and model produced, returns, defects, interventions and time to acceptance', async () => {
+  const { pipelineMetrics } = await import('../metrics.mjs');
+  const step = (key, agent, model, status, dispatchId, extra = {}) => ({ key, status, dispatchId, launch: { agent, model, effort: 'medium', source: 'general' }, ...extra });
+  const jobs = [
+    { id: 'uno', state: 'succeeded', createdAt: '2026-11-11T10:00:00Z', finishedAt: '2026-11-11T10:40:00Z',
+      workflowHistory: [{ steps: [step('developer', 'claude', 'sonnet', 'succeeded', 'ctx_dev0001'), step('qa', 'codex', 'gpt-6.1-sol', 'blocked', 'ctx_qa00001', { delivery: { findings: [{ severity: 'blocking' }, { severity: 'non_blocking' }] } })] }],
+      workflow: { steps: [step('developer', 'claude', 'sonnet', 'succeeded', 'ctx_dev0002'), step('qa', 'codex', 'gpt-6.1-sol', 'succeeded', 'ctx_qa00002'), step('reviewer', 'codex', 'gpt-6.1-sol', 'succeeded', 'ctx_rev0001', { delivery: { findings: [{ severity: 'blocking' }] } })] },
+      livenessRecoveryHistory: [{ qualityAction: { type: 'correction' } }], qualityAnswers: [{}], attemptHistory: [{ error: 'provider_quota_exhausted' }] },
+    { id: 'dos', state: 'succeeded', createdAt: '2026-11-11T11:00:00Z', finishedAt: '2026-11-11T11:10:00Z',
+      workflow: { steps: [step('developer', 'codex', 'gpt-6.1-sol', 'succeeded', 'ctx_dev0003', { launch: { agent: 'codex', model: 'gpt-6.1-sol', effort: 'medium', substitutedFrom: { agent: 'claude', reason: 'cuota' } } }), { key: 'qa', status: 'queued' }] } },
+    { id: 'tres', state: 'needs_attention', createdAt: '2026-11-11T12:00:00Z', workflow: { steps: [step('developer', 'claude', 'sonnet', 'failed', 'ctx_dev0004')] } },
+  ];
+  const report = pipelineMetrics(jobs);
+  const row = (stage, agent) => report.stages.find(item => item.stage === stage && item.agent === agent);
+  assert.deepEqual([row('developer', 'claude').launched, row('developer', 'claude').succeeded, row('developer', 'claude').failed], [3, 2, 1]);
+  assert.deepEqual([row('developer', 'codex').launched, row('developer', 'codex').substituted], [1, 1]);
+  assert.deepEqual([row('qa', 'codex').launched, row('qa', 'codex').succeeded, row('qa', 'codex').blocked], [2, 1, 1]);
+  assert.deepEqual([report.returnsToDevelopment, report.blockingFindings, report.humanAnswers, report.quotaStops], [1, 1, 1, 1], 'blocking findings are those of the current stages');
+  assert.deepEqual(report.timeToAcceptanceMs, { jobs: 2, median: 600_000, max: 2_400_000 });
+  assert.deepEqual(pipelineMetrics([]), { stages: [], returnsToDevelopment: 0, blockingFindings: 0, humanAnswers: 0, quotaStops: 0, timeToAcceptanceMs: { jobs: 0, median: null, max: null } });
+});

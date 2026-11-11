@@ -1,0 +1,5 @@
+Objetivo: añadir a la web del proyecto de prueba de la Agencia un formulario de contacto accesible con nombre, correo y mensaje, que valide en el navegador y muestre el resultado del envío sin recargar la página.
+
+Alcance: solo la página de contacto y sus estilos. No se añade backend: el envío se simula con el manejador que ya tenga el proyecto o con uno local.
+
+Criterio de éxito: el formulario se puede completar y enviar solo con teclado; cada campo tiene etiqueta y los errores se anuncian junto al campo; funciona sin desplazamiento horizontal a 320 px y a 1440 px; no hay errores en la consola durante el flujo.

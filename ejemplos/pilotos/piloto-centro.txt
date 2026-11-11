@@ -1,0 +1,5 @@
+Objetivo: en el Centro de Operaciones, hacer que `node cli.mjs preview` muestre al final una línea con el equipo responsable de esta instalación y si la reserva de ramas está activa.
+
+Alcance: cli.mjs y su prueba. Sin cambios en el motor ni en el panel.
+
+Criterio de éxito: la línea aparece con el nombre del equipo de data/equipo.json, o indica que el PC no está identificado; `npm test` pasa con una prueba que lo cubre.

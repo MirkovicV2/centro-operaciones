@@ -44,6 +44,37 @@ function aggregateMeasurement(records, name) {
 }
 
 /** Aggregate recorded evidence. Never derives tokens from text or interprets success as quality. */
+// What the split of the pipeline produced, from what each stage recorded: launches per role and per
+// agent/model, how they ended, and the signals a change of split should be judged by (returns to Desarrollo,
+// defects found, substitutions, people's interventions, time to acceptance). Counts only; nothing is estimated.
+export function pipelineMetrics(jobs = []) {
+  const launches = new Map(), seen = new Set();
+  const tally = (job, step, current) => {
+    if (!step.launch?.agent || !step.dispatchId || seen.has(step.dispatchId)) return;
+    seen.add(step.dispatchId);
+    const key = JSON.stringify([step.key, step.launch.agent, step.launch.model ?? null, step.launch.effort ?? null]);
+    if (!launches.has(key)) launches.set(key, { stage: step.key, agent: step.launch.agent, model: step.launch.model ?? null, effort: step.launch.effort ?? null, launched: 0, succeeded: 0, blocked: 0, failed: 0, other: 0, substituted: 0 });
+    const record = launches.get(key);
+    record.launched++; record[['succeeded', 'blocked', 'failed'].includes(step.status) ? step.status : 'other']++;
+    if (step.launch.substitutedFrom) record.substituted++;
+  };
+  let corrections = 0, findings = 0, humanAnswers = 0, quotaStops = 0;
+  const acceptance = [];
+  for (const job of jobs) {
+    for (const workflow of job.workflowHistory ?? []) for (const step of workflow.steps ?? []) tally(job, step, false);
+    for (const step of job.workflow?.steps ?? []) { tally(job, step, true); findings += (step.delivery?.findings ?? []).filter(item => item.severity === 'blocking').length; }
+    corrections += (job.livenessRecoveryHistory ?? []).filter(item => item.qualityAction?.type === 'correction').length;
+    humanAnswers += (job.qualityAnswers?.length ?? 0) + (job.continuation?.decisions?.length ?? 0);
+    quotaStops += (job.attemptHistory ?? []).filter(item => ['provider_quota_wait', 'provider_quota_exhausted'].includes(item.error)).length;
+    const elapsed = job.state === 'succeeded' ? Date.parse(job.finishedAt) - Date.parse(job.createdAt) : NaN;
+    if (Number.isFinite(elapsed) && elapsed >= 0) acceptance.push(elapsed);
+  }
+  acceptance.sort((a, b) => a - b);
+  return { stages: [...launches.values()].sort((a, b) => a.stage.localeCompare(b.stage) || a.agent.localeCompare(b.agent)),
+    returnsToDevelopment: corrections, blockingFindings: findings, humanAnswers, quotaStops,
+    timeToAcceptanceMs: { jobs: acceptance.length, median: acceptance.length ? acceptance[Math.floor((acceptance.length - 1) / 2)] : null, max: acceptance.at(-1) ?? null } };
+}
+
 export function aggregateMetrics({ events = [], state = { jobs: [], revision: 0 }, source = {} } = {}) {
   const records = new Map(), dispatches = new Set(), messages = new Set();
   const attemptFor = (job, attempt = job.attempts, origin = 'ledger') => {
@@ -138,6 +169,7 @@ export function aggregateMetrics({ events = [], state = { jobs: [], revision: 0 
     events: { byType: counts(events.map(event => event.type)), manualRetries: events.filter(event => event.type === 'operator_retry').length,
       reportedFalseSuccesses: events.filter(event => event.type === 'false_success_retracted').length },
     references: { observedDispatches: dispatches.size || null, observedCompletionMessages: messages.size || null },
+    pipeline: pipelineMetrics(state.jobs),
     notes: [
       'Los estados succeeded son estados registrados; no equivalen a calidad verificada.',
       'Los tiempos suman intervalos de intento; no miden exclusivamente latencia del modelo ni duración total de calendario.',
