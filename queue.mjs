@@ -1327,7 +1327,7 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
           : { key: step.key, label: step.label, profile: step.profile, status: 'queued',
             ...(index === resetAt && IDENTIFIERS.taskId.test(step.taskId ?? '') && IDENTIFIERS.dispatchId.test(step.dispatchId ?? '') && (recovery || ['failed', 'cancelled', 'abandoned'].includes(step.dispatchStatus))
               ? { retryOf: { taskId: step.taskId, dispatchId: step.dispatchId, dispatchStatus: recovery ? 'stopped' : step.dispatchStatus,
-                ...(recovery ? { recoveryId: recovery.id } : {}), ...(step.orcaAgent ? { orcaAgent: step.orcaAgent } : {}),
+                ...(recovery ? { recoveryId: recovery.id } : {}), ...(step.orcaAgent ? { orcaAgent: step.orcaAgent } : {}), ...(step.launch?.agent ? { launch: step.launch } : {}),
                 taskInputAttempt: step.taskInputAttempt ?? step.attempt ?? previous.attempts } }
               : {}),
           }),

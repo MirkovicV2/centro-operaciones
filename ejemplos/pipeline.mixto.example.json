@@ -1,0 +1,38 @@
+{
+  "_comentario": "Perfil mixto inicial: Claude en Diseño y Desarrollo, Codex en Planificación, QA y Revisión. Copia este archivo a data/pipeline.json (no versionado) para activarlo; sin ese archivo el Centro lanza exactamente como antes. Comprueba antes con `node cli.mjs preview` y verifica que tu instalación de Orca acepta estos modelos y esfuerzos (docs/PIPELINE_CONFIG.md).",
+  "_pendiente": "Clasificación de peticiones, preparación de memoria (GPT-6 Luna, high) y Coordinación (GPT-6.1 Sol, medium) no pasan por worker-start: son sesiones de coordinador que abre cada persona en Orca. Se eligen al abrir esa sesión, no aquí.",
+  "version": 1,
+  "general": {
+    "roles": {
+      "planificador": { "agent": "codex", "model": "gpt-6.1-sol", "effort": "high" },
+      "ux": { "agent": "claude", "model": "sonnet", "effort": "medium" },
+      "desarrollador": { "agent": "claude", "model": "sonnet", "effort": "medium" },
+      "qa": { "agent": "codex", "model": "gpt-6.1-sol", "effort": "medium" },
+      "revisor": { "agent": "codex", "model": "gpt-6.1-sol", "effort": "high" }
+    }
+  },
+  "empresas": {
+    "games": {
+      "roles": {
+        "ux": { "effort": "high" },
+        "desarrollador": { "effort": "high" }
+      }
+    }
+  },
+  "proyectos": {},
+  "escaladas": {
+    "claude-opus": {
+      "agent": "claude",
+      "model": "opus",
+      "roles": ["ux", "desarrollador"],
+      "uso": "Problemas difíciles de diseño o implementación."
+    },
+    "gpt-astra": {
+      "agent": "codex",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "roles": ["planificador", "qa", "revisor"],
+      "uso": "Diagnósticos o revisiones especialmente exigentes."
+    }
+  }
+}

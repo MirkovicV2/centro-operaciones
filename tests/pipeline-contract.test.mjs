@@ -348,3 +348,83 @@ test('unavailable token measurements remain null and long legacy context is not 
   assert.match(handoffText({ text: 'X'.repeat(6606) + 'ACEPTACIÓN' }), /ACEPTACIÓN$/);
   assert.throws(() => handoffText({ text: 'X'.repeat(25000) }), /referencia/);
 });
+
+// Mixed pipeline (data/pipeline.json): each stage is launched with its own agent, model and effort.
+const mixedExample = () => fs.readFile(new URL('../ejemplos/pipeline.mixto.example.json', import.meta.url), 'utf8');
+const flagOf = (args, flag) => args.includes(flag) ? [args[args.indexOf(flag) + 1]] : [];
+const launchedWith = item => ['--agent', '--model', '--effort'].flatMap(flag => flagOf(item.args, flag)).join(' ');
+async function withDefaultAgent(t, agent) {
+  const previous = process.env.CENTRO_ORCA_AGENT;
+  if (agent === undefined) delete process.env.CENTRO_ORCA_AGENT; else process.env.CENTRO_ORCA_AGENT = agent;
+  t.after(() => { if (previous === undefined) delete process.env.CENTRO_ORCA_AGENT; else process.env.CENTRO_ORCA_AGENT = previous; });
+}
+
+for (const [business, design] of [['agency', 'claude sonnet medium'], ['games', 'claude sonnet high']]) {
+  test(`mixed profile in ${business}: Claude runs Diseño and Desarrollo, Codex runs QA and Revisión, and each stage records it`, async t => {
+    await withDefaultAgent(t, undefined);
+    const f = await fixture(t);
+    await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+    await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+    await addJob(f.root, { ...f.spec, business });
+    const simulator = fakeOrca(f.workspace);
+    await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+    const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+    assert.deepEqual(simulator.started.map(launchedWith), [design, design, 'codex gpt-6.1-sol medium', 'codex gpt-6.1-sol high']);
+    assert.deepEqual(job.workflow.steps.filter(step => step.launch).map(step => `${step.key}:${step.orcaAgent}:${step.launch.source}`),
+      business === 'games' ? ['ux:claude:empresa', 'developer:claude:empresa', 'qa:codex:general', 'reviewer:codex:general'] : ['ux:claude:general', 'developer:claude:general', 'qa:codex:general', 'reviewer:codex:general']);
+    // Only Claude workers get the Claude-specific COMMANDS line of the brief.
+    assert.deepEqual(simulator.started.map(item => /COMANDOS: /.test(item.launchInput)), [true, true, false, false]);
+  });
+}
+
+test('a native retry keeps the agent, model and effort recorded at launch after the configuration changes', async t => {
+  await withDefaultAgent(t, undefined);
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  const file = path.join(f.root, 'data', 'pipeline.json');
+  await fs.writeFile(file, await mixedExample());
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => {
+    const value = await simulator.command(args);
+    if (simulator.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (simulator.started.length === 1 && args[1] === 'inbox') { const payload = JSON.parse(value.messages[0].payload); payload.outcome = 'failed'; value.messages[0].payload = JSON.stringify(payload); }
+    return value;
+  };
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const failed = (await loadState(f.root)).jobs[0]; assert.equal(failed.state, 'needs_attention');
+  assert.equal(launchedWith(simulator.started[0]), 'claude sonnet medium');
+  // The operator moves Diseño to Codex and QA to Claude before retrying.
+  const changed = JSON.parse(await mixedExample());
+  changed.general.roles.ux = { agent: 'codex', model: 'gpt-6-luna', effort: 'high' };
+  changed.general.roles.qa = { agent: 'claude', model: 'haiku' };
+  await fs.writeFile(file, JSON.stringify(changed));
+  await retryJob(f.root, failed.id, { confirm: true });
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  const retry = simulator.started[1];
+  assert.equal(retry.args[retry.args.indexOf('--retry-of') + 1], simulator.started[0].dispatchId);
+  assert.equal(launchedWith(retry), 'claude sonnet medium', 'the same Task keeps its recorded launch');
+  assert.equal(done.workflow.steps[0].launch.recovered, true);
+  assert.equal(launchedWith(simulator.started[3]), 'claude haiku', 'stages not launched yet use the configuration in force');
+  assert.equal(simulator.started.length, 5, 'one retry and no duplicated worker');
+});
+
+test('an invalid data/pipeline.json stops the stage before any worker starts, without an uncertain dispatch', async t => {
+  await withDefaultAgent(t, undefined);
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), JSON.stringify({ version: 1, general: { roles: { ux: { model: 'sonnet' } } } }));
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const job = (await loadState(f.root)).jobs[0];
+  assert.equal(job.state, 'needs_attention'); assert.equal(job.error.code, 'pipeline_config_invalid');
+  assert.equal(simulator.started.length, 0);
+  // Fixing the file and retrying launches normally.
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+  await retryJob(f.root, job.id, { confirm: true });
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded');
+  assert.equal(simulator.started.length, 4);
+});

@@ -7,7 +7,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addJob, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, cancelQueuedJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError, actorContext } from './queue.mjs';
 import { createWorker } from './providers.mjs';
-import { ORCA_EXE } from './local-tools.mjs';
+import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
+import { readPipeline, previewPipeline, previewText } from './pipeline-config.mjs';
+import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from './orca-provider.mjs';
 import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -19,7 +21,9 @@ node cli.mjs add --business games|agency --kind analysis|code --title "Título" 
   Intentos por defecto: Orca 5; otros proveedores 2. Orca no tiene límite de duración por defecto.
   Código: --workspace "${path.join(ROOT, 'workspaces', 'checkout-aislado')}" --isolated [--branch RAMA_OBSERVADA]
   Criterios: --acceptance-file "criterios.json" (lista JSON de criterios, o un criterio por línea en texto plano)
-  Modelos de este encargo: --launch-file "modelos.json" ({"agent":"claude","roles":{"revisor":{"model":"opus","effort":"medium"},"qa":{"model":"sonnet","effort":"high"}}})
+  Reparto de este encargo: --launch-file "reparto.json" ({"roles":{"desarrollador":{"agent":"claude","model":"sonnet","effort":"high"},"qa":{"agent":"codex","effort":"high"}}})
+node cli.mjs preview --business games|agency --kind analysis|code [--project ID_PROYECTO] [--launch-file "reparto.json"]
+  Muestra con qué agente, modelo y esfuerzo se lanzaría cada etapa. No crea el encargo ni lanza nada (docs/PIPELINE_CONFIG.md).
 node cli.mjs run                       Simulación: no ejecuta trabajadores ni modifica estado
 node cli.mjs run --execute [--max-jobs 5] [--id IDENTIFICADOR]
   Con el panel abierto en el puerto configurado (CENTRO_OPERATIONS_PORT, 4187 por defecto) la CLI no despacha:
@@ -42,7 +46,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -55,6 +59,12 @@ function parse(args) {
     else { if (!args.length || args[0].startsWith('--')) throw new QueueError(`Falta el valor de ${flag}.`); options[key] = args.shift(); }
   }
   return { command, options };
+}
+async function readLaunchFile(file) {
+  if (!file) return undefined;
+  const launchPath = path.resolve(file);
+  if ((await fs.stat(launchPath)).size > 8_000) throw new QueueError('El archivo de reparto supera los 8.000 bytes.');
+  try { return JSON.parse((await fs.readFile(launchPath, 'utf8')).replace(/^\uFEFF/, '')); } catch { throw new QueueError('El archivo de reparto no es JSON válido.', 'launch_choice_invalid'); }
 }
 const numeric = (value, fallback) => value === undefined ? fallback : Number(value);
 
@@ -187,6 +197,18 @@ async function main() {
       result = await reconcileCodeJob(ROOT, o.id, { decision, confirm: !!o['confirm-reviewed'], verifyDispatch: verifyOrcaDispatch, verifyDestination: verifyReconciliationDestination });
       break;
     }
+    case 'preview': {
+      try {
+        const preview = previewPipeline({ business: o.business, kind: o.kind, projectId: o.project ?? null, launch: await readLaunchFile(o['launch-file']),
+          levels: await readLaunchLevels(ROOT), pipeline: await readPipeline(ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+        console.log(previewText(preview));
+      } catch (error) {
+        // Configuration messages name a file and a field, never a secret: show them as they are.
+        if (['pipeline_config_invalid', 'launch_choice_invalid', 'launch_levels_invalid'].includes(error.code)) throw new QueueError(error.message, error.code);
+        throw error;
+      }
+      return;
+    }
     case 'add': {
       if (!o['prompt-file']) throw new QueueError('Indica --prompt-file con la instrucción del trabajo.');
       const promptPath = path.resolve(o['prompt-file']);
@@ -199,12 +221,7 @@ async function main() {
         if ((await fs.stat(acceptancePath)).size > 64_000) throw new QueueError('El archivo de criterios supera los 64.000 bytes.');
         acceptance = parseAcceptanceFile(await fs.readFile(acceptancePath, 'utf8'));
       }
-      let launch;
-      if (o['launch-file']) {
-        const launchPath = path.resolve(o['launch-file']);
-        if ((await fs.stat(launchPath)).size > 8_000) throw new QueueError('El archivo de modelos supera los 8.000 bytes.');
-        try { launch = JSON.parse(await fs.readFile(launchPath, 'utf8')); } catch { throw new QueueError('El archivo de modelos no es JSON válido.', 'launch_choice_invalid'); }
-      }
+      const launch = await readLaunchFile(o['launch-file']);
       const branch = validateBranchOption(o.branch);
       if (branch && o.kind !== 'code') throw new QueueError('--branch solo aplica a trabajos de código.');
       result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], undefined), timeoutMs: timeoutSeconds === null ? undefined : timeoutSeconds * 1000, maxUsd: numeric(o['max-usd'], 0.1),

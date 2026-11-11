@@ -1,5 +1,6 @@
 import { normalizeProjectLevels, resolveLaunch, launchArgs } from './launch-choice.mjs';
 import { readStageContracts, contractsBrief } from './project-contracts.mjs';
+import { readPipeline, resolveStageLaunch } from './pipeline-config.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -392,11 +393,25 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
       else await inspectDestination(ctx.root, path.relative(ctx.root, workspace), job.branch);
     }
     const retry = savedStep?.retryOf;
-    // Jobs predating agent selection always started with Codex.
-    const orcaAgent = retry ? retry.orcaAgent ?? 'codex' : configuredOrcaAgent();
     const launchLevels = await readLaunchLevels(ctx.root);
-    // Default → project → job: the most specific choice wins, and the stage records what it was launched with.
-    const launch = resolveLaunch({ roleName: roleKey, agent: orcaAgent, levels: launchLevels, projectId: job.projectId, jobLaunch: job.launch, fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+    // A native retry repeats the same Task, so it keeps the agent, model and effort recorded at its
+    // launch even if the configuration changed since. A fresh assignment resolves the configuration
+    // once (general → empresa → proyecto → encargo) and records the result before starting.
+    let launch;
+    if (retry?.launch?.agent) launch = { ...retry.launch, recovered: true };
+    // Jobs predating agent selection always started with Codex; older retries recorded only the agent.
+    else if (retry) launch = resolveLaunch({ roleName: roleKey, agent: retry.orcaAgent ?? 'codex', levels: launchLevels, projectId: job.projectId, jobLaunch: job.launch, fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+    else {
+      try {
+        // `origin` (which layer set each field) is preview detail; the stage record keeps its existing shape.
+        ({ origin: launch, ...launch } = resolveStageLaunch({ roleName: roleKey, business: job.business, projectId: job.projectId, jobLaunch: job.launch, levels: launchLevels,
+          pipeline: await readPipeline(ctx.root, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles }));
+      } catch (error) {
+        if (error.code !== 'pipeline_config_invalid') throw error;
+        throw new ProviderError('pipeline_config_invalid', error.message, { uncertain: false });
+      }
+    }
+    const orcaAgent = launch.agent;
     const launchPreferences = launchArgs(launch);
     const launchLevel = launch.level;
     if (retry && !['failed', 'cancelled', 'abandoned'].includes(retry.dispatchStatus)

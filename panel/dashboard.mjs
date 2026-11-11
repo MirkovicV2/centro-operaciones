@@ -60,8 +60,25 @@ const tailscaleAccess = await fs.readFile(path.join(APP_ROOT, 'data', 'tailscale
 // 25: with Claude, Orca must open workers as Terminal. Read-only check; the panel only warns.
 import { configuredOrcaAgent } from '../local-tools.mjs';
 import { inspectOrcaAgentSettings } from '../orca-settings.mjs';
-const orcaPreflight = await inspectOrcaAgentSettings({ agent: configuredOrcaAgent() }).catch(error => ({ available: false, reason: error.code || 'orca_settings_error', surface: 'unknown', permissionMode: null, warnings: [] }));
-for (const warning of configuredOrcaAgent() === 'claude' ? orcaPreflight.warnings : []) console.warn(`Preflight de Orca: ${warning}`);
+import { readPipeline, pipelineAgents, previewPipeline } from '../pipeline-config.mjs';
+import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from '../orca-provider.mjs';
+// With a mixed pipeline some stages run with Claude even when the default agent is Codex.
+const usesClaude = await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }).then(pipeline => pipelineAgents(pipeline, configuredOrcaAgent()).includes('claude'))
+  .catch(error => { console.warn(`Reparto del pipeline no aplicable: ${error.message}`); return configuredOrcaAgent() === 'claude'; });
+const orcaPreflight = await inspectOrcaAgentSettings({ agent: usesClaude ? 'claude' : configuredOrcaAgent() }).catch(error => ({ available: false, reason: error.code || 'orca_settings_error', surface: 'unknown', permissionMode: null, warnings: [] }));
+for (const warning of usesClaude ? orcaPreflight.warnings : []) console.warn(`Preflight de Orca: ${warning}`);
+// Read-only: what a job would be launched with. The files are read on every call, so an edit shows without a restart.
+async function launchPreview(params) {
+  let launch;
+  if (params.get('launch')) { try { launch = JSON.parse(params.get('launch')); } catch { throw Object.assign(new Error('launch no es JSON válido.'), { status: 400 }); } }
+  try {
+    return previewPipeline({ business: params.get('business'), kind: params.get('kind'), projectId: params.get('projectId') || null, launch,
+      levels: await readLaunchLevels(QUEUE_ROOT), pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+  } catch (error) {
+    if (['pipeline_config_invalid', 'launch_choice_invalid', 'launch_levels_invalid'].includes(error.code)) throw Object.assign(new Error(error.message), { status: 400, code: error.code });
+    throw error;
+  }
+}
 const runtime = Object.freeze({
   pid: process.pid,
   startupAt: new Date().toISOString(),
@@ -263,6 +280,7 @@ async function handleApi(request, response, url, tailscale = null) {
   const traceRead = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/trace$/);
   if (request.method === 'GET' && traceRead) return send(response, 200, await readRequestTrace(QUEUE_ROOT, traceRead[1], { observePreparation }));
   if (request.method === 'GET' && url.pathname === '/api/graph') return send(response, 200, await buildKnowledgeGraph(QUEUE_ROOT, url.searchParams.get('business')));
+  if (request.method === 'GET' && url.pathname === '/api/launch-preview') return send(response, 200, await launchPreview(url.searchParams));
   if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
   assertLocalRequest(request, tailscale);

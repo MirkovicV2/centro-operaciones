@@ -11,7 +11,7 @@ const isSha = value => /^[a-f0-9]{40}$/i.test(value ?? '');
 const clip = (value, limit = 600) => String(value ?? '').slice(0, limit);
 
 // What the Centro launched the stage with. Older stages only recorded the agent and level: the model is unknown.
-const sources = { encargo: 'elegido en el encargo', proyecto: 'por defecto del proyecto', 'por defecto': 'por defecto' };
+const sources = { escalada: 'escalada pedida en el encargo', encargo: 'elegido en el encargo', proyecto: 'por defecto del proyecto', empresa: 'perfil de la empresa', general: 'perfil general', 'por defecto': 'por defecto' };
 function launchText(step) {
   const launch = step.launch;
   if (launch?.agent) {
