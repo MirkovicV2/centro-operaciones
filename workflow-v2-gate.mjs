@@ -155,7 +155,7 @@ const MESSAGES = {
   rejected: 'El revisor de Workflow V2 rechazó el candidato. Lee el informe en V2, registra tu veredicto y corrige.',
   reviewer_missing: 'Workflow V2 necesita una revisión, pero el proyecto no tiene revisor configurado (reviewerConfig).',
   checks_failed: 'Las comprobaciones de Workflow V2 fallaron en el sandbox; no se lanzó ninguna revisión.',
-  blocked: 'Workflow V2 quedó bloqueado por un fallo operativo; no es un rechazo del producto.',
+  blocked: 'Workflow V2 quedó bloqueado por un fallo operativo; no es un rechazo del producto. Corrige la causa, desbloquéalo en V2 (wfv2 unblock) y pulsa Reintentar: se reenvía el mismo candidato, sin volver a lanzar agentes.',
   unexpected: 'Workflow V2 devolvió un estado que el Centro no reconoce.',
 };
 
@@ -315,7 +315,19 @@ export function workflowV2Readmissible(job) {
 // Either the job stopped waiting for the owner, or the approval was already seen and the integration
 // step stopped (interrupted by a restart, or blocked); integration resumes from its own record.
 const RESUMABLE_V2_STOPS = new Set(['workflow_v2_owner_pending', 'workflow_v2_unavailable']);
+// V2 stopped before producing any evidence (an operational block, e.g. a check without its Python environment) and
+// the owner unblocked it: the same candidate is submitted again. No review exists yet, so nothing can be repeated.
+export function workflowV2Resubmittable(job) {
+  if (job?.state !== 'needs_attention' || job.kind !== 'code') return false;
+  const steps = job.workflow?.steps ?? [];
+  const reviewer = steps.find(step => step.key === 'reviewer'), integration = steps.find(step => step.key === 'integration');
+  const v2 = reviewer?.workflowV2;
+  return reviewer?.status === 'blocked' && reviewer.error === 'workflow_v2_blocked' && Boolean(v2?.task) && !v2.evidenceId && !(v2.reviews?.length)
+    && HEX64.test(v2.qaSnapshot ?? '') && steps.find(step => step.key === 'qa')?.status === 'succeeded'
+    && (!integration || integration.status === 'queued');
+}
 export function workflowV2Resumable(job) {
+  if (workflowV2Resubmittable(job)) return true;
   if (job?.state !== 'needs_attention' || job.kind !== 'code') return false;
   const steps = job.workflow?.steps ?? [];
   const reviewer = steps.find(step => step.key === 'reviewer'), integration = steps.find(step => step.key === 'integration');
