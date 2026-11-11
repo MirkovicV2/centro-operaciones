@@ -25,6 +25,7 @@ test('a new PC gets a valid binding for the business from the Run owner and its 
   const linked = await linkCoordinator(dir, { business: 'agency', runId: RUN }, { command: orca({}, calls) });
   assert.deepEqual(calls, ['orchestration run-show', 'terminal show']);
   assert.equal(linked.changed, true); assert.equal(linked.backup, null);
+  assert.equal('sessionId' in JSON.parse(await fs.readFile(path.join(dir, 'data', 'coordinator-bindings.json'), 'utf8')).coordinators[0], false, 'empty fields are not written');
   const config = await readCoordinatorBindings(dir);
   assert.deepEqual(config.businesses, { agency: 'agencia-local' });
   assert.deepEqual(config.coordinators[0], { id: 'agencia-local', name: 'Coordinador de Agencia', business: 'agency', runId: RUN, senderId: TERM, worktreeId: 'repo1::/home/x/centro', sessionId: null });

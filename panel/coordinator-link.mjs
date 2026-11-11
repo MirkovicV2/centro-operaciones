@@ -41,9 +41,10 @@ export async function linkCoordinator(root, { business, runId, id, name } = {}, 
   if (existing && existing.business !== business) fail('link_id_conflict', `El coordinador ${coordinatorId} es de otra empresa (${existing.business}).`);
   const entry = { id: coordinatorId, name: name ?? existing?.name ?? DEFAULTS[business].name, business, runId, senderId,
     ...(worktreeId ? { worktreeId } : {}), ...(existing?.sessionId ? { sessionId: existing.sessionId } : {}) };
-  const next = validatedConfig({ ...config,
-    coordinators: [...config.coordinators.filter(item => item.id !== coordinatorId), entry].map(item => Object.fromEntries(Object.entries(item).filter(([, value]) => value != null))),
+  const compact = item => Object.fromEntries(Object.entries(item).filter(([, value]) => value != null));
+  const validated = validatedConfig({ ...config, coordinators: [...config.coordinators.filter(item => item.id !== coordinatorId), entry].map(compact),
     businesses: { ...config.businesses, [business]: coordinatorId } });
+  const next = { ...validated, coordinators: validated.coordinators.map(compact) }; // no "sessionId": null in the file
   const unchanged = existing && existing.runId === runId && existing.senderId === senderId && (existing.worktreeId ?? null) === worktreeId && config.businesses[business] === coordinatorId;
   let backup = null;
   if (!unchanged) {
