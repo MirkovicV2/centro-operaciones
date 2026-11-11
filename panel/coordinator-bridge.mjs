@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { ORCA_OUTPUT_LIMIT_BYTES } from '../orca-evidence.mjs';
 import { readCoordinatorBindings, selectCoordinatorBinding, isCoordinatorIdentity } from './coordinator-routing.mjs';
+import { dialogOnScreen } from '../orca-screen.mjs';
 
 import { ORCA_EXE, configuredOrcaAgent } from '../local-tools.mjs';
 const safeCode = error => /^[a-z][a-z0-9_]{2,80}$/.test(error?.code || '') ? error.code : 'orca_command_failed';
@@ -115,7 +116,6 @@ function messageBody(request, env) {
 // Orca mail is pull: `orchestration send` leaves the notice in the Run inbox and an idle coordinator never looks.
 // After a confirmed send, type one fixed line into the coordinator's own terminal so it takes a turn and reads it.
 // Only into an idle TUI that is not showing a dialog: text plus Enter must never answer an approval prompt.
-const DIALOG_ON_SCREEN = /Esc to cancel|Do you want to |Allow this |Yes, and |No, and |\(y\/n\)|Press Enter to continue|❯ 1\. /i;
 export const NUDGE_RETRY_MS = 120_000, NUDGE_BUSY_RETRY_MS = 20_000, NUDGE_MAX_ATTEMPTS = 3, NUDGE_MAX_TRIES = 12;
 export function nudgeText(request, env = process.env) {
   const id = request.parentRequestId || request.requestId || request.id;
@@ -133,9 +133,9 @@ export async function nudgeCoordinator(binding, request, { command = execute, cw
   try { await command(['terminal', 'wait', '--terminal', binding.senderId, '--for', 'tui-idle', '--timeout-ms', '6000'], { cwd }); }
   catch { return done('busy'); } // In a turn: it reads its inbox itself, and typing now could land in a prompt.
   let screen;
-  try { screen = JSON.stringify(await command(['terminal', 'read', '--terminal', binding.senderId, '--screen'], { cwd })) ?? ''; }
+  try { screen = await command(['terminal', 'read', '--terminal', binding.senderId, '--screen'], { cwd }); }
   catch { return done('unverified'); }
-  if (DIALOG_ON_SCREEN.test(screen)) return done('needs_person');
+  if (dialogOnScreen(screen)) return done('needs_person');
   try { await command(['terminal', 'send', '--terminal', binding.senderId, '--text', text, '--enter'], { cwd }); }
   catch (error) { return done('failed', { code: safeCode(error) }); }
   return done('delivered');

@@ -283,6 +283,34 @@ function attentionItems(data) {
       action: ['Ver la solicitud', () => { location.hash = '#trabajos'; document.getElementById('coordinator-inbox')?.scrollIntoView({ block: 'start' }); }], evidence: [],
     });
   }
+  // Nothing is broken here, but nothing moves until a person acts: a worker stopped at an approval dialog, and a notice the
+  // coordinator has not acted on (in the first pilot these two waits were 24 of the 63 minutes).
+  const minutes = since => Math.max(1, Math.round((Date.now() - Date.parse(since)) / 60_000));
+  for (const job of data.jobs.filter(item => item.state === 'running')) {
+    const step = job.workflow?.steps?.find(item => item.key === job.workflow?.currentStage);
+    if (step?.waitingOn !== 'approval') continue;
+    items.push({
+      id: `waiting-${job.id}-${step.key}`, kind: 'job', group: 'Esperando a una persona', label: 'Aprobación', tone: 'question',
+      title: job.title, context: `${job.projectName || businessNames[job.business]} · ${step.label}`, at: step.waitingSince || step.updatedAt,
+      what: `El trabajador de ${step.label} lleva ${minutes(step.waitingSince || step.updatedAt)} min parado en un diálogo de aprobación.`,
+      why: 'Claude Code o Codex pide permiso para algo que sus reglas no cubren. Hasta que contestes, la etapa no avanza y el Centro no puede contestar por ti.',
+      where: `En Orca, en la terminal del trabajador de ${job.projectName || 'este proyecto'}${step.displayName ? ` («${step.displayName}»)` : ''}.`,
+      action: ['Abrir el trabajo', () => openRun(job.id)], evidence: step.dispatchId ? [{ label: `Dispatch ${step.dispatchId}`, level: 'Registrado por el Centro' }] : [], job,
+    });
+  }
+  for (const request of (data.coordinatorRequests || []).filter(item => item.status === 'pending' && item.notification?.status === 'sent')) {
+    const nudge = request.notification.nudge, sentAt = request.notification.updatedAt || request.createdAt;
+    const dialog = nudge?.status === 'needs_person';
+    if (!dialog && Date.now() - Date.parse(sentAt) < 180_000) continue;
+    items.push({
+      id: `unanswered-${request.id}`, kind: 'request', group: 'Esperando a una persona', label: 'Coordinador', tone: 'question',
+      title: request.snapshot?.title || 'Solicitud del panel', context: request.projectName || request.snapshot?.projectName || 'Sin proyecto', at: sentAt,
+      what: dialog ? 'El coordinador tiene un diálogo de aprobación en pantalla y no puede leer la solicitud.' : `El aviso llegó hace ${minutes(sentAt)} min y el coordinador aún no ha decidido la ruta.`,
+      why: dialog ? 'El panel no escribe en una terminal que está preguntando algo: contestaría por ti.' : nudge?.status === 'delivered' ? `El panel ya le ha escrito ${nudge.attempts} ${nudge.attempts === 1 ? 'vez' : 'veces'} en su terminal.` : 'El correo de Orca no despierta a una sesión parada y el panel no ha podido escribirle.',
+      where: 'En Orca, en la sesión del coordinador de esta empresa.',
+      action: ['Ver la solicitud', () => { location.hash = '#trabajos'; document.getElementById('coordinator-inbox')?.scrollIntoView({ block: 'start' }); }], evidence: [],
+    });
+  }
   return items;
 }
 
@@ -463,6 +491,8 @@ function renderRun(data) {
     if (step.profile) add('Perfil', step.profile);
     if (step.launch) add('Modelo', [step.launch.agent, step.launch.model, step.launch.effort && `esfuerzo ${step.launch.effort}`].filter(Boolean).join(' · '), 'observed');
     else if (job.plannedLaunch?.[step.key]) add('Modelo previsto', `${launchLabel(job.plannedLaunch[step.key])} · se fija al lanzar la etapa`);
+    if (step.waitingOn === 'approval') add('Esperándote', 'Hay un diálogo de aprobación en la terminal del trabajador, en Orca.');
+    if (step.mayAskToRead?.length) add('Puede pedir permiso', `El contrato cita archivos fuera de lo que este trabajador puede leer sin preguntar: ${step.mayAskToRead.join(', ')}. Añádelos a los permisos del checkout o registra la skill en el Centro.`);
     else add('Modelo', 'No registrado', 'unknown');
     if (step.authorization) add('Autorizado por', step.authorization.coordinatorName || 'coordinador', 'observed');
     if (step.dispatchId) add('Dispatch', step.dispatchId, 'observed');

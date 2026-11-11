@@ -1,10 +1,11 @@
 import { normalizeProjectLevels, resolveLaunch, launchArgs } from './launch-choice.mjs';
-import { readStageContracts, contractsBrief } from './project-contracts.mjs';
+import { readStageContracts, contractsBrief, unreadableReferences } from './project-contracts.mjs';
 import { readPipeline, resolveStageLaunch } from './pipeline-config.mjs';
 import { routeOmission, routeOmits } from './job-route.mjs';
 import { prepareStageSkills, consultedSkills } from './skills-registry.mjs';
 import { toolingLine } from './provider-adapter.mjs';
 import { readQuota, quotaDecision, providerFailureSignal, recordQuotaObservation } from './quota.mjs';
+import { dialogOnScreen } from './orca-screen.mjs';
 import { claimHold, releaseJobClaim } from './admission-gate.mjs';
 import { STAGE_TERMS, CLOSING_CRITERIA_NOTE, renderStageContract } from './stage-contract.mjs';
 import * as fs from 'node:fs/promises';
@@ -504,7 +505,9 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
     const brief = retry ? null : dispatchBrief(specArtifact, specIdentity, orcaAgent);
-    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, launch, ...(job.team ? { team: job.team } : {}), ...(quotaRecord ? { quota: quotaRecord } : {}), ...(appliedContracts.length ? { contracts: appliedContracts.map(({ scope, path: file, sha256 }) => ({ scope, path: file, sha256 })) } : {}), ...(suppliedSkills.length ? { skills: suppliedSkills } : {}), ...(stageSkills?.omitted.length ? { skillsOmitted: stageSkills.omitted } : {}),
+    // Known before the worker starts: a Claude worker will stop and ask a person before reading these (see unreadableReferences).
+    const mayAsk = orcaAgent === 'claude' && job.workspace ? await unreadableReferences(appliedContracts, { workspace: job.workspace, root: ctx.root }).catch(() => []) : [];
+    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, launch, ...(job.team ? { team: job.team } : {}), ...(quotaRecord ? { quota: quotaRecord } : {}), ...(appliedContracts.length ? { contracts: appliedContracts.map(({ scope, path: file, sha256 }) => ({ scope, path: file, sha256 })) } : {}), ...(suppliedSkills.length ? { skills: suppliedSkills } : {}), ...(mayAsk.length ? { mayAskToRead: mayAsk } : {}), ...(stageSkills?.omitted.length ? { skillsOmitted: stageSkills.omitted } : {}),
       ...(role.stageKey === 'qa' && job.workflowV2Snapshot ? { workflowV2Snapshot: job.workflowV2Snapshot } : {}), inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
@@ -568,6 +571,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
   let stopping = false;
   let statusReadFailures = 0;
   let lastAskPoll = 0, lastAskMessage, lastAnsweredAsk, askCheckError, unknownStartAt, unknownStartReported = false, exitWaitAt, exitWaitReported = false;
+  let lastScreenLook = ctx.polling.now(), waitingReported = false;
   await ctx.reportStage?.({ key: role.stageKey, status: 'running', runId, dispatchId, taskId });
   ctx.registerCleanup(async () => {
     if (settled || stopping) return;
@@ -597,6 +601,20 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     if (statusReadFailures) {
       statusReadFailures = 0;
       await ctx.reportStage?.({ key: role.stageKey, status: 'running', dispatchStatus: 'active', statusReadError: null });
+    }
+    // A worker stopped at an approval dialog looks exactly like one that is working (18 idle minutes in the first pilot).
+    // Look at its screen every half minute and say so on the stage; an unreadable screen says nothing.
+    if (!['succeeded', 'failed', 'cancelled', 'abandoned', 'stopped', 'rejected', 'start_unknown', 'unknown'].includes(worker.state) && typeof worker.terminal === 'string' && worker.terminal.startsWith('term_')
+      && ctx.polling.now() - lastScreenLook >= 30_000) {
+      lastScreenLook = ctx.polling.now();
+      let waiting = null;
+      try { waiting = dialogOnScreen(await command(['terminal', 'read', '--terminal', worker.terminal, '--screen'], ctx.root, ctx.signal)); } catch { /* unknown */ }
+      if (waiting !== null && waiting !== waitingReported) {
+        waitingReported = waiting;
+        await ctx.reportStage?.({ key: role.stageKey, status: 'running', dispatchStatus: 'active', dispatchId, taskId, waitingOn: waiting ? 'approval' : null,
+          waitingSince: waiting ? new Date(ctx.polling.now()).toISOString() : null,
+          summary: waiting ? 'El trabajador espera una respuesta tuya en su terminal de Orca: hay un diálogo de aprobación en pantalla. La etapa no avanza hasta que contestes.' : '' });
+      }
     }
     const startUnknownLive = worker.state === 'start_unknown' && worker.liveness === 'live';
     if (startUnknownLive) {

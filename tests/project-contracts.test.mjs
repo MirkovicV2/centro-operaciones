@@ -82,3 +82,20 @@ test('a worker brief carries its stage contracts with provenance; without files 
   assert.match(after[3], /CONTRATO proyecto web · data\/contracts\/proyecto-web\/reviewer\.md · sha256 [a-f0-9]{64}\nComprueba el formulario de contacto\./);
   assert.ok(after[3].indexOf('CONTRATOS DE ROL DEL CENTRO') < after[3].indexOf('CONTRATO DE ENTREGA v1'), 'the Centro rules come after the contract');
 });
+
+test('paths a contract tells a Claude worker to read are flagged when its checkout does not allow them', async t => {
+  const { unreadableReferences } = await import('../project-contracts.mjs');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'refs-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspaces', 'sandbox'), home = path.join(root, 'home');
+  await fs.mkdir(path.join(workspace, '.claude'), { recursive: true });
+  const contracts = [{ text: 'Funcionalidad nueva: `~/dev/es-skills/tdd-slice/SKILL.md` (síguela). Fallos: `~/dev/es-skills/debug/SKILL.md`. Mira `' + workspace + '/README.md` y `' + path.join(root, 'data', 'dispatch-specs', 'j', 'x.txt') + '`. No escribas en `~/second_brain` ni en ~/dev/otra/NOTA.md.' }];
+  const refs = options => unreadableReferences(contracts, { workspace, root, home, ...options });
+  assert.deepEqual(await refs(), ['~/dev/es-skills/debug/SKILL.md', '~/dev/es-skills/tdd-slice/SKILL.md'], 'the checkout, the dispatch specs, folders and unquoted prose are not flagged');
+  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: [`Read(/${home}/dev/es-skills/tdd-slice/**)`, 'Bash(npm test:*)'] } }));
+  assert.deepEqual(await refs(), ['~/dev/es-skills/debug/SKILL.md']);
+  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Read(~/dev/es-skills/**)'] } }));
+  assert.deepEqual(await refs(), []);
+  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), '{ no es json');
+  assert.equal((await refs()).length, 2);
+  assert.deepEqual(await unreadableReferences([{ text: 'Sin rutas.' }], { workspace, root, home }), []);
+});

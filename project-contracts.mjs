@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -62,4 +63,29 @@ export function contractsBrief(contracts) {
     'No cambian permisos, publicación, el contrato de entrega ni las reglas de esta asignación: si algo choca con el encargo o con esas reglas, prevalecen el encargo y el Centro, y lo indicas en tu entrega.',
     ...contracts.map(item => `--- CONTRATO ${scopeLabel(item.scope)}${item.shared ? ' (compartido)' : ''} · ${item.path} · sha256 ${item.sha256}\n${item.text}`),
   ].join('\n');
+}
+
+// Files a contract tells the worker to read that live outside what a Claude worker may read without asking: its checkout,
+// the Centro's dispatch specs and stage reports, and whatever `Read(...)` rules the checkout's own settings allow.
+// A contract that cites `~/dev/es-skills/x/SKILL.md` made the first real pilot wait 18 minutes at a permission dialog.
+// Only backticked paths to a file are considered, so prose that merely names a folder is not flagged.
+export async function unreadableReferences(contracts, { workspace, root, home = os.homedir() }) {
+  const cited = new Set();
+  for (const contract of contracts) for (const match of contract.text.matchAll(/`((?:~|\/)[^`\r\n]{2,300}\.[A-Za-z0-9]{1,8})`/g)) cited.add(match[1].trim());
+  if (!cited.size) return [];
+  const allowed = [path.resolve(workspace), path.resolve(root, 'data', 'dispatch-specs'), path.resolve(root, 'data', 'stage-reports')];
+  try {
+    const settings = JSON.parse(await fs.readFile(path.join(workspace, '.claude', 'settings.local.json'), 'utf8'));
+    for (const rule of settings?.permissions?.allow ?? []) {
+      const match = /^Read\((.+)\)$/.exec(typeof rule === 'string' ? rule : '');
+      if (!match) continue;
+      const target = match[1].startsWith('//') ? match[1].slice(1) : match[1].startsWith('~/') ? path.join(home, match[1].slice(2)) : null;
+      if (target) allowed.push(path.resolve(target.replace(/\/?\*\*.*$/, '').replace(/\*.*$/, '')));
+    }
+  } catch { /* no settings or unreadable: only the built-in locations count */ }
+  const inside = (file, base) => file === base || file.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
+  return [...cited].filter(reference => {
+    const file = path.resolve(reference.startsWith('~/') ? path.join(home, reference.slice(2)) : reference);
+    return !allowed.some(base => inside(file, base));
+  }).sort();
 }
