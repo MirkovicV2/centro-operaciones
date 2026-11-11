@@ -16,7 +16,10 @@ try {
     const snapshot = {
       jobs: [{ id: 'pendiente', business: 'agency', title: 'Encargo en cola', state: 'queued', kind: 'code', provider: 'orca', attempts: 0, maxAttempts: 5, createdAt: '2026-11-10',
         plannedLaunch: { developer: { agent: 'claude', model: 'sonnet', effort: 'medium', source: 'general' } },
-        workflow: { steps: [{ key: 'ux', label: 'Diseño UX', status: 'succeeded', launch: { agent: 'claude', model: 'sonnet', effort: 'medium', source: 'general' } }, { key: 'developer', label: 'Implementación', status: 'queued' }] } }],
+        workflow: { steps: [{ key: 'ux', label: 'Diseño UX', status: 'succeeded', launch: { agent: 'claude', model: 'sonnet', effort: 'medium', source: 'general' } }, { key: 'developer', label: 'Implementación', status: 'queued' }] } },
+        { id: 'sin-diseno', business: 'agency', title: 'Cálculo de IVA', state: 'queued', kind: 'code', provider: 'orca', attempts: 0, maxAttempts: 5, createdAt: '2026-11-09',
+          route: { id: 'funcional', label: 'Cambio funcional sin interfaz', reason: 'Solo cambia un cálculo del servidor.', omitted: [{ stage: 'ux', reason: 'Solo cambia un cálculo del servidor.' }] },
+          workflow: { steps: [{ key: 'ux', label: 'Diseño UX', status: 'skipped', routeOmitted: true, summary: 'Omitida por la ruta «Cambio funcional sin interfaz»: Solo cambia un cálculo del servidor.' }, { key: 'developer', label: 'Implementación', status: 'queued' }] } }],
       queue: {}, projects: [{ id: 'web', name: 'Web corporativa', business: 'agency', status: 'active', checkout: '', branch: '' }], ideas: [], questions: [], domains: [], tasks: [], messages: [],
       settings: {}, executor: { available: true },
     };
@@ -99,6 +102,13 @@ try {
     assert.match(stages[1], /Modelo previsto\s+claude · sonnet · esfuerzo medium · se fija al lanzar la etapa/);
 
     const previewsBefore = previews.filter(search => !search.includes('projectId')).length;
+    // A stage left out by the route is shown with its reason, on the job page and on the job card.
+    await page.goto('http://127.0.0.1:43894/#trabajo/sin-diseno');
+    await page.getByRole('heading', { name: 'Cálculo de IVA', exact: true }).waitFor();
+    assert.match(await page.locator('.run-route').innerText(), /Ruta: Cambio funcional sin interfaz[\s\S]*Diseño UX: omitida\. Solo cambia un cálculo del servidor\./);
+    assert.equal(await page.locator('.run-stage').count(), 1, 'only the stages that run are numbered');
+    await noOverflow('route');
+
     // Nuevo trabajo: preview of the split, one stage pinned for this job, sent with the request.
     await page.goto('http://127.0.0.1:43894/#trabajos');
     await page.locator('#show-new-job').click();

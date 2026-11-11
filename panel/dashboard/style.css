@@ -1331,3 +1331,8 @@ button.history-row { cursor: pointer; } button.history-row:hover { background: v
   #ajustes .form-footer .button-row .button { flex: 1 1 100%; }
 }
 @media (max-width: 370px) { .pipeline-row, .job-launch .pipeline-row { grid-template-columns: minmax(0, 1fr); } }
+
+/* Página del trabajo: ruta y etapas omitidas o añadidas, con su motivo. */
+.run-route { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; overflow-wrap: anywhere; }
+.run-route-title { margin: 0; color: var(--text); }
+.run-route-notes { margin: 6px 0 0; padding-left: 18px; color: var(--soft); }

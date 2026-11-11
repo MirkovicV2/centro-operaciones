@@ -8,6 +8,7 @@ import { loadState } from '../queue.mjs';
 import { notifyCoordinatorRequest } from '../coordinator-bridge.mjs';
 import { withInboxLock } from './inbox-lock.mjs';
 import { validateJobLaunch } from '../../launch-choice.mjs';
+import { validateJobRoute } from '../../job-route.mjs';
 import { deliverCoordinatorNotice } from './coordinator-notice.mjs';
 import { assertCoordinatorQuestionsAnswered, coordinatorDecisions, coordinatorJobLink, checkCoordinatorAnswerNotices } from './coordinator-dialogue.mjs';
 
@@ -88,7 +89,7 @@ export function routeTaskFromCoordinator(root, requestId, kind, options = {}) {
   return promise;
 }
 
-async function routeTaskOnce(root, requestId, requestedKind, { reason = '', confirmation } = {}) {
+async function routeTaskOnce(root, requestId, requestedKind, { reason = '', confirmation, route: requestedRoute } = {}) {
   let kind = requestedKind;
   if (!['analysis', 'code'].includes(kind)) throw new Error('El coordinador debe elegir análisis o código.');
   const inbox = await loadDashboardState(root);
@@ -105,7 +106,10 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     kind = request.route.kind;
     reason = request.route.reason || '';
     confirmation = request.route.confirmation;
+    requestedRoute = request.route.pipelineRoute;
   }
+  // The coordinator's choice of stages (job-route.mjs). Validated before anything is saved; kept with the route checkpoint.
+  const pipelineRoute = kind === 'code' ? validateJobRoute(requestedRoute, kind) : undefined;
   if (request.notification?.status !== 'sent') throw new Error('El aviso al coordinador no está confirmado; no encolo la solicitud. Revisa primero su estado.');
   assertCoordinatorQuestionsAnswered(request, inbox.questions);
   const jobs = (await loadState(root)).jobs;
@@ -146,7 +150,7 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     `[COORDINATOR_REQUEST:${request.id}]`,
     `Empresa: ${request.business}`,
     `Proyecto: ${project?.name || 'Sin proyecto'}${project ? ` (${project.id})` : ''}`,
-    `Decisión del coordinador: ${kind === 'code' ? 'pipeline de código UX → Desarrollo → QA → Revisión' : 'Planificador para análisis sin editar código'}.`,
+    `Decisión del coordinador: ${kind !== 'code' ? 'Planificador para análisis sin editar código' : pipelineRoute?.omitted.length ? `pipeline de código Desarrollo → QA → Revisión (ruta ${pipelineRoute.label}; sin Diseño: ${pipelineRoute.reason})` : 'pipeline de código UX → Desarrollo → QA → Revisión'}.`,
     reason ? `Motivo de ruta: ${String(reason).trim().slice(0, 1000)}` : '',
     `Objetivo solicitado: ${snapshot.text}`,
     `Criterio de éxito: ${snapshot.successCriteria}`,
@@ -160,7 +164,7 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     if (current.route?.kind && current.route.kind !== kind) throw new Error('La decisión de ruta ya se guardó; no se permite cambiarla durante la recuperación.');
     if (current.status !== 'routing') {
       current.status = 'routing';
-      current.route = { kind, at: new Date().toISOString(), reason: String(reason).trim().slice(0, 1000), decisions, ...(kind === 'code' ? { confirmation: confirmation || snapshot.destinationConfirmation } : {}) };
+      current.route = { kind, at: new Date().toISOString(), reason: String(reason).trim().slice(0, 1000), decisions, ...(kind === 'code' ? { confirmation: confirmation || snapshot.destinationConfirmation } : {}), ...(pipelineRoute ? { pipelineRoute } : {}) };
       current.updatedAt = new Date().toISOString();
     }
     return current;
@@ -175,6 +179,7 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     ...(destination ? { workspace: destination.workspace, branch: destination.branch, destination, isolated: true } : {}),
     // A receipt saved before this field existed keeps its exact spec (and so its fingerprint).
     ...(snapshot.launch && (!savedReceipt || savedReceipt.spec.launch) ? { launch: snapshot.launch } : {}),
+    ...(savedReceipt ? (savedReceipt.spec.route ? { route: savedReceipt.spec.route } : {}) : pipelineRoute ? { route: pipelineRoute } : {}),
   });
   if (destination && submission.receipt) await recordJobConfirmation(root, jobId, request.business, destination);
   const updated = await changeDashboardState(root, state => {

@@ -1,5 +1,6 @@
 import { workflowV2Resumable } from './workflow-v2-gate.mjs';
 import { validateJobLaunch } from './launch-choice.mjs';
+import { validateJobRoute, routeOmission, routeOmits, routeWithStage, stageSatisfied } from './job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -27,10 +28,15 @@ const WORKFLOW_STAGES = [
 ];
 const ANALYSIS_STAGE = [{ key: 'planner', label: 'Planificación', profile: 'planificador' }];
 const GAME_STAGE_LABELS = { ux: 'Diseño de videojuegos', developer: 'Desarrollo de videojuegos (Godot)' };
-function workflowFor(kind, provider, business, eligible = false) {
+function workflowFor(kind, provider, business, eligible = false, route = null) {
   if (provider !== 'orca') return null;
   const stages = kind === 'analysis' ? ANALYSIS_STAGE : [...WORKFLOW_STAGES, ...(eligible ? [{ key: 'integration', label: 'Integración GitHub', profile: null, executor: 'deterministic' }] : [])];
-  return { version: 1, name: kind === 'analysis' ? 'analysis-v1' : 'ui-quality-v1', status: 'queued', currentStage: null, updatedAt: stamp(), steps: stages.map(stage => ({ ...stage, label: (business === 'games' ? GAME_STAGE_LABELS[stage.key] : null) || stage.label, profile: stage.profile && kind === 'code' && ['agency', 'games'].includes(business) ? `${stage.profile}_${business}` : stage.profile, status: 'queued' })) };
+  return { version: 1, name: kind === 'analysis' ? 'analysis-v1' : 'ui-quality-v1', status: 'queued', currentStage: null, updatedAt: stamp(), steps: stages.map(stage => ({ ...stage, label: (business === 'games' ? GAME_STAGE_LABELS[stage.key] : null) || stage.label, profile: stage.profile && kind === 'code' && ['agency', 'games'].includes(business) ? `${stage.profile}_${business}` : stage.profile, status: 'queued' })).map(step => omittedStep({ route }, step)) };
+}
+// A stage the route leaves out stays in the workflow as skipped, with the reason shown in the panel.
+function omittedStep(job, step) {
+  const reason = routeOmission(job, step.key);
+  return reason ? { key: step.key, label: step.label, ...(step.profile ? { profile: step.profile } : {}), status: 'skipped', routeOmitted: true, summary: reason } : step;
 }
 export class QueueError extends Error {
   constructor(message, code = 'queue_error') { super(message); this.code = code; }
@@ -279,6 +285,7 @@ export function validateSpec(spec) {
   if (!['orca', 'auto', 'codex', 'api'].includes(spec.provider ?? 'orca')) throw new QueueError('provider debe ser orca, auto, codex o api.');
   if (spec.kind === 'code' && (!spec.workspace || !spec.isolated)) throw new QueueError('Los trabajos de código requieren workspace y confirmación isolated.');
   try { validateJobLaunch(spec.launch); } catch (error) { throw new QueueError(error.message, 'launch_choice_invalid'); }
+  try { validateJobRoute(spec.route, spec.kind); } catch (error) { throw new QueueError(error.message, 'job_route_invalid'); }
 }
 
 export async function addJob(root, spec) {
@@ -291,8 +298,9 @@ export async function addJob(root, spec) {
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) throw new QueueError('Identificador inválido.');
     if (state.jobs.some(job => job.id === id)) throw new QueueError('Este identificador ya existe; no se añadirá dos veces.', 'duplicate');
     const provider = spec.provider ?? 'orca';
-    const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true);
-    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
+    const route = provider === 'orca' ? validateJobRoute(spec.route, spec.kind) : undefined;
+    const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true, route);
+    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), ...(route ? { route } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
       ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0,
       ...(currentActor() ? { actor: currentActor() } : {}) };
     job.contract = contract;
@@ -941,7 +949,7 @@ export function integrationValidationSteps(job, scope = 'integration', qualityAc
   const block = scope === 'qa' ? settledQaRevalidation(job, qualityAction)
     : scope === 'reviewer' && qualityAction ? settledReviewerRevalidation(job) : null;
   if (scope !== 'integration' && !block) throw new QueueError('La etapa de calidad no acredita un cierre bloqueado.', 'integration_recovery_invalid');
-  const keys = scope === 'qa' ? ['ux', 'developer', 'qa'] : ['ux', 'developer', 'qa', 'reviewer'];
+  const keys = (scope === 'qa' ? ['ux', 'developer', 'qa'] : ['ux', 'developer', 'qa', 'reviewer']).filter(stage => !routeOmits(job, stage));
   const steps = keys.map(stage => {
     const step = job?.workflow?.steps?.find(item => item.key === stage);
     if (!(step && (step.status === 'succeeded' || step === block)) || step.runId !== job.workflow.runId || !IDENTIFIERS.taskId.test(step.taskId || '')
@@ -1252,7 +1260,7 @@ export function stoppedDeveloperCheckpoint(job) {
   const stage = workflow?.steps?.find(step => step.key === 'developer');
   const ux = workflow?.steps?.find(step => step.key === 'ux');
   if (job?.provider !== 'orca' || job.error?.code !== 'timeout' || executionTimeoutMs(job) !== null
-    || workflow?.currentStage !== 'developer' || ux?.status !== 'succeeded'
+    || workflow?.currentStage !== 'developer' || !(ux && stageSatisfied(ux))
     || stage?.status !== 'running' || stage.dispatchStatus !== 'active' || stage.attempt !== job.attempts
     || stage.runId !== workflow.runId || !IDENTIFIERS.runId.test(stage.runId ?? '')
     || !IDENTIFIERS.taskId.test(stage.taskId ?? '') || !IDENTIFIERS.dispatchId.test(stage.dispatchId ?? '')
@@ -1322,7 +1330,7 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
         ...workflow,
         status: 'queued',
         currentStage: activeStep.key,
-        steps: workflow.steps.map((step, index) => index < resetAt
+        steps: workflow.steps.map((step, index) => index < resetAt || step.routeOmitted
           ? step
           : { key: step.key, label: step.label, profile: step.profile, status: 'queued',
             ...(index === resetAt && IDENTIFIERS.taskId.test(step.taskId ?? '') && IDENTIFIERS.dispatchId.test(step.dispatchId ?? '') && (recovery || ['failed', 'cancelled', 'abandoned'].includes(step.dispatchStatus))
@@ -1343,6 +1351,30 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
     };
     const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - amount), estimatedSpentUsd: state.budget.estimatedSpentUsd + amount };
     await commit(root, state, 'operator_retry', { jobs: [job], budget }, { jobId: id });
+    return job;
+  });
+}
+
+// Scope changed: the coordinator puts back a stage the route had left out (today only Diseño).
+// Allowed only while Desarrollo has no assignment at all: a developer already briefed without a design
+// cannot be handed one silently, so that case goes through the coordinator's answer or a new job.
+export async function addJobStage(root, id, { stage, reason } = {}) {
+  return mutate(root, async state => {
+    const previous = state.jobs.find(job => job.id === id);
+    if (!previous) throw new QueueError('No existe ese trabajo.', 'job_not_found');
+    if (previous.kind !== 'code' || previous.provider !== 'orca' || !previous.workflow) throw new QueueError('Solo los trabajos de código del pipeline Orca tienen ruta.', 'job_route_invalid');
+    if (!['queued', 'retry_wait', 'needs_attention'].includes(previous.state)) throw new QueueError('La ruta solo cambia con el trabajo en cola o pendiente de revisión, nunca en marcha ni terminado.', 'job_route_locked');
+    const developer = previous.workflow.steps.find(step => step.key === 'developer');
+    if (!developer || developer.status !== 'queued' || developer.dispatchId || developer.taskId || developer.retryOf) {
+      throw new QueueError('Desarrollo ya tiene una asignación sin esa etapa. Resuelve la duda de diseño mediante el coordinador o crea un encargo con la ruta completa.', 'job_route_locked');
+    }
+    let route;
+    try { route = routeWithStage(previous.route, stage, { reason, actor: currentActor() }); }
+    catch (error) { throw new QueueError(error.message, error.code); }
+    const template = workflowFor(previous.kind, previous.provider, previous.business, false, route).steps.find(step => step.key === stage);
+    const job = { ...previous, route, workflow: { ...previous.workflow, updatedAt: stamp(),
+      steps: previous.workflow.steps.map(step => step.key === stage ? { ...template, addedByScopeChange: route.added.at(-1) } : step) } };
+    await commit(root, state, 'job_stage_added', { jobs: [job] }, { jobId: id, stage, reason: route.added.at(-1).reason });
     return job;
   });
 }
@@ -1371,7 +1403,7 @@ export async function resumeJobWithDecisions(root, id, { continuation, prompt } 
     }
     const workflow = {
       ...previous.workflow, status: 'queued', updatedAt: stamp(),
-      steps: previous.workflow.steps.map((item, i) => i < index ? item : {
+      steps: previous.workflow.steps.map((item, i) => i < index || item.routeOmitted ? item : {
         key: item.key, label: item.label, profile: item.profile, status: 'queued',
         ...(i === index ? { predecessorTaskId: stage.taskId, supersedesDispatchId: stage.dispatchId } : {}),
       }),
@@ -1645,7 +1677,7 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
             skipped: ['skipped'],
           };
           if (!transitions[prior.status]?.includes(update.status)) throw new QueueError('Transición de etapa no permitida.', 'stage_transition_invalid');
-          if (['running', 'succeeded'].includes(update.status) && workflow.steps.slice(0, index).some(step => step.status !== 'succeeded')) {
+          if (['running', 'succeeded'].includes(update.status) && workflow.steps.slice(0, index).some(step => !stageSatisfied(step))) {
             throw new QueueError('Faltan etapas previas aprobadas.', 'stage_dependencies_unmet');
           }
           if (update.delivery) validateDelivery(update.delivery, {

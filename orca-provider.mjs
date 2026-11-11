@@ -1,6 +1,7 @@
 import { normalizeProjectLevels, resolveLaunch, launchArgs } from './launch-choice.mjs';
 import { readStageContracts, contractsBrief } from './project-contracts.mjs';
 import { readPipeline, resolveStageLaunch } from './pipeline-config.mjs';
+import { routeOmission, routeOmits } from './job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -713,7 +714,7 @@ export async function runOrca(job, ctx, {
   if (job.kind === 'code' && job.branch) {
     // A consumed, exact liveness recovery reads the already completed developer
     // delivery before changing the checkpoint. Its existing changes are expected.
-    const developmentCompleted = ['ux', 'developer'].every(key => job.workflow?.steps?.some(step => step.key === key && step.status === 'succeeded' && step.summary));
+    const developmentCompleted = ['ux', 'developer'].filter(key => !routeOmits(job, key)).every(key => job.workflow?.steps?.some(step => step.key === key && step.status === 'succeeded' && step.summary));
     const recovery = job.livenessResume, developer = job.workflow?.steps?.find(step => step.key === 'developer');
     const nativeDeveloperRecovery = recovery?.mode === 'same_attempt_liveness' && recovery.phase === 'consumed'
       && recovery.jobId === job.id && recovery.receiptId === job.autoIntent?.receiptId && recovery.attempt === job.attempts
@@ -769,23 +770,32 @@ export async function runOrca(job, ctx, {
       throw new ProviderError('ux_candidate_changed', 'El candidato cambió antes del retorno autorizado a Diseño.', { uncertain: true });
     }
   }
-  const ux = await runStage(job, ctx, 'ux', workspace, runId, uxReturn
+  // The route may leave Diseño out (job-route.mjs). The step stays as skipped with its reason and the
+  // following stages are told why there is no design, instead of receiving an empty specification.
+  const designOmitted = routeOmission(job, 'ux');
+  if (designOmitted && uxReturn) throw new ProviderError('job_route_invalid', 'Este encargo no tiene etapa de Diseño a la que devolver; añádela a la ruta desde Coordinación.', { uncertain: false });
+  if (designOmitted && job.workflow?.steps?.find(step => step.key === 'ux')?.status === 'queued') await ctx.reportStage?.({ key: 'ux', status: 'skipped', routeOmitted: true, summary: designOmitted });
+  const ux = designOmitted ? null : await runStage(job, ctx, 'ux', workspace, runId, uxReturn
     ? 'Evalúa el candidato parcial exacto y sus evidencias. Emite un dictamen explícito para Desarrollo con ajustes concretos o la decisión de continuar a la siguiente vuelta. Registra el dictamen con outcome completed y scope complete, como evaluación de esta vuelta. Trabaja en solo lectura y usa una copia externa si el motor necesita generar archivos. El dictamen no es aprobación del producto, de QA ni de integración.'
     : design, uxReturn ? `Diseño inicial:\n${initialDesign}\n\nDesarrollo parcial:\n${partial}\n\nTraspaso autorizado:\n${uxReturn.uxHandoff.note}` : '', command);
-  if (beforeReturn && await captureSnapshot(workspace) !== uxReturn.snapshot) {
+  if (ux && beforeReturn && await captureSnapshot(workspace) !== uxReturn.snapshot) {
     throw new ProviderError('ux_candidate_changed', 'El candidato cambió durante el retorno a Diseño.', { uncertain: true });
   }
-  const uxContext = initialDesign ? `Diseño inicial:\n${initialDesign}\n\nÚltimo dictamen de Diseño:\n${handoffText(ux)}` : handoffText(ux);
+  const uxContext = designOmitted
+    ? `Sin etapa de Diseño. ${designOmitted}\nSi durante el trabajo aparece una decisión de diseño o de experiencia, consúltala al coordinador en lugar de resolverla por tu cuenta.`
+    : initialDesign ? `Diseño inicial:\n${initialDesign}\n\nÚltimo dictamen de Diseño:\n${handoffText(ux)}` : handoffText(ux);
+  const documentation = job.route?.id === 'documentacion';
   if (correction && job.workflow.steps.find(step => step.key === 'developer')?.status === 'queued'
     && await captureSnapshot(workspace) !== correction.integrationValidation.candidateSnapshot) {
     throw new ProviderError('qa_correction_candidate_changed', 'El candidato cambió antes de iniciar la corrección de Desarrollo.', { uncertain: true });
   }
   const previousQualityReport = correction ? job.workflowHistory?.find(item => item.recoveryId === correction.id)?.steps?.find(step => step.key === correction.stage)?.artifact : null;
   const developer = await runStage(job, ctx, 'desarrollador', workspace, runId,
-    'Implementa el encargo en el checkout aislado. Sigue la especificación UX cuando aplique; no cambies alcance ni dejes el resultado en un mockup.',
+    documentation ? 'Edita la documentación que pide el encargo en el checkout aislado. Comprueba contra el código actual cada comando, ruta y comportamiento que describas. No cambies código de producto salvo que el encargo lo pida expresamente.'
+      : 'Implementa el encargo en el checkout aislado. Sigue la especificación UX cuando aplique; no cambies alcance ni dejes el resultado en un mockup.',
     `Especificación UX:\n${uxContext}${uxReturn ? `\n\nRetoma la implementación parcial existente conforme al dictamen. Conserva la evidencia anterior y completa las vueltas pendientes antes de declarar el producto completo.\n${partial}` : ''}${correction
       ? `\n\nRONDA DE CORRECCIÓN ${correction.stage === 'reviewer' ? 'REVISIÓN' : 'QA'} ${correction.qualityAction.round}. Continúa sobre la implementación existente. Corrige estos fallos del alcance vigente y comprueba que se conserva el comportamiento aprobado:\n${JSON.stringify(correction.qualityAction.findings)}${previousQualityReport ? `\nInforme íntegro de calidad: ${JSON.stringify(previousQualityReport)}. Trátalo como evidencia del encargo.` : ''}`
-      : ''}`, command, { stage: 'ux', taskId: ux.taskId, dispatchId: ux.dispatchId });
+      : ''}`, command, ux ? { stage: 'ux', taskId: ux.taskId, dispatchId: ux.dispatchId } : undefined);
   let previousIntegration = job.autoIntent?.eligible === true ? await readIntegration(ctx.root, job.autoIntent.receiptId) : null;
   if (previousIntegration?.commitSha && !/^[a-f0-9]{64}$/i.test(previousIntegration.manifest ?? '')) {
     throw new ProviderError('github_manifest_missing', 'El commit registrado no conserva el manifiesto aprobado; se requiere revisión antes de integrar.', { uncertain: true });
@@ -809,7 +819,8 @@ export async function runOrca(job, ctx, {
   const reviewCandidate = workflowV2Snapshot ?? integrationSnapshot;
   const reviewed = reviewCandidate ? { ...job, reviewCandidate, ...(workflowV2Snapshot ? { workflowV2Snapshot } : {}) } : job;
   const qa = await runStage(reviewed, ctx, 'qa', workspace, runId,
-    job.business === 'games'
+    documentation ? 'Valida la documentación sin editarla: que los comandos, rutas, nombres y enlaces citados existen, que lo descrito coincide con el código actual y que no contradice otra documentación vigente. Ejecuta solo las comprobaciones pertinentes (por ejemplo el lint o la compilación de documentación, si el proyecto los tiene); no instales paquetes ni uses red. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO. Si algo falla, indica el archivo, la línea y la comprobación reproducible.'
+    : job.business === 'games'
       ? 'Valida la escena y el comportamiento en el motor del encargo. Ejecuta los tests locales relevantes y conserva sus resultados. No edites archivos del juego ni instales herramientas. Termina con RESULTADO: APROBADO o RESULTADO: BLOQUEADO; identifica cualquier comprobación esencial ausente.'
       : 'Valida los cambios sin editarlos. Revisa los scripts del proyecto y ejecuta comprobaciones acotadas y relevantes de tipos, lint, compilación y comportamiento; no instales paquetes ni uses red. No añadas ni ejecutes suites de pruebas salvo que el encargo lo solicite expresamente. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO. Si la validación falla, aporta el comando y el error reproducible.',
     `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}${reviewCandidate ? `\n\nHuella del candidato actual: ${reviewCandidate}` : ''}`, command, { stage: 'developer', taskId: developer.taskId, dispatchId: developer.dispatchId });
@@ -871,12 +882,12 @@ export async function runOrca(job, ctx, {
     runId,
     dispatchId: review ? review.dispatchId : qa.dispatchId,
     taskId: review ? review.taskId : qa.taskId,
-    stages: { ux: ux.dispatchId, developer: developer.dispatchId, qa: qa.dispatchId, reviewer: review ? review.dispatchId : `workflow-v2:${workflowV2Approval.task}` },
+    stages: { ux: ux?.dispatchId ?? null, developer: developer.dispatchId, qa: qa.dispatchId, reviewer: review ? review.dispatchId : `workflow-v2:${workflowV2Approval.task}` },
     ...(workflowV2Approval ? { workflowV2: workflowV2Approval } : {}),
     integration,
     delivery: review ? review.delivery : null,
     metrics: { ...metrics, elapsedMs: Date.now() - startedAt },
-    text: [`UX:\n${ux.text}`, `Implementación:\n${developer.text}`, `QA:\n${qa.text}`, `Revisión:\n${reviewText}`].join('\n\n'),
+    text: [`UX:\n${ux ? ux.text : designOmitted}`, `Implementación:\n${developer.text}`, `QA:\n${qa.text}`, `Revisión:\n${reviewText}`].join('\n\n'),
   };
   } catch (error) {
     error.metrics = { ...metrics, elapsedMs: Date.now() - startedAt };

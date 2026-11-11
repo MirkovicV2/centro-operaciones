@@ -25,6 +25,8 @@ function launchText(step) {
 function stageReport(job, key, label) {
   const step = job.workflow?.steps?.find(item => item.key === key);
   if (!step) return { key, label, status: 'not_started', level: 'unknown', facts: [] };
+  // Left out by the job's route: not a failure and not pending. The reason is the Centro's own record.
+  if (step.status === 'skipped' && step.routeOmitted) return { key, label, status: 'omitted', level: 'observed', facts: [{ label: 'Etapa omitida', value: clip(step.summary), level: 'observed' }] };
   const exact = Boolean(step.runId && step.taskId && step.dispatchId);
   const facts = [{ label: 'Estado', value: step.status, level: exact && ['succeeded', 'blocked', 'failed'].includes(step.status) ? 'observed' : 'unknown' }];
   if (exact) facts.push({ label: 'Dispatch', value: step.dispatchId, level: 'observed' });

@@ -62,7 +62,7 @@ import { configuredOrcaAgent } from '../local-tools.mjs';
 import { inspectOrcaAgentSettings } from '../orca-settings.mjs';
 import { readPipeline, pipelineAgents, previewPipeline, writePipeline, disablePipeline, resolveStageLaunch, STAGE_ROLES, PIPELINE_BUSINESSES } from '../pipeline-config.mjs';
 import { LAUNCH_ROLES, LAUNCH_AGENTS } from '../launch-choice.mjs';
-import { currentActor } from './queue.mjs';
+import { currentActor, addJobStage } from './queue.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from '../orca-provider.mjs';
 // With a mixed pipeline some stages run with Claude even when the default agent is Codex.
 const usesClaude = await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }).then(pipeline => pipelineAgents(pipeline, configuredOrcaAgent()).includes('claude'))
@@ -352,8 +352,8 @@ async function handleApi(request, response, url, tailscale = null) {
   if (coordinatorRoute) {
     const request = (await loadDashboardState(QUEUE_ROOT)).coordinatorRequests.find(item => item.id === coordinatorRoute[1]);
     const result = request?.kind === 'idea'
-      ? await routeCoordinatorIdea(QUEUE_ROOT, coordinatorRoute[1], body.kind, { ...(body.confirmation || {}), reason: body.reason })
-      : await routeTaskFromCoordinator(QUEUE_ROOT, coordinatorRoute[1], body.kind, { reason: body.reason, confirmation: body.confirmation });
+      ? await routeCoordinatorIdea(QUEUE_ROOT, coordinatorRoute[1], body.kind, { ...(body.confirmation || {}), reason: body.reason, ...(body.route ? { pipelineRoute: body.route } : {}) })
+      : await routeTaskFromCoordinator(QUEUE_ROOT, coordinatorRoute[1], body.kind, { reason: body.reason, confirmation: body.confirmation, route: body.route });
     return send(response, 200, result);
   }
   const coordinatorNotice = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/notify$/);
@@ -385,6 +385,8 @@ async function handleApi(request, response, url, tailscale = null) {
   if (ideaSend) return send(response, 409, { error: 'El panel ya no inicia agentes directamente desde Ideas. Envía la idea al coordinador para que decida la ruta.' });
   const resumeDispatch = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/resume$/);
   if (resumeDispatch) return send(response, 200, await resumeCoordinatedDispatch(QUEUE_ROOT, resumeDispatch[1], { confirm: body.confirmReviewed === true }));
+  const addedStage = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/stages$/);
+  if (addedStage) return send(response, 200, await addJobStage(QUEUE_ROOT, addedStage[1], { stage: body.stage, reason: body.reason }));
   const reviewedJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/(retry|resolve|cancel)$/);
   if (reviewedJob) {
     let job;

@@ -155,3 +155,27 @@ test('a split chosen in Nuevo trabajo is validated on entry, kept with the reque
   assert.equal(Object.hasOwn(plain.request.snapshot, 'launch'), false);
   assert.equal(Object.hasOwn((await routeTaskFromCoordinator(root, plain.request.id, 'analysis')).job, 'launch'), false);
 });
+
+test('the coordinator can route code without Diseño only with a reason, and the choice survives a replay', async t => {
+  const { root, project } = await fixture(t);
+  const checkout = path.join(root, 'workspaces', 'isolated'); await fs.mkdir(checkout, { recursive: true });
+  const { execFileSync } = await import('node:child_process');
+  execFileSync('git', ['init', '--initial-branch=develop'], { cwd: checkout, windowsHide: true, stdio: 'ignore' });
+  const configured = await updateProject(root, project.id, { checkout: 'workspaces/isolated', branch: 'develop', baseBranch: 'main', repository: 'fixture/demo' });
+  const input = { operationId: 'route-functional-0001', business: 'games', projectId: project.id, kind: 'analysis', title: 'Guardado', prompt: 'Corregir el orden de guardado', successCriteria: 'El guardado conserva el progreso' };
+  const submitted = await submitTaskToCoordinator(root, input, { notify: notice });
+  const confirmation = { projectId: project.id, checkout: configured.checkout, branch: configured.branch, baseBranch: configured.baseBranch, objective: input.prompt, successCriteria: input.successCriteria, productAcceptance: ['El guardado conserva el progreso.'] };
+  await assert.rejects(routeTaskFromCoordinator(root, submitted.request.id, 'code', { confirmation, route: { id: 'funcional' } }), /indica el motivo/);
+  await assert.rejects(routeTaskFromCoordinator(root, submitted.request.id, 'code', { confirmation, route: { id: 'sin-qa', reason: 'Es pequeño' } }), /route\.id/);
+  assert.equal((await loadState(root)).jobs.length, 0, 'an invalid route saves no decision and creates no job');
+  const route = { id: 'funcional', reason: 'Solo cambia el orden de escritura del guardado; no hay pantalla.' };
+  const routed = await routeTaskFromCoordinator(root, submitted.request.id, 'code', { confirmation, route });
+  assert.equal(routed.job.route.id, 'funcional');
+  assert.deepEqual(routed.job.workflow.steps.map(step => `${step.key}:${step.status}`), ['ux:skipped', 'developer:queued', 'qa:queued', 'reviewer:queued']);
+  assert.match(routed.job.workflow.steps[0].summary, /Cambio funcional sin interfaz.*no hay pantalla/);
+  assert.match(routed.job.prompt, /sin Diseño: Solo cambia el orden/);
+  // A replay with no route argument continues the saved decision instead of falling back to the full route.
+  const replay = await routeTaskFromCoordinator(root, submitted.request.id, 'code', { confirmation });
+  assert.equal(replay.existing, true); assert.equal((await loadState(root)).jobs.length, 1);
+  assert.equal((await loadDashboardState(root)).coordinatorRequests[0].route.pipelineRoute.id, 'funcional');
+});

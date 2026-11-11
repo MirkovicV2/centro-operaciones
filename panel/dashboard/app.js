@@ -396,6 +396,16 @@ function renderRun(data) {
   }
 
   main.append(el('h3', 'run-h3', 'Etapas'));
+  // The route and every stage it leaves out or added later, with the reason someone gave.
+  if (job.route) {
+    const route = el('div', 'run-route');
+    route.append(el('p', 'run-route-title', `Ruta: ${job.route.label}${job.route.reason ? ` · ${job.route.reason}` : ''}`));
+    const notes = el('ul', 'run-route-notes');
+    for (const item of job.route.omitted || []) notes.append(el('li', '', `${(job.workflow?.steps || []).find(step => step.key === item.stage)?.label || item.stage}: omitida. ${item.reason}`));
+    for (const item of job.route.added || []) notes.append(el('li', '', `${(job.workflow?.steps || []).find(step => step.key === item.stage)?.label || item.stage}: añadida por cambio de alcance. ${item.reason}`));
+    if (notes.children.length) route.append(notes);
+    main.append(route);
+  }
   const stages = el('ol', 'run-stages');
   for (const [index, step] of (job.workflow?.steps || []).filter(item => item.status !== 'skipped').entries()) {
     const li = el('li', `run-stage is-${step.status}`);
@@ -646,7 +656,8 @@ function renderJobs(data) {
         if (profileName !== step.profile) { const technical = el('details'); technical.dataset.panelDetail = `${card.id}-${step.key}-profile`; technical.append(el('summary', '', 'Identificador del perfil'), el('span', '', step.profile)); stage.append(technical); }
         if (step.authorization) stage.append(el('span', 'workflow-stage-profile', `Autorizado por ${step.authorization.coordinatorName}`));
         if (step.dispatchId) { const technical = el('details'); technical.dataset.panelDetail = `${card.id}-${step.key}-dispatch`; technical.append(el('summary', '', 'Detalle técnico'), el('span', 'workflow-stage-dispatch', `Dispatch: ${step.dispatchId} · ${step.dispatchStatus || 'sin estado confirmado'}`)); stage.append(technical); }
-        if (step.summary) {
+        if (step.routeOmitted) stage.append(el('span', 'workflow-stage-profile', step.summary));
+        else if (step.summary) {
           const details = document.createElement('details');
           details.dataset.panelDetail = `${card.id}-${step.key}-report`;
           details.append(el('summary', '', 'Ver informe de etapa'), el('pre', 'workflow-stage-report', step.summary));

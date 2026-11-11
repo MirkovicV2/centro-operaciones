@@ -428,3 +428,92 @@ test('an invalid data/pipeline.json stops the stage before any worker starts, wi
   assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded');
   assert.equal(simulator.started.length, 4);
 });
+
+// Routes (job-route.mjs): only Diseño can be left out, always with a visible reason.
+const functional = { id: 'funcional', reason: 'Solo cambia un cálculo del servidor; no hay interfaz que diseñar.' };
+
+test('a functional route runs Desarrollo, QA and Revisión, keeps Diseño as skipped with its reason and tells Desarrollo why', async t => {
+  const f = await fixture(t);
+  await assert.rejects(addJob(f.root, { ...f.spec, route: { id: 'funcional' } }), { code: 'job_route_invalid', message: /indica el motivo/ });
+  await assert.rejects(addJob(f.root, { ...f.spec, route: { id: 'solo-desarrollo', reason: 'Es trivial' } }), { code: 'job_route_invalid' });
+  await assert.rejects(addJob(f.root, { ...f.spec, id: 'analisis', kind: 'analysis', workspace: undefined, isolated: undefined, route: functional }), { code: 'job_route_invalid', message: /solo aplica a trabajos de código/ });
+  const added = await addJob(f.root, { ...f.spec, route: functional });
+  assert.deepEqual(added.workflow.steps.map(step => `${step.key}:${step.status}`), ['ux:skipped', 'developer:queued', 'qa:queued', 'reviewer:queued']);
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+  assert.deepEqual(simulator.started.map(item => item.stage), ['developer', 'qa', 'reviewer']);
+  assert.deepEqual(job.workflow.steps.map(step => step.status), ['skipped', 'succeeded', 'succeeded', 'succeeded']);
+  assert.equal(job.workflow.steps[0].routeOmitted, true);
+  assert.match(job.workflow.steps[0].summary, /Omitida por la ruta «Cambio funcional sin interfaz»: Solo cambia un cálculo/);
+  assert.match(simulator.started[0].input, /Sin etapa de Diseño\. Omitida por la ruta/);
+  assert.match(simulator.started[0].input, /consúltala al coordinador/);
+  assert.equal(simulator.started[0].args.includes('--deps'), false, 'Desarrollo has no predecessor Task to depend on');
+  assert.equal(job.result.stages.ux, null);
+});
+
+test('a job without a route is exactly the full route, and a documentation route checks documentation', async t => {
+  const f = await fixture(t);
+  const plain = await addJob(f.root, f.spec);
+  assert.equal(Object.hasOwn(plain, 'route'), false);
+  assert.deepEqual(plain.workflow.steps.map(step => step.status), ['queued', 'queued', 'queued', 'queued']);
+  const docs = await fixture(t); // the simulator answers for one fixed job id, so each job gets its own root
+  await addJob(docs.root, { ...docs.spec, route: { id: 'documentacion', reason: 'Solo se actualiza la guía de instalación.' } });
+  const simulator = fakeOrca(docs.workspace);
+  await runQueue(docs.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const documented = (await loadState(docs.root)).jobs[0]; assert.equal(documented.state, 'succeeded', JSON.stringify(documented.error));
+  assert.deepEqual(simulator.started.map(item => item.stage), ['developer', 'qa', 'reviewer']);
+  assert.match(simulator.started[0].input, /Edita la documentación que pide el encargo/);
+  assert.match(simulator.started[1].input, /Valida la documentación sin editarla/);
+  assert.match(simulator.started[2].input, /revisión independiente/, 'Revisión is the same in every route');
+});
+
+test('a scope change adds Diseño before Desarrollo has an assignment, records who and why, and is refused afterwards', async t => {
+  const { addJobStage } = await import('../queue.mjs');
+  const f = await fixture(t);
+  await addJob(f.root, { ...f.spec, route: functional });
+  await assert.rejects(addJobStage(f.root, f.spec.id, { stage: 'qa', reason: 'Añadir QA' }), { code: 'job_route_invalid', message: /QA y Revisión siempre/ });
+  await assert.rejects(addJobStage(f.root, f.spec.id, { stage: 'ux' }), /por qué cambia el alcance/);
+  const changed = await addJobStage(f.root, f.spec.id, { stage: 'ux', reason: 'Ahora también cambia el formulario de alta.' });
+  assert.deepEqual(changed.workflow.steps.map(step => `${step.key}:${step.status}`), ['ux:queued', 'developer:queued', 'qa:queued', 'reviewer:queued']);
+  assert.deepEqual(changed.route.omitted, []);
+  assert.equal(changed.route.added[0].reason, 'Ahora también cambia el formulario de alta.');
+  assert.equal(changed.workflow.steps[0].addedByScopeChange.stage, 'ux');
+  await assert.rejects(addJobStage(f.root, f.spec.id, { stage: 'ux', reason: 'Otra vez el mismo cambio' }), { code: 'job_route_stage_present' });
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  assert.deepEqual(simulator.started.map(item => item.stage), ['ux', 'developer', 'qa', 'reviewer']);
+  assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded');
+  // Once Desarrollo has been assigned, the route is closed.
+  const g = await fixture(t);
+  await addJob(g.root, { ...g.spec, route: functional });
+  const failing = fakeOrca(g.workspace);
+  const command = async args => {
+    const value = await failing.command(args);
+    if (failing.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (failing.started.length === 1 && args[1] === 'inbox') { const payload = JSON.parse(value.messages[0].payload); payload.outcome = 'failed'; value.messages[0].payload = JSON.stringify(payload); }
+    return value;
+  };
+  await runQueue(g.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  assert.equal((await loadState(g.root)).jobs[0].state, 'needs_attention');
+  await assert.rejects(addJobStage(g.root, g.spec.id, { stage: 'ux', reason: 'Tarde para añadir diseño' }), { code: 'job_route_locked' });
+  // A retry of that job keeps Diseño omitted and repeats only the failed Desarrollo Task.
+  await retryJob(g.root, g.spec.id, { confirm: true });
+  await assert.rejects(addJobStage(g.root, g.spec.id, { stage: 'ux', reason: 'Tarde para añadir diseño' }), { code: 'job_route_locked' }, 'a native retry reuses a brief written without a design');
+  await runQueue(g.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const retried = (await loadState(g.root)).jobs[0];
+  assert.equal(retried.state, 'succeeded', JSON.stringify(retried.error));
+  assert.deepEqual(retried.workflow.steps.map(step => step.status), ['skipped', 'succeeded', 'succeeded', 'succeeded']);
+  assert.deepEqual(failing.started.map(item => item.stage), ['developer', 'developer', 'qa', 'reviewer']);
+});
+
+test('the integration proof of a route without Diseño covers its real stages and still demands every one of them', async () => {
+  const { integrationValidationSteps } = await import('../queue.mjs');
+  const { validateJobRoute } = await import('../job-route.mjs');
+  const step = key => ({ key, status: 'succeeded', runId: 'run_fixture1', taskId: `task_${key}0001`, dispatchId: `ctx_${key}0001`, taskInputAttempt: 1, artifact: { sha256: 'a'.repeat(64) } });
+  const steps = [{ key: 'ux', status: 'skipped', routeOmitted: true, summary: 'Omitida' }, step('developer'), step('qa'), step('reviewer')];
+  const job = { route: validateJobRoute(functional, 'code'), workflow: { runId: 'run_fixture1', steps } };
+  assert.deepEqual(integrationValidationSteps(job).map(item => item.stage), ['developer', 'qa', 'reviewer']);
+  assert.throws(() => integrationValidationSteps({ ...job, route: undefined }), { code: 'integration_recovery_invalid' }, 'a skipped Diseño is only acceptable when the route says so');
+  assert.throws(() => integrationValidationSteps({ ...job, workflow: { ...job.workflow, steps: steps.filter(item => item.key !== 'qa') } }), { code: 'integration_recovery_invalid' });
+});

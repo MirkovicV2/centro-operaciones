@@ -1,3 +1,4 @@
+import { validateJobRoute } from '../../job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -135,6 +136,8 @@ async function sendOnce(root, id, kind, projectId, confirmation) {
     ...explicitContract,
     ...(coordinatorRequest && coordinatorJobLink(coordinatorRequest, project.id) ? { coordination: coordinatorJobLink(coordinatorRequest, project.id) } : {}),
     ...(kind === 'code' ? { workspace: destination.workspace, branch: destination.branch, destination, isolated: true } : {}),
+    // The coordinator's choice of stages; a receipt saved earlier keeps its exact spec.
+    ...(savedReceipt ? (savedReceipt.spec.route ? { route: savedReceipt.spec.route } : {}) : kind === 'code' && confirmation.pipelineRoute ? { route: validateJobRoute(confirmation.pipelineRoute, kind) } : {}),
   };
   // Legacy recovery uses addJob with no auto receipt; activation cannot promote it.
   const submission = legacyPending ? { job: await addJob(root, submissionSpec).catch(error => { if (error.code === 'locked') return null; throw error; }) }
@@ -250,6 +253,7 @@ export function routeCoordinatorIdea(root, requestId, kind, confirmation = {}) {
       baseBranch: confirmation.baseBranch || '', objective: String(confirmation.objective || '').trim(),
       successCriteria: String(confirmation.successCriteria || '').trim(), version: request.ideaVersion,
       ...(Object.hasOwn(confirmation, 'productAcceptance') ? { productAcceptance: structuredClone(confirmation.productAcceptance) } : {}),
+      ...(confirmation.pipelineRoute ? { pipelineRoute: validateJobRoute(confirmation.pipelineRoute, kind) } : {}),
     } : { version: request.ideaVersion };
     await changeDashboardState(root, state => {
       const current = state.coordinatorRequests.find(item => item.id === requestId);
