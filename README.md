@@ -14,9 +14,12 @@ El código es el mismo en Windows y Ubuntu; no se versiona nada personal (cola, 
 | Descargar | `git clone https://github.com/MirkovicV2/centro-operaciones.git` | igual |
 | Abrir el panel | doble clic en `ABRIR_PANEL.cmd` | `CENTRO_ORCA_AGENT=claude npm start` |
 | Agente de los trabajadores | Codex por defecto; para Claude, define la variable de entorno de usuario `CENTRO_ORCA_AGENT=claude` (`setx CENTRO_ORCA_AGENT claude`) y reabre el panel | `CENTRO_ORCA_AGENT=claude` o `codex` al arrancar |
+| Configuración común del equipo | `centro.cmd instalar` | `node cli.mjs instalar` |
 | Pruebas | `PROBAR.cmd` | `npm test` |
 | Reiniciar el panel con seguridad | `REINICIAR_PANEL.cmd` | `panel/reiniciar-panel.sh` |
 | Skills y referencias | `DESCARGAR_SKILLS.cmd`, `IMPORTAR_REFERENCIAS.cmd` | `node skills-descargar.mjs`, `node references.mjs importar <zip> --para <ámbito>` |
+
+`instalar` crea en `data/` el reparto de modelos por etapa del equipo y la identidad de este PC (sin sobrescribir nada); qué es común y qué es local está en [`docs/COMUN_Y_LOCAL.md`](docs/COMUN_Y_LOCAL.md).
 
 Después abre <http://127.0.0.1:4187>, conecta tu bóveda en **Conocimiento** y registra tus proyectos. Para que los trabajos corran en Orca, vincula los coordinadores como explica la [guía de coordinación](docs/COORDINATOR_OPERATIONS.md) (en Ubuntu, [docs/UBUNTU_CLAUDE.md](docs/UBUNTU_CLAUDE.md)). Sin Orca puedes usar el panel, guardar ideas y conectar Obsidian.
 

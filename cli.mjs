@@ -14,12 +14,15 @@ import { readQuota } from './quota.mjs';
 import { skillsStatus, acceptSkill } from './skills-registry.mjs';
 import { readSharedMemory, proposeLesson, listProposals, acceptLesson } from './project-knowledge.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from './orca-provider.mjs';
+import { installLocalConfig } from './instalacion.mjs';
 import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HELP = `Centro de operaciones local — videojuegos (games) y agencia (agency)
 
 node cli.mjs status
+node cli.mjs instalar [--sin-pipeline]
+  Crea en data/ lo que falte de la configuración compartida del equipo (reparto de modelos por etapa e identidad de este PC). No sobrescribe nada.
 node cli.mjs add --business games|agency --kind analysis|code --title "Título" --prompt-file "instruccion.txt" [--id identificador]
   [--provider orca|auto|api|codex] [--max-attempts 1-5] [--timeout-seconds SEGUNDOS] [--max-usd 0.10]
   Intentos por defecto: Orca 5; otros proveedores 2. Orca no tiene límite de duración por defecto.
@@ -63,7 +66,7 @@ No se ejecuta nada en segundo plano. El presupuesto API inicial es 0 USD.
 Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo del proveedor.
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
-const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help']);
+const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help', 'sin-pipeline']);
 const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
 function parse(args) {
   const command = args.shift() ?? 'help';
@@ -214,6 +217,13 @@ async function main() {
       catch { throw new QueueError('El manifiesto de decisión no contiene JSON válido.', 'reconciliation_invalid'); }
       result = await reconcileCodeJob(ROOT, o.id, { decision, confirm: !!o['confirm-reviewed'], verifyDispatch: verifyOrcaDispatch, verifyDestination: verifyReconciliationDestination });
       break;
+    }
+    case 'instalar': {
+      const report = await installLocalConfig(ROOT, { pipeline: !o['sin-pipeline'] });
+      for (const file of report.created) console.log(`creado: ${file}`);
+      for (const file of report.kept) console.log(`ya existía (sin tocar): ${file}`);
+      for (const text of report.notes) console.log(`aviso: ${text}`);
+      return;
     }
     case 'preview': {
       try {

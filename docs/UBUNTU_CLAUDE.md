@@ -114,6 +114,10 @@ En Ubuntu se usan los mismos programas de Node; no hace falta instalar nada más
 
 Los archivos de `skills/**` se guardan siempre con saltos de línea LF (`.gitattributes`), porque el registro `skills/registry.json` guarda la huella SHA-256 de cada byte. Si editas una skill en Windows, guárdala en LF y registra la nueva huella con `node cli.mjs skills-accept --id <skill>` antes de subirla.
 
+## Configuración común del equipo
+
+Después de descargar `main` y antes de abrir el panel, ejecuta `node cli.mjs instalar`: crea `data/pipeline.json` (reparto de modelos por etapa del equipo) y `data/equipo.json` (este PC es `david-ubuntu`) sin sobrescribir nada. Lo que es común y lo que es local: [COMUN_Y_LOCAL.md](COMUN_Y_LOCAL.md).
+
 ## Documentación del flujo
 
 - [Contratos de encargo y entrega v1](ORCA_CONTRACTS.md)
