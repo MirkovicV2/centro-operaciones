@@ -60,6 +60,18 @@ export function pipelineMetrics(jobs = []) {
   };
   let corrections = 0, findings = 0, humanAnswers = 0, quotaStops = 0;
   const acceptance = [];
+  // Routes are on trial (docs/RUTAS.md): per route, the signals of a misclassified job, and which jobs to look at.
+  const routes = {};
+  for (const job of jobs.filter(item => item.kind === 'code' && item.provider === 'orca')) {
+    const id = job.route?.id ?? 'interfaz';
+    const route = routes[id] ??= { jobs: 0, returnsToDevelopment: 0, blockingFindings: 0, designAddedLater: 0, toReview: [] };
+    const returns = (job.livenessRecoveryHistory ?? []).filter(item => item.qualityAction?.type === 'correction').length;
+    const blocking = (job.workflow?.steps ?? []).filter(step => ['qa', 'reviewer'].includes(step.key)).reduce((sum, step) => sum + (step.delivery?.findings ?? []).filter(item => item.severity === 'blocking').length, 0);
+    const added = (job.route?.added ?? []).length;
+    route.jobs++; route.returnsToDevelopment += returns; route.blockingFindings += blocking; route.designAddedLater += added;
+    // A job that skipped Design and then needed corrections, had blocking findings or got Design back is worth a look.
+    if (id !== 'interfaz' && (returns || blocking || added)) route.toReview.push(job.id);
+  }
   for (const job of jobs) {
     for (const workflow of job.workflowHistory ?? []) for (const step of workflow.steps ?? []) tally(job, step, false);
     for (const step of job.workflow?.steps ?? []) { tally(job, step, true); findings += (step.delivery?.findings ?? []).filter(item => item.severity === 'blocking').length; }
@@ -70,7 +82,7 @@ export function pipelineMetrics(jobs = []) {
     if (Number.isFinite(elapsed) && elapsed >= 0) acceptance.push(elapsed);
   }
   acceptance.sort((a, b) => a - b);
-  return { stages: [...launches.values()].sort((a, b) => a.stage.localeCompare(b.stage) || a.agent.localeCompare(b.agent)),
+  return { stages: [...launches.values()].sort((a, b) => a.stage.localeCompare(b.stage) || a.agent.localeCompare(b.agent)), routes,
     returnsToDevelopment: corrections, blockingFindings: findings, humanAnswers, quotaStops,
     timeToAcceptanceMs: { jobs: acceptance.length, median: acceptance.length ? acceptance[Math.floor((acceptance.length - 1) / 2)] : null, max: acceptance.at(-1) ?? null } };
 }

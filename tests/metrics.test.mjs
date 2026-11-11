@@ -153,5 +153,20 @@ test('pipeline metrics count what each role and model produced, returns, defects
   assert.deepEqual([row('qa', 'codex').launched, row('qa', 'codex').succeeded, row('qa', 'codex').blocked], [2, 1, 1]);
   assert.deepEqual([report.returnsToDevelopment, report.blockingFindings, report.humanAnswers, report.quotaStops], [1, 1, 1, 1], 'blocking findings are those of the current stages');
   assert.deepEqual(report.timeToAcceptanceMs, { jobs: 2, median: 600_000, max: 2_400_000 });
-  assert.deepEqual(pipelineMetrics([]), { stages: [], returnsToDevelopment: 0, blockingFindings: 0, humanAnswers: 0, quotaStops: 0, timeToAcceptanceMs: { jobs: 0, median: null, max: null } });
+  assert.deepEqual(pipelineMetrics([]), { stages: [], routes: {}, returnsToDevelopment: 0, blockingFindings: 0, humanAnswers: 0, quotaStops: 0, timeToAcceptanceMs: { jobs: 0, median: null, max: null } });
+});
+
+test('route metrics flag jobs that skipped Design and then needed corrections, had blocking findings or got Design back', async () => {
+  const { pipelineMetrics } = await import('../metrics.mjs');
+  const job = (id, route, extra = {}) => ({ id, kind: 'code', provider: 'orca', state: 'succeeded', ...(route ? { route: { id: route, ...extra.route } } : {}), workflow: { steps: extra.steps ?? [] }, livenessRecoveryHistory: extra.history ?? [] });
+  const blocking = [{ key: 'qa', delivery: { findings: [{ severity: 'blocking' }] } }];
+  const report = pipelineMetrics([
+    job('limpio', 'funcional'), job('corregido', 'funcional', { history: [{ qualityAction: { type: 'correction' } }] }),
+    job('hallazgo', 'documentacion', { steps: blocking }), job('ampliado', 'funcional', { route: { added: [{ stage: 'ux' }] } }),
+    job('completo', null, { steps: blocking }), { id: 'analisis', kind: 'analysis', provider: 'orca' },
+  ]).routes;
+  assert.deepEqual(report.funcional, { jobs: 3, returnsToDevelopment: 1, blockingFindings: 0, designAddedLater: 1, toReview: ['corregido', 'ampliado'] });
+  assert.deepEqual(report.documentacion.toReview, ['hallazgo']);
+  assert.deepEqual([report.interfaz.jobs, report.interfaz.blockingFindings, report.interfaz.toReview], [1, 1, []], 'the full route is the baseline, never flagged');
+  assert.equal(report.analisis, undefined);
 });

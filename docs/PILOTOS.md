@@ -35,6 +35,8 @@ dejar que el coordinador elija la ruta.
 - `humanAnswers`: intervenciones humanas (respuestas y decisiones);
 - `quotaStops`: paradas por cuota;
 - `timeToAcceptanceMs`: tiempo desde la admisión hasta la entrega.
+- `routes`: por ruta, encargos, devoluciones, defectos bloqueantes, Diseño añadido después y `toReview`, los encargos
+  sin Diseño que conviene revisar (periodo de prueba de `docs/RUTAS.md`).
 
 El consumo observable es el que muestre la pantalla de uso de cada proveedor antes y después: el Centro no recibe
 tokens ni saldo. Anótalo junto al resultado.
