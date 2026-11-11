@@ -12,7 +12,7 @@ test('the permissions template allows what a worker needs and denies effects, ot
   const { allow, deny, defaultMode } = example.permissions;
   assert.equal(defaultMode, 'acceptEdits');
   for (const rule of ['Read(//<RAIZ>/data/dispatch-specs/**)', 'Read(//<RAIZ>/data/stage-reports/**)', 'Bash(sha256sum:*)', 'Bash(npm test:*)', 'Bash(git status:*)', 'Bash(git diff:*)',
-    'Bash(curl -sS -X POST http://127.0.0.1:<PUERTO>/api/jobs/*/context *)', 'Bash(<ORCA_CLI> orchestration send *--type worker_done*)', 'Bash(<ORCA_CLI> orchestration ask *)', 'Bash(<ORCA_CLI> orchestration dispatch-show *)']) {
+    'Bash(curl -sS -X POST http://127.0.0.1:<PUERTO>/api/jobs/*/context *)', 'Bash(<ORCA_CLI> orchestration send *--type worker_done*)', 'Bash(<ORCA_CLI> orchestration ask *)', 'Bash(<ORCA_CLI> orchestration dispatch-show *)', 'Bash(orca orchestration check:*)', 'Bash(<ORCA_CLI> orchestration check:*)']) {
     assert.ok(allow.includes(rule), rule);
   }
   for (const rule of ['Bash(git push:*)', 'Bash(git commit:*)', 'Bash(gh:*)', 'Bash(sudo:*)', 'Bash(rm:*)', 'Bash(curl https://*)', 'Bash(curl http://localhost*)', 'Bash(<ORCA_CLI> orchestration worker-start:*)', 'Edit(//<RAIZ>/data/**)']) {

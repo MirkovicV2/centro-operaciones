@@ -107,3 +107,5 @@ La integración lee campos de PR (`baseRefOid`, `headRepositoryOwner`, `mergeCom
 - [Conectar y organizar Obsidian](OBSIDIAN.md)
 - [Operación de coordinación](COORDINATOR_OPERATIONS.md)
 - [Preparación de un proyecto nuevo](COORDINATOR_PREPARATION.md)
+
+En Windows, los marcadores de rutas dentro de `Read` y `Edit` deben usar el formato POSIX de Claude: `C:\Users\dani` se convierte en `/c/Users/dani`, y la regla absoluta empieza por `//c/Users/dani/**`. No uses `//C:/Users/...`: no coincide con las rutas normalizadas. Referencia: https://code.claude.com/docs/en/permissions#how-path-patterns-match. Conserva las rutas nativas del ejecutable en las reglas Bash.

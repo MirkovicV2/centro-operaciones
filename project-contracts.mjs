@@ -74,7 +74,7 @@ export async function unreadableReferences(contracts, { workspace, root, home = 
   for (const contract of contracts) for (const match of contract.text.matchAll(/`((?:~|\/|[A-Za-z]:[\\/])[^`\r\n]{2,300}\.[A-Za-z0-9]{1,8})`/g)) cited.add(match[1].trim());
   if (!cited.size) return [];
   const allowed = [path.resolve(workspace), path.resolve(root, 'data', 'dispatch-specs'), path.resolve(root, 'data', 'stage-reports')];
-  const absoluteReadPath = value => path.resolve(process.platform === 'win32' ? value.replace(/^\/+(?=[A-Za-z]:[\\/])/, '') : value);
+  const absoluteReadPath = value => path.resolve(process.platform === 'win32' ? value.replace(/^\/([A-Za-z])\//, '$1:/').replace(/^\/+(?=[A-Za-z]:[\\/])/, '') : value);
   try {
     const settings = JSON.parse(await fs.readFile(path.join(workspace, '.claude', 'settings.local.json'), 'utf8'));
     for (const rule of settings?.permissions?.allow ?? []) {
@@ -84,7 +84,10 @@ export async function unreadableReferences(contracts, { workspace, root, home = 
       if (target) allowed.push(absoluteReadPath(target.replace(/\/?\*\*.*$/, '').replace(/\*.*$/, '')));
     }
   } catch { /* no settings or unreadable: only the built-in locations count */ }
-  const inside = (file, base) => file === base || file.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
+  const inside = (file, base) => {
+    if (process.platform === 'win32') { file = file.toLowerCase(); base = base.toLowerCase(); }
+    return file === base || file.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
+  };
   return [...cited].filter(reference => {
     const file = path.resolve(reference.startsWith('~/') ? path.join(home, reference.slice(2)) : reference);
     return !allowed.some(base => inside(file, base));
