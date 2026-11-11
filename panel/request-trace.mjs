@@ -360,7 +360,8 @@ function projectTrace(request, inputs, prepared) {
     steps.push({ key: 'response', label: 'Respuesta del coordinador', status: 'succeeded', summary: text(response.text), agent: owner, at: date(response.at) });
     event(`${request.id}:response:${response.responseId}`, response.at, 'response', 'Consulta respondida', response.text, 'response');
   }
-  if (request.status === 'withdrawn') event(`${request.id}:withdrawn`, request.withdrawnAt, 'request', 'Solicitud retirada', 'El historial se conserva.');
+  if (request.status === 'withdrawn') event(`${request.id}:withdrawn`, request.withdrawnAt, 'request', request.discarded ? 'Solicitud descartada' : 'Solicitud retirada',
+    request.discarded ? `Cerrada en el panel${request.discardedWhileUncertain ? ' con la entrega al coordinador sin confirmar: si ya la recibió, ese aviso no se retira' : ''}. El historial se conserva.` : 'El historial se conserva.');
 
   let status = 'waiting_coordinator', currentStage = 'coordination', nextAction = 'El coordinador debe responder o decidir la ruta.';
   const answerNotices = list(request.answerNotices).map(item => ({ id: item.id, roundId: item.roundId,
@@ -369,7 +370,7 @@ function projectTrace(request, inputs, prepared) {
   const pendingAnswers = answerNotices.some(item => item.notification.status === 'pending');
   const waiting = relatedQuestions.filter(question => question.status === 'pending' && question.required !== false);
   const primaryReceipt = receipts.find(receipt => receipt.jobId === primary?.id);
-  if (request.status === 'withdrawn') { status = 'withdrawn'; nextAction = 'No hay acciones pendientes en esta solicitud.'; }
+  if (request.status === 'withdrawn') { status = 'withdrawn'; nextAction = request.discarded ? 'Petición descartada en el panel. Puedes volver a enviarla desde Ideas y preguntas.' : 'No hay acciones pendientes en esta solicitud.'; }
   else if (request.status === 'answered' && response) { status = 'answered'; currentStage = 'response'; nextAction = 'Consulta respondida. Puedes abrir una nueva petición si necesitas continuar.'; }
   else if (uncertainAnswers) { status = 'blocked'; currentStage = 'decisions'; nextAction = 'Consulta la entrega de respuestas al coordinador; el aviso no está confirmado. Las decisiones siguen guardadas.'; }
   else if (waiting.length) { status = 'waiting_user'; currentStage = 'decisions'; nextAction = `${waiting.length} decisión${waiting.length === 1 ? '' : 'es'} pendiente${waiting.length === 1 ? '' : 's'} de tu respuesta.`; }
@@ -405,7 +406,7 @@ function projectTrace(request, inputs, prepared) {
   const sortedEvents = [...events.values()].sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')) || a.id.localeCompare(b.id));
   if (currentStage === 'queue') steps.push({ key: 'queue', label: 'Entrada en la cola', status: status === 'blocked' ? 'blocked' : 'queued', summary: nextAction, agent: owner, at: date(receipts.at(-1)?.confirmedAt) });
   return { requestId: request.id, kind: request.kind || null, intent: request.intent || 'task', title: text(request.snapshot?.title || request.snapshot?.text || 'Solicitud', 160), business: request.business,
-    projectId, projectName: primary?.projectName || request.projectName || request.snapshot?.projectName || '', status, statusLabel: statusLabels[status], currentStage, nextAction, responsible: owner,
+    projectId, projectName: primary?.projectName || request.projectName || request.snapshot?.projectName || '', status, statusLabel: request.discarded && status === 'withdrawn' ? 'Descartada' : statusLabels[status], currentStage, nextAction, responsible: owner,
     steps, reports: linked.map(job => jobReport(job, integrationFor(job, automation, receipts))), events: sortedEvents.slice(-500), questions: relatedQuestions, answerNotices, response, knowledge: relatedKnowledge,
     ids: { requestId: request.id, ideaId: request.ideaId || null, jobIds: [...jobIds], receiptIds: [...receiptIds], runId: notice.runId || null, eventsTruncated: sortedEvents.length > 500 } };
 }

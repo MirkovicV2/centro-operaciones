@@ -224,14 +224,17 @@ export function respondToCoordinatorRequest(root, requestId, { responseId, text,
   });
 }
 
-export function withdrawCoordinatorRequest(root, requestId) {
+// «Descartar» cierra en el panel una solicitud atascada aunque su entrega sea incierta (el aviso pudo llegar al coordinador y no se
+// puede retirar de él). Solo sin trabajo ni recibo; deja constancia de que se cerró con la entrega sin confirmar.
+export function withdrawCoordinatorRequest(root, requestId, { discard = false } = {}) {
   return withInboxLock(root, `route:${requestId}`, () => withInboxLock(root, `notice:${requestId}`, async () => {
     const request = await readCoordinatorRequest(root, requestId);
     if (request.status === 'withdrawn') return request;
-    if (!['pending', 'needs_attention'].includes(request.status) || request.jobId || request.receiptId
-      || ['sending', 'unknown', 'needs_attention'].includes(request.notification?.status)
-      || request.answerNotices?.some(item => ['sending', 'unknown', 'needs_attention'].includes(item.notification?.status))) {
-      throw new Error('La solicitud tiene una ruta o entrega incierta; revisa su estado antes de retirarla.');
+    const uncertain = ['sending', 'unknown', 'needs_attention'].includes(request.notification?.status)
+      || request.answerNotices?.some(item => ['sending', 'unknown', 'needs_attention'].includes(item.notification?.status));
+    if (!['pending', 'needs_attention'].includes(request.status) || request.jobId || request.receiptId || (uncertain && !discard)) {
+      throw new Error(discard ? 'La solicitud ya tiene un trabajo, una ruta decidida o una respuesta; no se puede descartar desde aquí.'
+        : 'La solicitud tiene una ruta o entrega incierta; revisa su estado antes de retirarla.');
     }
     const queue = await loadQueue(root);
     const automatic = await readAutoRun(root);
@@ -243,6 +246,7 @@ export function withdrawCoordinatorRequest(root, requestId) {
     await changeDashboardState(root, state => {
       const current = state.coordinatorRequests.find(item => item.id === requestId);
       current.status = 'withdrawn'; current.withdrawnAt = now(); current.updatedAt = now();
+      if (discard) { current.discarded = true; current.discardedAt = current.withdrawnAt; current.discardedWhileUncertain = Boolean(uncertain); }
       for (const question of state.questions.filter(item => item.coordinatorRequestId === requestId && item.status === 'pending')) question.status = 'withdrawn';
     });
     return readCoordinatorRequest(root, requestId);

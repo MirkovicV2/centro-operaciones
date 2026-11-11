@@ -66,7 +66,7 @@ try {
     if (request.method() === 'POST' || /^\/api\/coordinator\/requests\/[a-zA-Z0-9_-]+$/.test(url.pathname)) {
       assert.ok(request.method() === 'GET' || url.pathname === '/api/jobs'
         || /^\/api\/questions\/[a-zA-Z0-9_-]+\/answer$/.test(url.pathname)
-        || /^\/api\/coordinator\/requests\/[a-zA-Z0-9_-]+\/(questions|route|notify|withdraw)$/.test(url.pathname), `Unexpected mutation: ${url.pathname}`);
+        || /^\/api\/coordinator\/requests\/[a-zA-Z0-9_-]+\/(questions|route|notify|withdraw|discard)$/.test(url.pathname), `Unexpected mutation: ${url.pathname}`);
       const body = request.method() === 'POST' ? request.postDataJSON() : undefined;
       if (request.method() === 'POST') posts.push({ route: url.pathname, body });
       const response = {};

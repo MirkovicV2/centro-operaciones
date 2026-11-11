@@ -483,6 +483,11 @@ async function handleApi(request, response, url, tailscale = null) {
   }
   const coordinatorWithdraw = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/withdraw$/);
   if (coordinatorWithdraw) return send(response, 200, await withdrawCoordinatorRequest(QUEUE_ROOT, coordinatorWithdraw[1]));
+  const coordinatorDiscard = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/discard$/);
+  if (coordinatorDiscard) {
+    if (body.confirm !== true) return send(response, 400, { error: 'Confirma explícitamente el descarte de esta petición.' });
+    return send(response, 200, await withdrawCoordinatorRequest(QUEUE_ROOT, coordinatorDiscard[1], { discard: true }));
+  }
   const ideaSend = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/send$/);
   if (ideaSend) return send(response, 409, { error: 'El panel ya no inicia agentes directamente desde Ideas. Envía la idea al coordinador para que decida la ruta.' });
   const resumeDispatch = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/resume$/);
