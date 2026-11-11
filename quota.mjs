@@ -100,7 +100,10 @@ export function quotaStatus(quota, agent, now = Date.now()) {
   const observedAt = provider.observadoEn ? Date.parse(provider.observadoEn) : null;
   const resetAt = provider.reiniciaEn ? Date.parse(provider.reiniciaEn) : null;
   const fresh = observedAt !== null && now - observedAt <= quota.caducidadObservacionHoras * 3_600_000 && !(resetAt !== null && resetAt <= now && resetAt > observedAt);
-  if (!fresh || provider.usadoPorcentaje === undefined) return { ...base, state: 'incierta',
+  // Usage only grows until the reset: an observation at or past the reserve line keeps holding until then, however old it is.
+  // Without a known reset it ages like any other observation, so a forgotten note cannot block a provider forever.
+  const held = observedAt !== null && provider.usadoPorcentaje >= limit && resetAt !== null && resetAt > now && resetAt > observedAt;
+  if ((!fresh && !held) || provider.usadoPorcentaje === undefined) return { ...base, state: 'incierta',
     reason: provider.usadoPorcentaje === undefined || observedAt === null ? `${agent}: no hay ninguna observación de uso. El proveedor no permite consultar el saldo desde el Centro.`
       : resetAt !== null && resetAt <= now && resetAt > observedAt ? `${agent}: la cuota se reinició después de la última observación; el uso actual no se conoce.`
       : `${agent}: la última observación (${provider.observadoEn}) tiene más de ${quota.caducidadObservacionHoras} h.` };

@@ -26,7 +26,7 @@ Explícita, en el mismo archivo:
 | --- | --- | --- |
 | `reservaPersonalPorcentaje` | 10 | Parte de cada suscripción que el Centro no gasta. No admite menos de 10. |
 | `avisoPorcentaje` | 75 | Uso desde el que el panel avisa. |
-| `caducidadObservacionHoras` | 6 | Pasado este tiempo, una observación deja de contar. |
+| `caducidadObservacionHoras` | 6 | Pasado este tiempo, una observación deja de contar. Excepción: si dejó al proveedor en la reserva y se conoce su reinicio, sigue valiendo hasta ese reinicio (el uso solo puede subir). |
 | `sinDatos` | `admitir` | `admitir` lanza y deja el aviso en la etapa; `esperar` no lanza sin observación reciente. |
 | `alAgotar` | `esperar` | `esperar`, o `sustituir` por el proveedor de `sustituciones`. |
 

@@ -37,6 +37,8 @@ test('the shipped mixed example puts Claude on Diseño and Desarrollo and Codex 
     assert.deepEqual(flags(resolve('revisor', { business })), ['codex', 'gpt-6.1-sol', 'high']);
   }
   assert.deepEqual(resolve('desarrollador', { business: 'games' }).origin, { agent: 'general', model: 'general', effort: 'empresa' });
+  // A layer that pins the agent the Centro already defaults to is still what decides it (seen in the first real installation).
+  assert.equal(resolveStageLaunch({ roleName: 'ux', business: 'agency', levels, pipeline: mixed, defaultAgent: 'claude', fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles }).origin.agent, 'general');
   assert.deepEqual(pipelineAgents(mixed, 'codex').sort(), ['claude', 'codex']);
   assert.deepEqual(pipelineAgents(EMPTY_PIPELINE, 'codex'), ['codex']);
 });

@@ -24,6 +24,12 @@ test('the personal reserve is at least 10 % and a status always says how it is k
   assert.match(quotaStatus(quota({ claude: { usadoPorcentaje: 10, observadoEn: at(7) } }), 'claude', now).reason, /más de 6 h/);
   const afterReset = quotaStatus(quota({ claude: { usadoPorcentaje: 95, observadoEn: at(3), reiniciaEn: at(1) } }), 'claude', now);
   assert.equal(afterReset.state, 'incierta'); assert.match(afterReset.reason, /se reinició después/);
+  // In the reserve with a known reset: the note keeps holding after it ages (usage only grows until then), and stops at the reset.
+  const heldQuota = quota({ codex: { autenticacion: 'suscripcion', usadoPorcentaje: 93, observadoEn: at(0), reiniciaEn: at(-48) } });
+  assert.equal(quotaStatus(heldQuota, 'codex', now + 10 * 3_600_000).state, 'reserva', 'an aged reserve observation must not reopen the provider');
+  assert.equal(quotaStatus(heldQuota, 'codex', now + 49 * 3_600_000).state, 'incierta');
+  assert.equal(quotaStatus(quota({ codex: { usadoPorcentaje: 93, observadoEn: at(7) } }), 'codex', now).state, 'incierta', 'without a reset it ages like any other note');
+  assert.equal(quotaStatus(quota({ codex: { usadoPorcentaje: 50, observadoEn: at(7), reiniciaEn: at(-48) } }), 'codex', now).state, 'incierta', 'below the line an old note is still unknown');
   // Exhausted until a moment; once it passes the usage is unknown again, not "available".
   const exhausted = quota({ claude: { agotadaHasta: at(-2), inferida: true } });
   assert.equal(quotaStatus(exhausted, 'claude', now).state, 'agotada'); assert.match(quotaStatus(exhausted, 'claude', now).reason, /sin confirmar/);

@@ -183,7 +183,7 @@ export function resolveStageLaunch({ roleName, business = null, projectId = null
     if (entry.agent !== undefined && entry.agent !== state.agent) {
       Object.assign(state, { agent: entry.agent, model: undefined, effort: undefined });
       Object.assign(origin, { agent: name, model: name, effort: name });
-    }
+    } else if (entry.agent !== undefined) origin.agent = name; // pinned by this layer, even when it matches what was inherited
     if (entry.level !== undefined) {
       Object.assign(state, { level: entry.level, model: undefined, effort: undefined });
       Object.assign(origin, { model: name, effort: name });
