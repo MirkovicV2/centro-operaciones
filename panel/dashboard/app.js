@@ -288,7 +288,7 @@ function attentionItems(data) {
       action: ['Responder en Ideas y preguntas', () => { location.hash = '#ideas'; }], evidence: [],
     });
   }
-  for (const request of (data.coordinatorRequests || []).filter(item => ['unknown', 'needs_attention'].includes(item.notification?.status))) {
+  for (const request of (data.coordinatorRequests || []).filter(item => !['withdrawn', 'answered'].includes(item.status) && ['unknown', 'needs_attention'].includes(item.notification?.status))) {
     items.push({
       id: `request-${request.id}`, kind: 'request', group: 'Avisos al coordinador', label: 'Aviso', tone: 'attention',
       title: request.snapshot?.title || 'Solicitud del panel', context: request.projectName || request.snapshot?.projectName || 'Sin proyecto', at: request.createdAt,
@@ -1364,7 +1364,8 @@ function renderIdeas(data) {
     card.append(el('p', 'idea-preview', idea.text), full, el('small', '', idea.notePath ? 'Captura original en Obsidian; versión actual local.' : `Guardada localmente · ${idea.noteError || 'Obsidian pendiente'}`));
     if (busy) card.append(el('p', '', 'Envío pendiente, activo o incierto: edición y retirada bloqueadas.'));
     if (coordinatorRequest) {
-      const status = coordinatorRequest.status === 'routed' ? `Enrutada por el coordinador · ${coordinatorRequest.route?.kind === 'code' ? 'Desarrollo' : 'Planificador'}${coordinatorRequest.jobId ? ` · ${coordinatorRequest.jobId}` : ''}`
+      const status = coordinatorRequest.status === 'withdrawn' ? (coordinatorRequest.discarded ? 'Petición descartada en el panel · puedes volver a enviarla' : 'Solicitud retirada · puedes corregir el encargo y enviarlo de nuevo')
+        : coordinatorRequest.status === 'routed' ? `Enrutada por el coordinador · ${coordinatorRequest.route?.kind === 'code' ? 'Desarrollo' : 'Planificador'}${coordinatorRequest.jobId ? ` · ${coordinatorRequest.jobId}` : ''}`
         : coordinatorRequest.status === 'routing' ? `Decisión registrada: ${coordinatorRequest.route?.kind === 'code' ? 'pipeline de código' : 'Planificador'} · materializando el mismo job de forma segura${coordinatorRequest.route?.lastError ? ` · ${coordinatorRequest.route.lastError}` : ''}`
         : coordinatorRequest.notification?.status === 'sent' ? 'Avisada al coordinador · decisión pendiente; todavía sin job ni dispatch'
           : coordinatorRequest.notification?.reason || 'Solicitud guardada · aviso al coordinador pendiente';

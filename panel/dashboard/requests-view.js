@@ -109,7 +109,7 @@
       item.append(button);
     }
     const request = (current.coordinatorRequests || []).find(value => value.id === trace.requestId);
-    if (request?.status !== 'answered' && (request?.answerNotices || []).some(notice => ['unknown', 'needs_attention', 'sending'].includes(notice.notification?.status))) {
+    if (!['answered', 'withdrawn'].includes(request?.status) && (request?.answerNotices || []).some(notice => ['unknown', 'needs_attention', 'sending'].includes(notice.notification?.status))) {
       const check = make('button', 'button secondary', 'Consultar entrega de respuestas'); check.type = 'button';
       check.onclick = async () => { check.disabled = true; try { const r = await fetch(`/api/coordinator/requests/${encodeURIComponent(trace.requestId)}/notify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); const result = await r.json(); if (!r.ok) throw new Error(result.error); $('refresh').click(); } catch (error) { check.textContent = error.message || 'No se pudo consultar la entrega'; check.disabled = false; } };
       item.append(check);
