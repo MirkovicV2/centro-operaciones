@@ -7,6 +7,7 @@ import { loadDashboardState, changeDashboardState, recordJobConfirmation } from 
 import { loadState } from '../queue.mjs';
 import { notifyCoordinatorRequest } from '../coordinator-bridge.mjs';
 import { withInboxLock } from './inbox-lock.mjs';
+import { validateJobLaunch } from '../../launch-choice.mjs';
 import { deliverCoordinatorNotice } from './coordinator-notice.mjs';
 import { assertCoordinatorQuestionsAnswered, coordinatorDecisions, coordinatorJobLink, checkCoordinatorAnswerNotices } from './coordinator-dialogue.mjs';
 
@@ -29,8 +30,11 @@ export function submitTaskToCoordinator(root, input, { notify = notifyCoordinato
   if (!/^[a-zA-Z0-9_-]{8,100}$/.test(operationId)) return Promise.reject(new Error('Falta una operación idempotente válida para la solicitud.'));
   if (!['agency', 'games'].includes(business)) return Promise.reject(new Error('Selecciona una empresa válida.'));
   if (title.length < 1 || title.length > 160 || text.length < 4 || text.length > 10_000 || successCriteria.length < 4 || successCriteria.length > 1800) return Promise.reject(new Error('Revisa título, objetivo y criterio de éxito antes de enviar al coordinador.'));
+  // Optional split chosen for this job in the panel; validated here so a bad choice never reaches the coordinator.
+  let launch;
+  try { launch = consultation ? undefined : validateJobLaunch(input.launch ?? undefined); } catch (error) { return Promise.reject(new Error(error.message)); }
   const inflightKey = `${root}:${business}:${operationId}`;
-  const signature = JSON.stringify({ business, title, text, successCriteria, projectId: input.projectId || null, intent, kind: requestedKind, confirmation: input.kind === 'code' ? confirmationValue(input.confirmation) : null });
+  const signature = JSON.stringify({ business, title, text, successCriteria, projectId: input.projectId || null, intent, kind: requestedKind, confirmation: input.kind === 'code' ? confirmationValue(input.confirmation) : null, ...(launch ? { launch } : {}) });
   if (pending.has(inflightKey)) return pending.get(inflightKey).signature === signature ? pending.get(inflightKey).promise : Promise.reject(new Error('Esta operación ya identifica otro encargo.'));
   const task = withInboxLock(root, `submission:${business}:${operationId}`, async () => {
     const inbox = await loadDashboardState(root);
@@ -39,7 +43,7 @@ export function submitTaskToCoordinator(root, input, { notify = notifyCoordinato
     if (projectId && !project) throw new Error('El proyecto no existe o pertenece a otra empresa.');
     const id = keyFor(`${business}:${operationId}`);
     let request = inbox.coordinatorRequests.find(item => item.id === id);
-    if (request && ((request.intent || 'task') !== intent || request.snapshot.title !== title || request.snapshot.text !== text || request.snapshot.successCriteria !== successCriteria || request.projectId !== (project?.id || null) || request.snapshot.requestedKind !== requestedKind || JSON.stringify(confirmationValue(request.snapshot.destinationConfirmation)) !== JSON.stringify(input.kind === 'code' ? confirmationValue(input.confirmation) : null))) throw new Error('Esta operación ya identifica otro encargo; conserva su ID para reintentar o crea una intención nueva.');
+    if (request && ((request.intent || 'task') !== intent || request.snapshot.title !== title || request.snapshot.text !== text || request.snapshot.successCriteria !== successCriteria || request.projectId !== (project?.id || null) || request.snapshot.requestedKind !== requestedKind || JSON.stringify(request.snapshot.launch ?? null) !== JSON.stringify(launch ?? null) || JSON.stringify(confirmationValue(request.snapshot.destinationConfirmation)) !== JSON.stringify(input.kind === 'code' ? confirmationValue(input.confirmation) : null))) throw new Error('Esta operación ya identifica otro encargo; conserva su ID para reintentar o crea una intención nueva.');
     if (!request) {
       request = {
         id, kind: 'task', intent, status: 'pending', notification: { status: 'pending' }, operationId,
@@ -48,6 +52,7 @@ export function submitTaskToCoordinator(root, input, { notify = notifyCoordinato
           schemaVersion: 1, version: 1, business, projectId: project?.id || null, projectName: project?.name || '', title, text, objective: text, successCriteria, decisions: [],
           intent, requestedKind,
           destinationConfirmation: input.kind === 'code' ? input.confirmation || null : null,
+          ...(launch ? { launch } : {}),
         },
       };
       request = await changeDashboardState(root, state => {
@@ -168,6 +173,8 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     kind, provider: 'orca', title, ...explicitContract,
     prompt, ...(coordinatorJobLink(request, project?.id || null) ? { coordination: coordinatorJobLink(request, project?.id || null) } : {}),
     ...(destination ? { workspace: destination.workspace, branch: destination.branch, destination, isolated: true } : {}),
+    // A receipt saved before this field existed keeps its exact spec (and so its fingerprint).
+    ...(snapshot.launch && (!savedReceipt || savedReceipt.spec.launch) ? { launch: snapshot.launch } : {}),
   });
   if (destination && submission.receipt) await recordJobConfirmation(root, jobId, request.business, destination);
   const updated = await changeDashboardState(root, state => {

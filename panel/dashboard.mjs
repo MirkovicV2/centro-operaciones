@@ -60,20 +60,43 @@ const tailscaleAccess = await fs.readFile(path.join(APP_ROOT, 'data', 'tailscale
 // 25: with Claude, Orca must open workers as Terminal. Read-only check; the panel only warns.
 import { configuredOrcaAgent } from '../local-tools.mjs';
 import { inspectOrcaAgentSettings } from '../orca-settings.mjs';
-import { readPipeline, pipelineAgents, previewPipeline } from '../pipeline-config.mjs';
+import { readPipeline, pipelineAgents, previewPipeline, writePipeline, disablePipeline, resolveStageLaunch, STAGE_ROLES, PIPELINE_BUSINESSES } from '../pipeline-config.mjs';
+import { LAUNCH_ROLES, LAUNCH_AGENTS } from '../launch-choice.mjs';
+import { currentActor } from './queue.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from '../orca-provider.mjs';
 // With a mixed pipeline some stages run with Claude even when the default agent is Codex.
 const usesClaude = await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }).then(pipeline => pipelineAgents(pipeline, configuredOrcaAgent()).includes('claude'))
   .catch(error => { console.warn(`Reparto del pipeline no aplicable: ${error.message}`); return configuredOrcaAgent() === 'claude'; });
 const orcaPreflight = await inspectOrcaAgentSettings({ agent: usesClaude ? 'claude' : configuredOrcaAgent() }).catch(error => ({ available: false, reason: error.code || 'orca_settings_error', surface: 'unknown', permissionMode: null, warnings: [] }));
 for (const warning of usesClaude ? orcaPreflight.warnings : []) console.warn(`Preflight de Orca: ${warning}`);
+const launchSources = async () => ({ levels: await readLaunchLevels(QUEUE_ROOT), pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+// The split as the settings view edits it. A broken file is reported, never silently replaced.
+async function pipelineSettings() {
+  const levels = await readLaunchLevels(QUEUE_ROOT).catch(() => DEFAULT_LAUNCH_LEVELS);
+  const base = { defaultAgent: configuredOrcaAgent(), roles: LAUNCH_ROLES, agents: LAUNCH_AGENTS, businesses: PIPELINE_BUSINESSES, levelNames: LAUNCH_LEVELS, levels: { roles: levels.roles, agents: levels.agents },
+    example: JSON.parse(await fs.readFile(new URL('../ejemplos/pipeline.mixto.example.json', import.meta.url), 'utf8')) };
+  let configured = true;
+  try { await fs.access(path.join(QUEUE_ROOT, 'data', 'pipeline.json')); } catch { configured = false; }
+  try { return { ...base, configured, pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }) }; }
+  catch (error) { if (error.code !== 'pipeline_config_invalid') throw error; return { ...base, configured, pipeline: null, error: error.message }; }
+}
+// What each stage that has not been launched yet would be launched with right now. Launched stages keep their own record.
+async function plannedLaunches(jobs) {
+  const active = jobs.filter(job => ['queued', 'running', 'retry_wait', 'needs_attention'].includes(job.state) && job.provider === 'orca');
+  if (!active.length) return new Map();
+  let sources;
+  try { sources = await launchSources(); } catch { return new Map(); }
+  return new Map(active.map(job => [job.id, Object.fromEntries((job.workflow?.steps || []).filter(step => STAGE_ROLES[step.key] && !step.launch && !['succeeded', 'skipped'].includes(step.status)).flatMap(step => {
+    try { const { origin, ...launch } = resolveStageLaunch({ roleName: STAGE_ROLES[step.key], business: job.business, projectId: job.projectId, jobLaunch: job.launch, ...sources }); return [[step.key, launch]]; }
+    catch { return []; }
+  }))]));
+}
 // Read-only: what a job would be launched with. The files are read on every call, so an edit shows without a restart.
 async function launchPreview(params) {
   let launch;
   if (params.get('launch')) { try { launch = JSON.parse(params.get('launch')); } catch { throw Object.assign(new Error('launch no es JSON válido.'), { status: 400 }); } }
   try {
-    return previewPipeline({ business: params.get('business'), kind: params.get('kind'), projectId: params.get('projectId') || null, launch,
-      levels: await readLaunchLevels(QUEUE_ROOT), pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+    return previewPipeline({ business: params.get('business'), kind: params.get('kind'), projectId: params.get('projectId') || null, launch, ...await launchSources() });
   } catch (error) {
     if (['pipeline_config_invalid', 'launch_choice_invalid', 'launch_levels_invalid'].includes(error.code)) throw Object.assign(new Error(error.message), { status: 400, code: error.code });
     throw error;
@@ -171,12 +194,14 @@ async function dashboardData() {
   const automation = await readAutoRun(QUEUE_ROOT);
   const knowledge = await readContextConsultations(QUEUE_ROOT, { requestIds: inbox.coordinatorRequests.map(item => item.id), jobIds: queue.jobs.map(item => item.id) });
   const requestTraces = await buildRequestTraces(QUEUE_ROOT, { requests: inbox.coordinatorRequests.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))), jobs: queue.jobs, questions: inbox.questions, automation, knowledge, observePreparation });
+  const planned = await plannedLaunches(queue.jobs);
   return {
     executor,
     checkouts: await checkoutChoices(QUEUE_ROOT),
     queue: queueSummary,
     jobs: queue.jobs.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(job => ({
       ...job,
+      ...(planned.get(job.id) && Object.keys(planned.get(job.id)).length ? { plannedLaunch: planned.get(job.id) } : {}),
       prompt: safeMarkdownText(job.prompt || '').slice(0, 6000),
       result: job.result ? { ...job.result, text: safeMarkdownText(job.result.text || '').slice(0, 12000) } : job.result,
     })),
@@ -281,6 +306,7 @@ async function handleApi(request, response, url, tailscale = null) {
   if (request.method === 'GET' && traceRead) return send(response, 200, await readRequestTrace(QUEUE_ROOT, traceRead[1], { observePreparation }));
   if (request.method === 'GET' && url.pathname === '/api/graph') return send(response, 200, await buildKnowledgeGraph(QUEUE_ROOT, url.searchParams.get('business')));
   if (request.method === 'GET' && url.pathname === '/api/launch-preview') return send(response, 200, await launchPreview(url.searchParams));
+  if (request.method === 'GET' && url.pathname === '/api/pipeline') return send(response, 200, await pipelineSettings());
   if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
   assertLocalRequest(request, tailscale);
@@ -301,6 +327,13 @@ async function handleApi(request, response, url, tailscale = null) {
   if (url.pathname === '/api/config') {
     const config = await saveDashboardConfig(QUEUE_ROOT, { vaultPath: body.vaultPath, autoRun: false });
     return send(response, 200, config);
+  }
+  if (url.pathname === '/api/pipeline') {
+    try {
+      if (body.disable === true) { if (body.confirm !== true) throw Object.assign(new Error('Confirma explícitamente volver al agente único.'), { status: 400 }); await disablePipeline(QUEUE_ROOT, { actor: currentActor() }); }
+      else await writePipeline(QUEUE_ROOT, body.pipeline, { levelNames: LAUNCH_LEVELS, actor: currentActor() });
+    } catch (error) { if (error.code === 'pipeline_config_invalid') throw Object.assign(new Error(error.message), { status: 400, code: error.code }); throw error; }
+    return send(response, 200, await pipelineSettings());
   }
   if (url.pathname === '/api/projects') {
     return send(response, 201, await createProject(QUEUE_ROOT, body.name, body.business));

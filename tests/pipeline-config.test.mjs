@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { EMPTY_PIPELINE, normalizePipeline, pipelineAgents, previewPipeline, readPipeline, resolveStageLaunch } from '../pipeline-config.mjs';
+import { EMPTY_PIPELINE, disablePipeline, normalizePipeline, pipelineAgents, previewPipeline, readPipeline, resolveStageLaunch, writePipeline } from '../pipeline-config.mjs';
 import { DEFAULT_LAUNCH_LEVELS, LAUNCH_LEVELS, normalizeLaunchLevels } from '../orca-provider.mjs';
 import { resolveLaunch, validateJobLaunch } from '../launch-choice.mjs';
 
@@ -120,4 +120,24 @@ test('the preview shows the route of each kind without creating anything, also f
   const cli = spawnSync(process.execPath, [fileURLToPath(new URL('../cli.mjs', import.meta.url)), 'preview', '--business', 'agency', '--kind', 'code'], { encoding: 'utf8', env: { ...process.env, CENTRO_ORCA_AGENT: 'codex' } });
   assert.equal(cli.status, 0, cli.stderr);
   assert.match(cli.stdout, /Diseño\s+(codex|claude)\s/); assert.match(cli.stdout, /Integración\s+Motor/);
+});
+
+test('saving the split from the panel validates first, keeps the previous file and records who changed what', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pipeline-write-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'data', 'pipeline.json'), log = path.join(root, 'data', 'pipeline-changes.jsonl');
+  await assert.rejects(writePipeline(root, { general: { roles: { qa: { model: 'sonnet' } } } }, { levelNames }), { code: 'pipeline_config_invalid' });
+  await assert.rejects(fs.access(file), { code: 'ENOENT' }, 'an invalid split writes nothing');
+  assert.equal((await writePipeline(root, example, { levelNames, actor: 'dani@example.test' })).changed, true);
+  assert.deepEqual(await readPipeline(root, { levelNames }), mixed);
+  assert.equal((await writePipeline(root, mixed, { levelNames, actor: 'dani@example.test' })).changed, false, 'saving the same split is not a change');
+  const next = JSON.parse(JSON.stringify(mixed)); next.general.roles.qa = { agent: 'claude', level: 'ligero' };
+  await writePipeline(root, next, { levelNames, actor: 'david@example.test' });
+  assert.deepEqual(normalizePipeline(JSON.parse(await fs.readFile(file + '.anterior', 'utf8')), { levelNames }), mixed, 'the replaced file is one copy away');
+  assert.equal((await disablePipeline(root, { actor: 'david@example.test' })).changed, true);
+  assert.equal(await readPipeline(root, { levelNames }), EMPTY_PIPELINE);
+  assert.equal((await disablePipeline(root)).changed, false);
+  const changes = (await fs.readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(changes.map(item => [item.type, item.actor]), [['saved', 'dani@example.test'], ['saved', 'david@example.test'], ['disabled', 'david@example.test']]);
+  assert.equal(changes[0].previousSha256, null); assert.equal(changes[1].previousSha256, changes[0].sha256); assert.equal(changes[2].previousSha256, changes[1].sha256);
+  assert.deepEqual((await fs.readdir(path.join(root, 'data'))).filter(name => name.endsWith('.tmp')), []);
 });

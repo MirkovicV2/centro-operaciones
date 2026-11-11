@@ -134,3 +134,24 @@ test('a copied correlation marker in another project cannot claim a coordinator 
   assert.equal(routed.request.snapshot.version, 1);
   assert.deepEqual(routed.request.snapshot.decisions, []);
 });
+
+test('a split chosen in Nuevo trabajo is validated on entry, kept with the request and reaches the job unchanged', async t => {
+  const { root, project } = await fixture(t);
+  const input = { operationId: 'task-operation-launch', business: 'games', projectId: project.id, kind: 'analysis', title: 'Plan exigente', prompt: 'Planificar el sistema de guardado', successCriteria: 'Plan con criterios verificables' };
+  await assert.rejects(submitTaskToCoordinator(root, { ...input, launch: { roles: { planificador: { model: 'opus' } } } }, { notify: notice }), /indica agent/);
+  assert.equal((await loadDashboardState(root)).coordinatorRequests.length, 0, 'an invalid split never reaches the coordinator');
+  const launch = { roles: { planificador: { agent: 'claude', model: 'opus', effort: 'high' } } };
+  const submitted = await submitTaskToCoordinator(root, { ...input, launch }, { notify: notice });
+  assert.deepEqual(submitted.request.snapshot.launch, launch);
+  // The same operation with another split is another request, not a silent replacement.
+  await assert.rejects(submitTaskToCoordinator(root, { ...input, launch: { roles: { planificador: { agent: 'codex' } } } }, { notify: notice }), /otro encargo|ya identifica/);
+  const routed = await routeTaskFromCoordinator(root, submitted.request.id, 'analysis', { reason: 'Solo análisis.' });
+  assert.deepEqual(routed.job.launch, launch);
+  assert.deepEqual((await readAutoRun(root)).receipts[0].spec.launch, launch, 'the durable receipt carries the split, so a replay rebuilds the same job');
+  const replay = await routeTaskFromCoordinator(root, submitted.request.id, 'analysis');
+  assert.equal(replay.existing, true); assert.equal((await loadState(root)).jobs.length, 1);
+  // Without a choice the job has no launch field at all, exactly as before.
+  const plain = await submitTaskToCoordinator(root, { ...input, operationId: 'task-operation-plain1', title: 'Plan normal' }, { notify: notice });
+  assert.equal(Object.hasOwn(plain.request.snapshot, 'launch'), false);
+  assert.equal(Object.hasOwn((await routeTaskFromCoordinator(root, plain.request.id, 'analysis')).job, 'launch'), false);
+});

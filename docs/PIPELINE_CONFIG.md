@@ -22,6 +22,17 @@ Para activar el perfil mixto en una instalación:
 
 Desactivar es borrar o renombrar `data/pipeline.json`.
 
+## En el panel
+
+- **Ajustes → Agentes y modelos por etapa** edita el reparto por ámbito (general, empresa, proyecto). «Cargar perfil
+  mixto de ejemplo» rellena el formulario y no aplica nada hasta «Guardar reparto». Solo el rol `admin` puede guardar.
+- Cada guardado valida antes de escribir, deja el archivo anterior en `data/pipeline.json.anterior` y añade una línea a
+  `data/pipeline-changes.jsonl` (cuándo, quién, huella anterior y nueva).
+- **Nuevo trabajo → Reparto de este encargo** muestra con qué se lanzaría cada etapa y permite fijar agente, modelo o
+  esfuerzo solo para ese encargo.
+- En la página de un trabajo, cada etapa lanzada muestra lo que usó («Modelo») y cada etapa pendiente lo que usaría hoy
+  («Modelo previsto»). Lo previsto se fija en el momento de lanzar la etapa.
+
 ## Precedencia
 
 De menos a más específico. Gana el más específico **campo a campo** (`agent`, `model`, `effort`):
@@ -80,6 +91,5 @@ de la etapa:
 
 - Se registra el modelo pedido (por ejemplo el alias `sonnet`). La versión concreta que resolvió el proveedor
   no se registra todavía: falta comprobar si `worker-show` de Orca la expone.
-- El panel aún no permite elegir el reparto de un encargo; se elige con `--launch-file` o por configuración.
-  `GET /api/launch-preview?business=…&kind=…&projectId=…` ya devuelve el reparto para mostrarlo.
+- En el panel, Ideas usa el reparto configurado (general, empresa, proyecto); la elección por encargo está en Nuevo trabajo y en la CLI.
 - Las sesiones de coordinador las abre cada persona en Orca; su modelo no lo decide este archivo.

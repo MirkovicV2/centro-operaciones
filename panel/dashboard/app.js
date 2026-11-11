@@ -5,6 +5,14 @@ const state = { business: ['agency', 'games'].includes(savedBusiness) ? savedBus
 const workflowStatusNames = { queued: 'Pendiente', running: 'En curso', succeeded: 'Completado', blocked: 'Bloqueado', failed: 'Falló', skipped: 'Omitido' };
 const statusNames = { queued: 'En cola', running: 'En marcha', retry_wait: 'Reintento programado', needs_attention: 'Requiere revisión', succeeded: 'Entregado localmente', cancelled: 'Cancelado' };
 const businessNames = { agency: 'Agencia', games: 'Videojuegos' };
+// Pipeline split (Ajustes and Nuevo trabajo). Declared here because showSection runs before the end of this file.
+const roleLabels = { planificador: 'Planificación', ux: 'Diseño', desarrollador: 'Desarrollo', qa: 'QA', revisor: 'Revisión' };
+const sourceLabels = { 'por defecto': 'por defecto', general: 'perfil general', empresa: 'perfil de la empresa', proyecto: 'proyecto', encargo: 'este encargo', escalada: 'escalada' };
+const launchLabel = launch => [launch.agent, launch.model || 'modelo por defecto', launch.effort ? `esfuerzo ${launch.effort}` : 'esfuerzo por defecto'].join(' · ');
+const pipelineState = { server: null, draft: null, dirty: false, loading: null };
+const emptyDraft = () => ({ general: { roles: {} }, empresas: {}, proyectos: {}, escaladas: {} });
+const cloneDraft = value => JSON.parse(JSON.stringify(value || emptyDraft()));
+const jobLaunchState = { preview: null, request: 0 };
 // Appearance: Claro | Oscuro | Sistema. "Sistema" follows the OS; a manual choice is kept in this browser.
 const THEME_KEY = 'operations-theme';
 function applyTheme(choice) {
@@ -398,6 +406,7 @@ function renderRun(data) {
     const add = (k, v, level) => { const dd = el('dd'); if (level) dd.append(provenance(level)); dd.append(el('span', '', v)); if (level) dd.append(el('span', 'prov-text', levelText[level])); kv.append(el('dt', '', k), dd); };
     if (step.profile) add('Perfil', step.profile);
     if (step.launch) add('Modelo', [step.launch.agent, step.launch.model, step.launch.effort && `esfuerzo ${step.launch.effort}`].filter(Boolean).join(' · '), 'observed');
+    else if (job.plannedLaunch?.[step.key]) add('Modelo previsto', `${launchLabel(job.plannedLaunch[step.key])} · se fija al lanzar la etapa`);
     else add('Modelo', 'No registrado', 'unknown');
     if (step.authorization) add('Autorizado por', step.authorization.coordinatorName || 'coordinador', 'observed');
     if (step.dispatchId) add('Dispatch', step.dispatchId, 'observed');
@@ -1388,6 +1397,7 @@ async function refresh() {
     renderTelegramMessages(data);
     renderDomains(data);
     renderAssistantTasks(data);
+    if (pipelineState.server) renderPipelineScopes(); // only the list of projects; the rows being edited are never rebuilt here
   } catch (error) {
     $('#ideas-list').setAttribute('aria-busy', 'false');
     $('#ideas-load-error').hidden = false;
@@ -1447,15 +1457,16 @@ $('#job-form').addEventListener('submit', async event => {
   const project = state.data?.projects.find(item => item.id === values.projectId);
   let confirmation;
   if (values.kind === 'code') { confirmation = await confirmDestination(project, values.prompt, values.successCriteria); if (!confirmation) return; }
-  const signature = JSON.stringify({ business: state.business, values, confirmation });
+  const signature = JSON.stringify({ business: state.business, values, confirmation, launch: jobLaunchChoice() });
   const operationId = stableOperation('submissions', signature);
-  const payload = { operationId, confirmation, business: state.business, projectId: values.projectId, projectName: project?.name, kind: values.kind, title: values.title, prompt: confirmation ? confirmation.objective : values.prompt, successCriteria: confirmation ? confirmation.successCriteria : values.successCriteria, provider: 'orca', workspace: values.workspace, isolated };
+  const payload = { operationId, confirmation, business: state.business, projectId: values.projectId, projectName: project?.name, kind: values.kind, title: values.title, prompt: confirmation ? confirmation.objective : values.prompt, successCriteria: confirmation ? confirmation.successCriteria : values.successCriteria, provider: 'orca', workspace: values.workspace, isolated, ...(jobLaunchChoice() ? { launch: jobLaunchChoice() } : {}) };
   const accepted = confirmation || await confirmIdeaAction('Enviar solicitud al coordinador', `${businessNames[state.business]} · ${values.title}. Se guarda una solicitud para que el coordinador decida entre análisis o desarrollo. Todavía no se crea un trabajo ni se inicia un agente.`, 'Enviar al coordinador');
   if (!accepted) return;
   try {
     const request = await api('/api/jobs', { method: 'POST', body: JSON.stringify(payload) });
     form.reset(); form.hidden = true;
     delete form.dataset.operationId;
+    void refreshJobLaunch();
     notify(request.message || 'Solicitud enviada al coordinador; todavía no hay job ni dispatch.');
     await refresh();
   } catch (error) { notify(`${error.message} Consulta la solicitud del coordinador antes de repetir; se conserva el identificador.`, true); }
@@ -1560,7 +1571,7 @@ function applyBusinessContext() {
 function showSection() {
   const [id = 'inicio', runId] = (location.hash.slice(1) || 'inicio').split('/');
   if (id === 'trabajo') { state.runId = decodeURIComponent(runId || ''); if (state.data) renderRun(state.data); }
-  const selected = ['inicio', 'trabajo', 'atencion', 'historial', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
+  const selected = ['inicio', 'trabajo', 'atencion', 'historial', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios', 'ajustes'].includes(id) ? id : 'inicio';
   if (state.visibleSection === selected) return;
   state.visibleSection = selected;
   const navSection = selected === 'trabajo' ? 'trabajos' : selected;
@@ -1573,6 +1584,7 @@ function showSection() {
     if (link.right > strip.right) nav.scrollLeft += link.right - strip.right;
   }
   if (selected === 'conocimiento') void refreshGraph();
+  if (selected === 'ajustes') void loadPipeline();
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function updateHistoryProjects(projects) {
@@ -1804,3 +1816,198 @@ for (const key of ['project', 'focus', 'tag', 'status', 'order']) $(`#ideas-${ke
   event.target.blur(); if (state.data) renderIdeas(state.data); event.target.focus();
 });
 $('#ideas-reset').addEventListener('click', () => { saveIdeaPreferences(IdeaView.defaults()); $('#ideas-count').focus(); if (state.data) renderIdeas(state.data); });
+
+
+// ---- Reparto del pipeline: agente, modelo y esfuerzo por etapa (docs/PIPELINE_CONFIG.md) ----
+// Neither form is rebuilt by the periodic refresh: typed values, focus and open selects survive it.
+function scopeRoles(draft, scope, create = false) {
+  if (scope === 'general') return draft.general.roles;
+  const [kind, id] = scope.split(':'), holder = kind === 'empresa' ? draft.empresas : draft.proyectos;
+  if (!holder[id] && create) holder[id] = { roles: {} };
+  return holder[id]?.roles || {};
+}
+function pruneDraft(draft) {
+  for (const holder of [draft.empresas, draft.proyectos]) for (const id of Object.keys(holder)) if (!Object.keys(holder[id].roles).length) delete holder[id];
+  return draft;
+}
+// One row per role: agent, level or model/effort. An empty control means "inherit from the less specific scope".
+function launchRow(role, entry, { idPrefix, inheritText, onChange, levels }) {
+  const row = el('fieldset', 'pipeline-row'); row.dataset.role = role;
+  row.append(el('legend', '', roleLabels[role]));
+  const field = (label, node) => { const wrapper = el('label', '', label); node.id = `${idPrefix}-${role}-${node.dataset.field}`; wrapper.htmlFor = node.id; wrapper.append(node); return wrapper; };
+  const agent = el('select'); agent.dataset.field = 'agent';
+  for (const [value, text] of [['', inheritText], ['codex', 'Codex'], ['claude', 'Claude']]) agent.add(new Option(text, value));
+  agent.value = entry?.agent || '';
+  const model = el('input'); model.dataset.field = 'model'; model.maxLength = 100; model.placeholder = 'Heredado'; model.autocomplete = 'off'; model.spellcheck = false; model.value = entry?.model || '';
+  const effort = el('input'); effort.dataset.field = 'effort'; effort.maxLength = 100; effort.placeholder = 'Heredado'; effort.autocomplete = 'off'; effort.spellcheck = false; effort.setAttribute('list', 'pipeline-efforts'); effort.value = entry?.effort || '';
+  row.append(field('Agente', agent));
+  let level;
+  if (levels) {
+    level = el('select'); level.dataset.field = 'level';
+    for (const [value, text] of [['', 'Sin nivel'], ...levels.map(name => [name, name])]) level.add(new Option(text, value));
+    level.value = entry?.level || '';
+    row.append(field('Nivel', level));
+  }
+  row.append(field('Modelo', model), field('Esfuerzo', effort));
+  const note = el('p', 'pipeline-row-note'); note.dataset.note = role; row.append(note);
+  const sync = () => { if (level) { model.disabled = effort.disabled = Boolean(level.value); if (level.value) { model.value = ''; effort.value = ''; } } };
+  sync();
+  for (const control of [agent, level, model, effort].filter(Boolean)) control.addEventListener(control.tagName === 'SELECT' ? 'change' : 'input', () => { sync(); onChange(); });
+  return row;
+}
+function readRow(row) {
+  const value = field => row.querySelector(`[data-field="${field}"]`)?.value.trim() || '';
+  const entry = {};
+  for (const field of ['agent', 'level', 'model', 'effort']) if (value(field)) entry[field] = value(field);
+  return entry;
+}
+function renderPipelineScope() {
+  const scope = $('#pipeline-scope').value || 'general';
+  const roles = scopeRoles(pipelineState.draft, scope);
+  $('#pipeline-rows').replaceChildren(...pipelineState.server.roles.map(role => launchRow(role, roles[role], { idPrefix: 'pipeline', inheritText: 'Heredar', levels: pipelineState.server.levelNames, onChange: collectPipelineScope })));
+  $('#pipeline-scope-hint').textContent = scope === 'general' ? 'General: base para las dos empresas. Sin elegir agente, la etapa usa el agente por defecto de esta instalación (' + pipelineState.server.defaultAgent + ').'
+    : scope.startsWith('empresa:') ? 'Empresa: concreta el reparto general solo en los campos que rellenes.' : 'Proyecto: concreta el reparto de su empresa solo en los campos que rellenes.';
+}
+function collectPipelineScope() {
+  const scope = $('#pipeline-scope').dataset.current || 'general';
+  const roles = scopeRoles(pipelineState.draft, scope, true);
+  for (const row of $('#pipeline-rows').querySelectorAll('.pipeline-row')) {
+    const entry = readRow(row);
+    if (Object.keys(entry).length) roles[row.dataset.role] = entry; else delete roles[row.dataset.role];
+  }
+  pruneDraft(pipelineState.draft);
+  setPipelineDirty(JSON.stringify(pipelineState.draft) !== JSON.stringify(cloneDraft(pipelineState.server.pipeline)));
+}
+function setPipelineDirty(dirty) {
+  pipelineState.dirty = dirty;
+  $('#pipeline-dirty').textContent = dirty ? 'Cambios sin guardar' : 'Sin cambios';
+  $('#pipeline-save').disabled = !dirty;
+}
+function renderPipelineScopes() {
+  const select = $('#pipeline-scope'), current = select.dataset.current || 'general';
+  const projects = (state.raw?.projects || []).filter(project => project.status !== 'completed');
+  const known = new Set(projects.map(project => project.id));
+  const options = [['general', 'General'], ['empresa:agency', 'Empresa · Agencia'], ['empresa:games', 'Empresa · Videojuegos'],
+    ...projects.map(project => [`proyecto:${project.id}`, `Proyecto · ${project.name} (${businessNames[project.business] || project.business})`]),
+    ...Object.keys(pipelineState.draft.proyectos).filter(id => !known.has(id)).map(id => [`proyecto:${id}`, `Proyecto · ${id}`])];
+  const signature = JSON.stringify(options);
+  if (select.dataset.options === signature) return; // unchanged: leave an open dropdown alone
+  select.dataset.options = signature;
+  select.replaceChildren(...options.map(([value, text]) => new Option(text, value)));
+  select.value = options.some(([value]) => value === current) ? current : 'general';
+  select.dataset.current = select.value;
+}
+async function renderPipelineEffective() {
+  const grid = $('#pipeline-effective'), scope = $('#pipeline-scope').dataset.current || 'general';
+  const projectId = scope.startsWith('proyecto:') ? scope.slice(9) : '';
+  const project = (state.raw?.projects || []).find(item => item.id === projectId);
+  const targets = project ? [[project.business, projectId, `${project.name}`]] : [['agency', '', 'Agencia'], ['games', '', 'Videojuegos']];
+  const blocks = [];
+  for (const [business, id, title] of targets) {
+    const block = el('div', 'pipeline-effective-block'); block.append(el('h4', '', title));
+    const list = el('dl', 'pipeline-effective-list');
+    for (const kind of ['analysis', 'code']) {
+      try {
+        const preview = await api(`/api/launch-preview?business=${business}&kind=${kind}${id ? `&projectId=${encodeURIComponent(id)}` : ''}`);
+        for (const stage of preview.stages) list.append(el('dt', '', stage.label), el('dd', '', `${launchLabel(stage)} (${sourceLabels[stage.source] || stage.source})`));
+      } catch (error) { list.append(el('dt', '', kind === 'code' ? 'Código' : 'Análisis'), el('dd', 'pipeline-error', error.message)); }
+    }
+    list.append(el('dt', '', 'Integración'), el('dd', '', 'Motor del Centro (GitHub), sin modelo'));
+    block.append(list); blocks.push(block);
+  }
+  grid.replaceChildren(...blocks);
+}
+function renderPipelineEscalations() {
+  const escalations = Object.entries(pipelineState.draft.escaladas);
+  $('#pipeline-escalations').replaceChildren(...(escalations.length ? escalations.map(([id, item]) => el('li', '', `${id}: ${launchLabel(item)} · roles ${item.roles.map(role => roleLabels[role]).join(', ')}${item.uso ? ` · ${item.uso}` : ''}`)) : [el('li', '', 'Ninguna definida.')]));
+}
+function renderPipeline(server) {
+  pipelineState.server = server;
+  pipelineState.draft = cloneDraft(server.pipeline);
+  const status = $('#pipeline-status');
+  status.classList.toggle('pipeline-error', Boolean(server.error));
+  status.textContent = server.error ? `El archivo guardado no es válido y no se aplica: ${server.error} Corrígelo aquí y guarda, o edita data/pipeline.json.`
+    : server.configured ? 'Perfil por etapas activo en esta instalación.' : `Sin perfil por etapas: todas las etapas se lanzan con ${server.defaultAgent} y los niveles por rol, como hasta ahora. Carga el ejemplo o rellena un ámbito y guarda para activarlo.`;
+  $('#pipeline-disable').hidden = !server.configured;
+  renderPipelineScopes(); renderPipelineScope(); setPipelineDirty(false);
+  renderPipelineEscalations();
+  void renderPipelineEffective();
+}
+function loadPipeline(force = false) {
+  if (pipelineState.dirty && !force) return pipelineState.loading || Promise.resolve();
+  if (pipelineState.server && !force) { renderPipelineScopes(); return Promise.resolve(); }
+  pipelineState.loading ||= api('/api/pipeline').then(renderPipeline)
+    .catch(error => { $('#pipeline-status').textContent = `No se pudo cargar el reparto: ${error.message}`; $('#pipeline-status').classList.add('pipeline-error'); })
+    .finally(() => { pipelineState.loading = null; });
+  return pipelineState.loading;
+}
+$('#pipeline-scope').addEventListener('change', event => { event.target.dataset.current = event.target.value; renderPipelineScope(); void renderPipelineEffective(); });
+$('#pipeline-reload').addEventListener('click', async () => {
+  if (pipelineState.dirty && !await confirmIdeaAction('Descartar cambios sin guardar', 'Se recargará el reparto guardado y se perderán los cambios de este formulario.', 'Descartar y recargar')) return;
+  await loadPipeline(true);
+});
+$('#pipeline-load-example').addEventListener('click', () => {
+  if (!pipelineState.server) return;
+  const example = pipelineState.server.example;
+  pipelineState.draft = cloneDraft({ general: example.general, empresas: example.empresas || {}, proyectos: { ...pipelineState.draft.proyectos }, escaladas: example.escaladas || {} });
+  renderPipelineScope(); renderPipelineEscalations(); setPipelineDirty(true);
+  notify('Perfil mixto cargado en el formulario. No se aplica hasta que pulses Guardar reparto.');
+});
+$('#pipeline-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!pipelineState.dirty) return;
+  const button = $('#pipeline-save'); button.disabled = true;
+  try {
+    const scope = $('#pipeline-scope').dataset.current;
+    renderPipeline(await api('/api/pipeline', { method: 'POST', body: JSON.stringify({ pipeline: pipelineState.draft }) }));
+    $('#pipeline-scope').dataset.current = scope; renderPipelineScopes(); renderPipelineScope();
+    notify('Reparto guardado. Se aplica a las etapas que aún no se han lanzado.');
+    void refreshJobLaunch();
+  } catch (error) {
+    $('#pipeline-status').textContent = `No se guardó: ${error.message}`; $('#pipeline-status').classList.add('pipeline-error');
+    notify(error.message, true); button.disabled = false;
+  }
+});
+$('#pipeline-disable').addEventListener('click', async () => {
+  if (!await confirmIdeaAction('Volver al agente único', 'Se aparta data/pipeline.json (queda una copia) y todas las etapas nuevas vuelven a lanzarse con el agente por defecto. Las etapas ya lanzadas no cambian.', 'Volver al agente único')) return;
+  try { renderPipeline(await api('/api/pipeline', { method: 'POST', body: JSON.stringify({ disable: true, confirm: true }) })); notify('Perfil por etapas desactivado.'); void refreshJobLaunch(); }
+  catch (error) { notify(error.message, true); }
+});
+window.addEventListener('beforeunload', event => { if (pipelineState.dirty) event.preventDefault(); });
+
+// Nuevo trabajo: preview of the split and optional per-job choices.
+function jobLaunchChoice() {
+  const roles = {};
+  for (const row of $('#job-launch-rows').querySelectorAll('.pipeline-row')) {
+    const entry = readRow(row);
+    // A model belongs to one provider: without an explicit agent it is bound to the one the stage would use.
+    if (entry.model && !entry.agent) entry.agent = jobLaunchState.preview?.[row.dataset.role]?.agent;
+    if (Object.keys(entry).length) roles[row.dataset.role] = entry;
+  }
+  return Object.keys(roles).length ? { roles } : null;
+}
+async function refreshJobLaunch() {
+  if ($('#job-form').hidden || !$('#job-launch').open) return; // the preview is only requested when someone opens it
+  const rows = $('#job-launch-rows');
+  if (!rows.children.length) rows.replaceChildren(...Object.keys(roleLabels).map(role => launchRow(role, null, { idPrefix: 'job-launch', inheritText: 'Según el perfil', onChange: () => void refreshJobLaunch() })));
+  const launch = jobLaunchChoice(), projectId = $('#job-project').value, request = ++jobLaunchState.request;
+  $('#job-launch-summary').textContent = launch ? `${Object.keys(launch.roles).length} etapa(s) fijadas para este encargo` : 'según el perfil';
+  const stages = {};
+  let failure = '';
+  for (const kind of ['analysis', 'code']) {
+    try {
+      const preview = await api(`/api/launch-preview?business=${state.business}&kind=${kind}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}${launch ? `&launch=${encodeURIComponent(JSON.stringify(launch))}` : ''}`);
+      for (const stage of preview.stages) stages[stage.role] = stage;
+    } catch (error) { failure = error.message; }
+  }
+  if (request !== jobLaunchState.request) return;
+  jobLaunchState.preview = stages;
+  for (const row of rows.querySelectorAll('.pipeline-row')) {
+    const stage = stages[row.dataset.role], note = row.querySelector('.pipeline-row-note');
+    note.classList.toggle('pipeline-error', !stage);
+    note.textContent = stage ? `Se lanzaría con ${launchLabel(stage)} (${sourceLabels[stage.source] || stage.source})${row.dataset.role === 'planificador' ? ' · solo si la ruta es análisis' : ''}` : failure || 'Sin vista previa.';
+  }
+}
+$('#job-project').addEventListener('change', () => void refreshJobLaunch());
+$('#job-launch').addEventListener('toggle', () => void refreshJobLaunch());
+$('#job-form').addEventListener('reset', () => setTimeout(() => void refreshJobLaunch(), 0));

@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { replaceLocalFile } from './atomic-file.mjs';
 import { LAUNCH_AGENTS, LAUNCH_ROLES, flagValue, validateJobLaunch } from './launch-choice.mjs';
 
 // One effective resolution of what each stage is launched with: agent, model and effort.
@@ -103,6 +105,45 @@ export async function readPipeline(root, { levelNames }) {
   return normalizePipeline(value, { levelNames });
 }
 
+const sha = text => createHash('sha256').update(text).digest('hex');
+async function currentPipelineText(root) {
+  try { return await fs.readFile(path.join(root, 'data', PIPELINE_FILE), 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+// Every change of the split is appended to data/pipeline-changes.jsonl: when, who, and the fingerprints
+// before and after. The previous content is kept beside the file so a mistake is one copy away.
+async function recordPipelineChange(root, entry) {
+  await fs.appendFile(path.join(root, 'data', 'pipeline-changes.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
+}
+
+// Validates and replaces data/pipeline.json atomically. Never touches a job: stages already launched
+// keep what they recorded, stages not launched yet resolve the new file.
+export async function writePipeline(root, value, { levelNames, actor = null } = {}) {
+  const pipeline = normalizePipeline({ ...value, version: 1 }, { levelNames });
+  const text = JSON.stringify({ version: 1, ...pipeline }, null, 2) + '\n';
+  const directory = path.join(root, 'data');
+  await fs.mkdir(directory, { recursive: true });
+  const previous = await currentPipelineText(root);
+  if (previous === text) return { pipeline, changed: false };
+  if (previous !== null) await fs.writeFile(path.join(directory, `${PIPELINE_FILE}.anterior`), previous);
+  const temporary = path.join(directory, `${PIPELINE_FILE}.${randomUUID()}.tmp`);
+  try { await fs.writeFile(temporary, text, { flag: 'wx' }); await replaceLocalFile(temporary, path.join(directory, PIPELINE_FILE)); }
+  finally { await fs.rm(temporary, { force: true }); }
+  await recordPipelineChange(root, { type: 'saved', actor, previousSha256: previous === null ? null : sha(previous), sha256: sha(text) });
+  return { pipeline, changed: true };
+}
+
+// Back to the single-agent launch: the file is moved aside, not deleted.
+export async function disablePipeline(root, { actor = null } = {}) {
+  const previous = await currentPipelineText(root);
+  if (previous === null) return { changed: false };
+  const directory = path.join(root, 'data');
+  await fs.writeFile(path.join(directory, `${PIPELINE_FILE}.anterior`), previous);
+  await fs.rm(path.join(directory, PIPELINE_FILE));
+  await recordPipelineChange(root, { type: 'disabled', actor, previousSha256: sha(previous), sha256: null });
+  return { changed: true };
+}
+
 // Every agent a stage could be launched with under this configuration (preflight warnings).
 export function pipelineAgents(pipeline, defaultAgent) {
   const agents = new Set([defaultAgent]);
@@ -167,6 +208,7 @@ export function resolveStageLaunch({ roleName, business = null, projectId = null
   };
 }
 
+export const STAGE_ROLES = Object.freeze({ planner: 'planificador', ux: 'ux', developer: 'desarrollador', qa: 'qa', reviewer: 'revisor' });
 const STAGE_LABELS = { planificador: 'Planificación', ux: 'Diseño', desarrollador: 'Desarrollo', qa: 'QA', revisor: 'Revisión' };
 // The route the engine runs today: analysis = Planificación; code = Diseño → Desarrollo → QA → Revisión → integración.
 export const routeRoles = kind => kind === 'analysis' ? ['planificador'] : ['ux', 'desarrollador', 'qa', 'revisor'];
