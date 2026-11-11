@@ -1,0 +1,68 @@
+{
+  "_comentario": "Perfil compartido por el equipo: es el reparto por etapa que usa Dani (Claude Opus en Diseño y Desarrollo; Codex en Planificación, QA y Revisión). `node cli.mjs instalar` lo copia a data/pipeline.json si ese archivo no existe; cada PC puede cambiarlo después en Ajustes. Los ajustes por proyecto no se comparten: los ids de proyecto son de cada instalación. Comprueba con `node cli.mjs preview` y verifica que tu Orca acepta estos modelos y esfuerzos con tus cuentas (docs/PIPELINE_CONFIG.md).",
+  "version": 1,
+  "general": {
+    "roles": {
+      "planificador": {
+        "agent": "codex",
+        "model": "gpt-6.1-sol",
+        "effort": "high"
+      },
+      "ux": {
+        "agent": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      "desarrollador": {
+        "agent": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      "qa": {
+        "agent": "codex",
+        "model": "gpt-6.1-sol",
+        "effort": "medium"
+      },
+      "revisor": {
+        "agent": "codex",
+        "model": "gpt-6.1-sol",
+        "effort": "high"
+      }
+    }
+  },
+  "empresas": {
+    "games": {
+      "roles": {
+        "ux": {
+          "effort": "high"
+        },
+        "desarrollador": {
+          "effort": "high"
+        }
+      }
+    }
+  },
+  "proyectos": {},
+  "escaladas": {
+    "claude-opus": {
+      "agent": "claude",
+      "model": "opus",
+      "roles": [
+        "ux",
+        "desarrollador"
+      ],
+      "uso": "Problemas difíciles de diseño o implementación."
+    },
+    "gpt-astra": {
+      "agent": "codex",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "roles": [
+        "planificador",
+        "qa",
+        "revisor"
+      ],
+      "uso": "Diagnósticos o revisiones especialmente exigentes."
+    }
+  }
+}

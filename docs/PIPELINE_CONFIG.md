@@ -14,7 +14,7 @@ Codex si no se define) y los niveles de `data/orca-launch-levels.json`.
 Para activar el perfil mixto en una instalación:
 
 1. `node cli.mjs preview --business agency --kind code` y `--business games`, con el archivo todavía sin copiar, para ver el reparto actual.
-2. Copia `ejemplos/pipeline.mixto.example.json` a `data/pipeline.json` (no se versiona: cada PC tiene el suyo).
+2. Copia `ejemplos/pipeline.mixto.example.json` a `data/pipeline.json` (no se versiona: cada PC tiene el suyo). Para usar el reparto del equipo en vez del ejemplo, ejecuta `node cli.mjs instalar`: copia `perfil-equipo/pipeline.json` solo si `data/pipeline.json` no existe.
 3. Repite la vista previa y comprueba el reparto nuevo.
 4. Comprueba en **esa** instalación que Orca acepta cada modelo y esfuerzo con sus dos cuentas. El Centro valida
    la forma del archivo, no que el proveedor ofrezca el modelo. Un modelo rechazado deja la etapa en
