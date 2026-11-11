@@ -91,7 +91,8 @@ test('paths a contract tells a Claude worker to read are flagged when its checko
   const contracts = [{ text: 'Funcionalidad nueva: `~/dev/es-skills/tdd-slice/SKILL.md` (síguela). Fallos: `~/dev/es-skills/debug/SKILL.md`. Mira `' + workspace + '/README.md` y `' + path.join(root, 'data', 'dispatch-specs', 'j', 'x.txt') + '`. No escribas en `~/second_brain` ni en ~/dev/otra/NOTA.md.' }];
   const refs = options => unreadableReferences(contracts, { workspace, root, home, ...options });
   assert.deepEqual(await refs(), ['~/dev/es-skills/debug/SKILL.md', '~/dev/es-skills/tdd-slice/SKILL.md'], 'the checkout, the dispatch specs, folders and unquoted prose are not flagged');
-  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: [`Read(/${home}/dev/es-skills/tdd-slice/**)`, 'Bash(npm test:*)'] } }));
+  const absoluteHome = process.platform === 'win32' ? '//' + home.replaceAll('\\', '/') : '/' + home;
+  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: [`Read(${absoluteHome}/dev/es-skills/tdd-slice/**)`, 'Bash(npm test:*)'] } }));
   assert.deepEqual(await refs(), ['~/dev/es-skills/debug/SKILL.md']);
   await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Read(~/dev/es-skills/**)'] } }));
   assert.deepEqual(await refs(), []);

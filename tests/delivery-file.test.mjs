@@ -37,8 +37,10 @@ test('a delivery written to its file reaches the engine byte for byte: apostroph
 });
 
 test('the brief names the exact file and the one line to send', () => {
-  const lines = deliveryFileInstructions('/home/x/centro de operaciones', identity);
-  assert.match(lines, /"\/home\/x\/centro de operaciones\/entregas\/idea-0f33595e-b7a0-46ee-8a42-d140074fc790-v1-code\/qa-1\.json"/);
+  const root = path.resolve('centro de operaciones');
+  const lines = deliveryFileInstructions(root, identity);
+  const expected = path.join(root, 'entregas', identity.jobId, 'qa-1.json');
+  assert.ok(lines.includes(JSON.stringify(expected)), 'the exact native path is quoted in the brief');
   assert.match(lines, /centro-delivery-file sha256=<64 hex>/); assert.match(lines, /Solo si no puedes escribir ese archivo/);
 });
 
