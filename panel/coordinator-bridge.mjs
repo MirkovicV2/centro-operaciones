@@ -112,6 +112,35 @@ function messageBody(request, env) {
   ].join('\n');
 }
 
+// Orca mail is pull: `orchestration send` leaves the notice in the Run inbox and an idle coordinator never looks.
+// After a confirmed send, type one fixed line into the coordinator's own terminal so it takes a turn and reads it.
+// Only into an idle TUI that is not showing a dialog: text plus Enter must never answer an approval prompt.
+const DIALOG_ON_SCREEN = /Esc to cancel|Do you want to |Allow this |Yes, and |No, and |\(y\/n\)|Press Enter to continue|❯ 1\. /i;
+export const NUDGE_RETRY_MS = 120_000, NUDGE_BUSY_RETRY_MS = 20_000, NUDGE_MAX_ATTEMPTS = 3, NUDGE_MAX_TRIES = 12;
+export function nudgeText(request, env = process.env) {
+  const id = request.parentRequestId || request.requestId || request.id;
+  if (!/^[A-Za-z0-9_-]{6,120}$/.test(id || '')) throw commandError('coordinator_nudge_invalid');
+  const port = /^\d{2,5}$/.test(env.CENTRO_OPERATIONS_PORT || '') ? env.CENTRO_OPERATIONS_PORT : '4187';
+  return `Aviso del panel: tienes correo pendiente de la solicitud ${id}. Léelo con orchestration check (o GET http://127.0.0.1:${port}/api/coordinator/requests/${id}) y actúa según docs/COORDINATOR_OPERATIONS.md.`;
+}
+export async function nudgeCoordinator(binding, request, { command = execute, cwd = process.cwd(), env = process.env, previous } = {}) {
+  // attempts counts lines actually typed; tries counts every look, so a busy or blocked terminal is retried sooner but not forever.
+  const done = (status, extra = {}) => ({ status, attempts: (previous?.attempts ?? 0) + (status === 'delivered' ? 1 : 0), tries: (previous?.tries ?? 0) + 1, at: new Date().toISOString(), ...extra });
+  if (env.CENTRO_COORDINATOR_NUDGE === '0') return done('disabled');
+  if (!isCoordinatorIdentity(binding) || !binding.senderId.startsWith('term_')) return done('unsupported');
+  let text;
+  try { text = nudgeText(request, env); } catch { return done('unsupported'); }
+  try { await command(['terminal', 'wait', '--terminal', binding.senderId, '--for', 'tui-idle', '--timeout-ms', '6000'], { cwd }); }
+  catch { return done('busy'); } // In a turn: it reads its inbox itself, and typing now could land in a prompt.
+  let screen;
+  try { screen = JSON.stringify(await command(['terminal', 'read', '--terminal', binding.senderId, '--screen'], { cwd })) ?? ''; }
+  catch { return done('unverified'); }
+  if (DIALOG_ON_SCREEN.test(screen)) return done('needs_person');
+  try { await command(['terminal', 'send', '--terminal', binding.senderId, '--text', text, '--enter'], { cwd }); }
+  catch (error) { return done('failed', { code: safeCode(error) }); }
+  return done('delivered');
+}
+
 export async function verifyCoordinatorBinding(binding, { command = execute, cwd = process.cwd() } = {}) {
   if (!isCoordinatorIdentity(binding)) return { ok: false, code: 'coordinator_identity_required', reason: 'Falta una identidad explícita válida del coordinador.', stage: 'identity', liveness: 'unverified' };
   let stage = 'run-show';
@@ -183,6 +212,6 @@ export async function notifyCoordinatorRequest(request, { command = execute, cwd
     ], { cwd });
     const messageId = sent?.messageId || sent?.id || sent?.message?.id;
     if (!messageId) return result('unknown', 'coordinator_message_id_missing', 'Orca no devolvió el identificador de entrega; revisa el buzón antes de repetir.');
-    return { ...result('sent', 'coordinator_message_sent', 'Aviso confirmado por Orca.'), messageId };
+    return { ...result('sent', 'coordinator_message_sent', 'Aviso confirmado por Orca.'), messageId, nudge: await nudgeCoordinator(binding, request, { command, cwd, env }) };
   } catch (error) { exitCode = error.exitCode; return result('unknown', safeCode(error), 'Orca no confirmó el resultado del aviso; revisa el buzón del coordinador antes de reintentar.'); }
 }

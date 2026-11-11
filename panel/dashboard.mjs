@@ -14,6 +14,7 @@ import { workflowV2Resumable } from '../workflow-v2-gate.mjs';
 import { createWorker } from '../providers.mjs';
 import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
 import { submitTaskToCoordinator, routeTaskFromCoordinator, checkCoordinatorRequestNotice } from './agency-assistant/coordinator-inbox.mjs';
+import { remindCoordinator } from './agency-assistant/coordinator-notice.mjs';
 import { reportCoordinatorQuestions, answerCoordinatorQuestion, readCoordinatorRequest, withdrawCoordinatorRequest, respondToCoordinatorRequest } from './agency-assistant/coordinator-dialogue.mjs';
 import { buildRequestTraces, createPreparationObserver, readRequestTrace } from './request-trace.mjs';
 import { queryRequestContext, queryJobContext, readContextConsultations } from './knowledge-access.mjs';
@@ -281,6 +282,9 @@ async function resumeCoordinatorRoutes() {
   for (const request of inbox.coordinatorRequests.filter(item => !['withdrawn', 'answered'].includes(item.status)
     && (item.notification?.status === 'pending' || item.answerNotices?.some(notice => notice.notification?.status === 'pending'))).slice(0, 3)) {
     try { await checkCoordinatorRequestNotice(QUEUE_ROOT, request.id); } catch { /* Durable intent remains pending. */ }
+  }
+  for (const request of inbox.coordinatorRequests.filter(item => item.status === 'pending' && item.notification?.status === 'sent').slice(0, 3)) {
+    try { await remindCoordinator(QUEUE_ROOT, request.id); } catch { /* The notice stays in the inbox; the panel shows it as unanswered. */ }
   }
   for (const request of inbox.coordinatorRequests.filter(item => item.status === 'routing' && item.route?.kind)) {
     try {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { notifyCoordinatorRequest, verifyCoordinatorBinding } from '../coordinator-bridge.mjs';
+import { nudgeCoordinator, nudgeText, notifyCoordinatorRequest, verifyCoordinatorBinding } from '../coordinator-bridge.mjs';
 const env = { ORCA_COORDINATOR_RUN_ID: 'run_12345678', ORCA_COORDINATOR_SENDER: 'terminal_owner123' };
 const request = { id: 'coord-1234567890abcdef', createdAt: '2026-11-08T12:00:00Z', snapshot: { business: 'games', projectId: 'flecha', title: 'Probar idea', text: 'Una solicitud', successCriteria: 'Validar reglas', destinationConfirmation: { checkout: 'workspaces/fixture', branch: 'develop' } } };
 const owner = { run: { id: env.ORCA_COORDINATOR_RUN_ID, coordinator_handle: env.ORCA_COORDINATOR_SENDER } };
@@ -133,7 +133,8 @@ test('persistent project destination and route metadata are durable before send 
   assert.equal(result.status, 'sent'); assert.equal(result.coordinatorId, selected.id);
   assert.equal(result.coordinatorName, selected.name); assert.equal(result.routeScope, 'project');
   assert.equal(result.runId, saved.runId); assert.equal(result.senderId, saved.senderId);
-  assert.deepEqual(fake.calls.map(args => `${args[0]} ${args[1]}`), ['orchestration run-show', 'terminal show', 'orchestration inbox', 'orchestration send']);
+  assert.deepEqual(fake.calls.map(args => `${args[0]} ${args[1]}`), ['orchestration run-show', 'terminal show', 'orchestration inbox', 'orchestration send', 'terminal wait']);
+  assert.equal(result.nudge.status, 'busy', 'a terminal that does not report idle is never typed into');
   const replay = await notifyCoordinatorRequest({ ...request, notification: { ...result, status: 'unknown' } }, { cwd, env, command: async () => assert.fail('changed routing cannot query or send another destination') });
   assert.equal(replay.code, 'coordinator_identity_changed'); assert.equal(replay.runId, selected.runId); assert.equal(replay.coordinatorId, selected.id);
 });
@@ -211,4 +212,49 @@ test('worker decisions point only to the original ask and never authorize routin
   assert.match(body, /orchestration reply --id msg_question123 --from TU_IDENTIDAD/);
   assert.ok(body.includes(JSON.stringify(origin))); assert.match(body, /Solo el checkout confirmado/);
   assert.ok(!body.includes('/api/coordinator/requests/')); assert.match(body, /Si el trabajador terminó/);
+});
+
+test('after a confirmed send the coordinator terminal gets one fixed line, only when idle and with no dialog on screen', async () => {
+  const binding = { runId: 'run_abcdef123456', senderId: 'term_11111111-2222-3333-4444-555555555555' };
+  const item = { id: 'coord-0123456789abcdef', snapshot: { title: 'x\nrm -rf; título con "comillas"' } };
+  const orca = screen => { const calls = []; return { calls, command: async args => { calls.push(args);
+    if (args[1] === 'wait') { if (screen === 'busy') throw Object.assign(new Error('timeout'), { code: 'orca_command_timeout' }); return { idle: true }; }
+    if (args[1] === 'read') return { screen }; if (args[1] === 'send') return { ok: true }; assert.fail(args.join(' ')); } }; };
+  const idle = orca('❯ \n  ⏵⏵ auto mode on');
+  const delivered = await nudgeCoordinator(binding, item, { command: idle.command, env: { CENTRO_OPERATIONS_PORT: '4187' } });
+  assert.deepEqual([delivered.status, delivered.attempts, delivered.tries], ['delivered', 1, 1]);
+  const sent = idle.calls.at(-1);
+  assert.deepEqual(sent.slice(0, 4), ['terminal', 'send', '--terminal', binding.senderId]); assert.equal(sent.at(-1), '--enter');
+  const text = sent[sent.indexOf('--text') + 1];
+  assert.match(text, /coord-0123456789abcdef/); assert.doesNotMatch(text, /[\r\n]|rm -rf|comillas/, 'user text never reaches the terminal');
+  assert.equal(text, nudgeText(item, { CENTRO_OPERATIONS_PORT: '4187' }));
+  // An approval dialog is on screen: a person has to answer it. Nothing is typed.
+  const dialog = orca('Allow this read outside the working directories?\n❯ 1. Yes, and keep allowing\n  Esc to cancel');
+  const blocked = await nudgeCoordinator(binding, item, { command: dialog.command, previous: delivered });
+  assert.deepEqual([blocked.status, blocked.attempts, blocked.tries], ['needs_person', 1, 2]);
+  assert.equal(dialog.calls.some(args => args[1] === 'send'), false);
+  const busy = orca('busy');
+  assert.equal((await nudgeCoordinator(binding, item, { command: busy.command })).status, 'busy'); assert.equal(busy.calls.length, 1);
+  assert.equal((await nudgeCoordinator(binding, item, { command: () => assert.fail('disabled'), env: { CENTRO_COORDINATOR_NUDGE: '0' } })).status, 'disabled');
+  assert.equal((await nudgeCoordinator({ ...binding, senderId: 'session:abcdef' }, item, { command: () => assert.fail('not a terminal') })).status, 'unsupported');
+  assert.equal((await nudgeCoordinator(binding, { id: 'x; rm' }, { command: () => assert.fail('invalid id') })).status, 'unsupported');
+});
+
+test('an unanswered delivered notice is reminded a bounded number of times and never once it has a route', async t => {
+  const { changeDashboardState, loadDashboardState } = await import('../agency-assistant/dashboard-state.mjs');
+  const { remindCoordinator } = await import('../agency-assistant/coordinator-notice.mjs');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'remind-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const id = 'coord-0123456789abcdef';
+  await changeDashboardState(root, state => { state.coordinatorRequests.push({ id, kind: 'task', status: 'pending', snapshot: { title: 't', business: 'agency' },
+    notification: { status: 'sent', runId: 'run_abcdef123456', senderId: 'term_11111111-2222-3333-4444-555555555555', nudge: { status: 'busy', attempts: 0, tries: 1, at: new Date(0).toISOString() } } }); });
+  let clock = 1_000_000, typed = 0;
+  const nudge = async (binding, request, { previous }) => { typed++; return { status: 'delivered', attempts: (previous?.attempts ?? 0) + 1, tries: (previous?.tries ?? 0) + 1, at: new Date(clock).toISOString() }; };
+  assert.equal((await remindCoordinator(root, id, { nudge, now: () => clock })).attempts, 1);
+  assert.equal(await remindCoordinator(root, id, { nudge, now: () => clock + 60_000 }), null, 'not again within two minutes of a delivered line');
+  clock += 130_000; assert.equal((await remindCoordinator(root, id, { nudge, now: () => clock })).attempts, 2);
+  clock += 130_000; assert.equal((await remindCoordinator(root, id, { nudge, now: () => clock })).attempts, 3);
+  clock += 130_000; assert.equal(await remindCoordinator(root, id, { nudge, now: () => clock }), null, 'three lines at most');
+  assert.equal(typed, 3); assert.equal((await loadDashboardState(root)).coordinatorRequests[0].notification.nudge.attempts, 3);
+  await changeDashboardState(root, state => { state.coordinatorRequests[0].status = 'routed'; state.coordinatorRequests[0].notification.nudge = undefined; });
+  assert.equal(await remindCoordinator(root, id, { nudge, now: () => clock + 999_999 }), null); assert.equal(typed, 3);
 });
