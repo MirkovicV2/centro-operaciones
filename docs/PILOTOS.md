@@ -75,17 +75,17 @@ Revisión, equipo responsable, contrato en ocho secciones, integración.
 
 No se ha ejercitado: Codex (ni `gpt-6.1-sol` en Orca), Diseño con Claude, escaladas, reservas de rama, Windows.
 
-Lo que salió:
+Lo que salió, y cómo quedó (rama `david/correcciones-piloto`; nada de esto se ha repetido aún con agentes reales):
 
-- El contrato local de Desarrollo mandaba leer una skill fuera del checkout (`~/dev/es-skills`) y Claude Code pidió
-  permiso: la etapa esperó 18 minutos. Las skills que cite un contrato deben estar en la lista `allow` del checkout o
-  registradas en el Centro (docs/SKILLS.md), que las copia donde el trabajador ya puede leer.
-- Cada etapa espera unos 2 minutos entre la entrega y el cierre del trabajador en Orca: 6 de los 9 minutos y medio de
-  máquina. El trabajo real fue de 28 s en QA y 46 s en Revisión. Es el punto con más margen; falta saber si Orca
-  permite cerrar antes.
-- El coordinador enrutó el primer aviso en 27 s y no reaccionó al segundo hasta que se le escribió.
-- Un fallo de Git antes de admitir (el repositorio ya no existía) deja el recibo bloqueado sin reintento y sin el
-  detalle del error.
-- A un encargo sin interfaz se le ofrecieron `frontend-design` y `web-testing`; la vista previa del formulario no
-  tiene en cuenta la cuota y anunciaba Codex.
-- Una observación en la reserva caducaba y reabría el proveedor (corregido).
+| Qué pasó | Arreglo |
+| --- | --- |
+| El contrato local de Desarrollo mandaba leer una skill fuera del checkout y Claude Code pidió permiso: 18 minutos parado sin que el panel lo dijera. | El motor mira la pantalla del trabajador cada medio minuto y, si hay un diálogo de aprobación, lo lleva a Atención. Al lanzar se anotan los archivos citados que el checkout no deja leer. |
+| Cada etapa esperaba 2 minutos entre la entrega y el cierre del trabajador: 6 de los 9,5 minutos de máquina. | Se pide `worker-release` al recibir la entrega. Falta medirlo en Orca real. |
+| El coordinador enrutó el primer aviso en 27 s y no reaccionó al segundo hasta que se le escribió. | El correo de Orca no despierta a una sesión parada. El panel escribe una línea fija en su terminal cuando está inactiva, con reintento acotado. |
+| El repositorio ya no existía: recibo bloqueado sin reintento ni detalle. | La causa queda en el recibo, se puede volver a comprobar el mismo recibo, el diálogo de destino avisa antes de enviar y ofrece recrear el repositorio. |
+| A un encargo sin interfaz se le ofrecieron `frontend-design` y `web-testing`. | Esas dos skills solo se ofrecen por defecto en la ruta con Diseño. |
+| La vista previa anunciaba Codex estando en la reserva. | La vista previa aplica la política de cuota. |
+| Reenviar el mismo texto tras cancelar apuntaba a la solicitud vieja. | Si la anterior está cerrada, es una solicitud nueva. |
+| Una observación en la reserva caducaba y reabría el proveedor. | Vale hasta el reinicio anotado. |
+
+Pendiente: cambiar de proveedor cuando un trabajador se corta por cuota a mitad de etapa (hoy lo relanza la persona), y el piloto con Codex.

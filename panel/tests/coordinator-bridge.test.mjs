@@ -258,3 +258,18 @@ test('an unanswered delivered notice is reminded a bounded number of times and n
   await changeDashboardState(root, state => { state.coordinatorRequests[0].status = 'routed'; state.coordinatorRequests[0].notification.nudge = undefined; });
   assert.equal(await remindCoordinator(root, id, { nudge, now: () => clock + 999_999 }), null); assert.equal(typed, 3);
 });
+
+test('destination preparation is launched at the lightest level, on Codex when the profile is mixed, and follows the quota policy', async t => {
+  const { preparationLaunch } = await import('../coordinator-bridge.mjs');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'prep-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'data'));
+  assert.deepEqual(await preparationLaunch(root, { CENTRO_ORCA_AGENT: 'claude' }), { agent: 'claude', model: null, effort: null }, 'single agent: its own lightest level');
+  assert.deepEqual(await preparationLaunch(root, {}), { agent: 'codex', model: 'gpt-6.1-sol', effort: 'low' });
+  await fs.writeFile(path.join(root, 'data', 'pipeline.json'), JSON.stringify({ version: 1, general: { roles: { desarrollador: { agent: 'claude', model: 'sonnet' }, qa: { agent: 'codex', model: 'gpt-6.1-sol', effort: 'medium' } } } }));
+  assert.deepEqual(await preparationLaunch(root, { CENTRO_ORCA_AGENT: 'claude' }), { agent: 'codex', model: 'gpt-6.1-sol', effort: 'low' }, 'mixed profile: Codex ligero');
+  const now = new Date().toISOString(), later = new Date(Date.now() + 86_400_000).toISOString();
+  await fs.writeFile(path.join(root, 'data', 'quota.json'), JSON.stringify({ version: 1, alAgotar: 'sustituir', sustituciones: { codex: 'claude' },
+    proveedores: { codex: { autenticacion: 'suscripcion', usadoPorcentaje: 93, observadoEn: now, reiniciaEn: later }, claude: { autenticacion: 'suscripcion', usadoPorcentaje: 40, observadoEn: now } } }));
+  const moved = await preparationLaunch(root, { CENTRO_ORCA_AGENT: 'claude' });
+  assert.deepEqual([moved.agent, moved.model, moved.substitutedFrom.agent], ['claude', null, 'codex']);
+});
