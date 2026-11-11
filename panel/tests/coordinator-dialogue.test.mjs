@@ -167,3 +167,26 @@ test('withdrawal refuses uncertain notices and durable routing receipts', async 
   await routeTaskFromCoordinator(root, request.id, 'analysis');
   await assert.rejects(withdrawCoordinatorRequest(root, request.id), /ruta/);
 });
+
+test('discarding clears a request stuck on an uncertain delivery and records it as discarded', async t => {
+  const { root, request, idea } = await fixture(t, { idea: true, project: false });
+  await changeDashboardState(root, state => { state.coordinatorRequests[0].notification.status = 'needs_attention'; });
+  await assert.rejects(withdrawCoordinatorRequest(root, request.id), /incierta/);
+  const discarded = await withdrawCoordinatorRequest(root, request.id, { discard: true });
+  assert.equal(discarded.status, 'withdrawn');
+  assert.equal(discarded.discarded, true);
+  assert.equal(discarded.discardedWhileUncertain, true);
+  assert.ok(discarded.discardedAt);
+  assert.equal((await withdrawCoordinatorRequest(root, request.id, { discard: true })).status, 'withdrawn');
+  await checkCoordinatorRequestNotice(root, request.id, { notify: async () => assert.fail('discarded request cannot be sent') });
+  const edited = await mutateIdea(root, idea.id, 'update', { version: 1, title: idea.title, text: idea.text, focus: 'mixed', tags: [], projectId: '' });
+  const next = await sendIdeaToCoordinator(root, idea.id, { notify: notified });
+  assert.equal(edited.version, 2);
+  assert.notEqual(next.request.id, request.id);
+});
+
+test('discarding still refuses requests that already have a routing receipt', async t => {
+  const { root, request } = await fixture(t);
+  await routeTaskFromCoordinator(root, request.id, 'analysis');
+  await assert.rejects(withdrawCoordinatorRequest(root, request.id, { discard: true }), /no se puede descartar/);
+});

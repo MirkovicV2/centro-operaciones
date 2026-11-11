@@ -288,3 +288,14 @@ test('unconfirmed grouped answer notices remain visible and actionable after the
   assert.equal((await get()).status, 'answered');
   request.status = 'withdrawn'; assert.equal((await get()).status, 'withdrawn');
 });
+
+test('a discarded request is labelled as such and tells the person it can be sent again', async () => {
+  const { request } = traceFixture(); request.status = 'withdrawn'; request.discarded = true; request.withdrawnAt = '2026-11-11T10:00:00Z'; request.discardedAt = request.withdrawnAt;
+  const [trace] = await buildRequestTraces('.', { requests: [request], preparations: [] });
+  assert.equal(trace.status, 'withdrawn'); assert.equal(trace.statusLabel, 'Descartada');
+  assert.match(trace.nextAction, /descartada/i);
+  assert.ok(trace.events.some(event => event.label === 'Solicitud descartada'));
+  request.discarded = false;
+  const [plain] = await buildRequestTraces('.', { requests: [request], preparations: [] });
+  assert.notEqual(plain.statusLabel, 'Descartada');
+});

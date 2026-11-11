@@ -690,6 +690,14 @@ function renderJobs(data) {
         try { await api(`/api/coordinator/requests/${encodeURIComponent(request.id)}/withdraw`, { method: 'POST', body: '{}' }); await refresh(); } catch (error) { notify(error.message, true); }
       };
       card.append(withdraw);
+    } else if (request.status !== 'routing') {
+      // Con la entrega sin confirmar no se puede retirar: se puede descartar en el panel, dejando constancia de ello.
+      const discard = el('button', 'button secondary', 'Descartar petición'); discard.type = 'button';
+      discard.onclick = async () => {
+        if (!await confirmIdeaAction('Descartar petición', 'Se cierra esta petición en el panel y se conserva su historial. La entrega al coordinador no está confirmada: si ya la recibió, ese aviso no se retira y podría seguir trabajando en ella.', 'Descartar')) return;
+        try { await api(`/api/coordinator/requests/${encodeURIComponent(request.id)}/discard`, { method: 'POST', body: JSON.stringify({ confirm: true }) }); await refresh(); } catch (error) { notify(error.message, true); }
+      };
+      card.append(discard);
     }
     coordinatorList.append(card);
   }

@@ -114,6 +114,22 @@
       check.onclick = async () => { check.disabled = true; try { const r = await fetch(`/api/coordinator/requests/${encodeURIComponent(trace.requestId)}/notify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); const result = await r.json(); if (!r.ok) throw new Error(result.error); $('refresh').click(); } catch (error) { check.textContent = error.message || 'No se pudo consultar la entrega'; check.disabled = false; } };
       item.append(check);
     }
+    // Una petición atascada (sin trabajo ni respuesta) se puede cerrar aquí aunque la entrega al coordinador no esté confirmada.
+    if (request && ['pending', 'needs_attention'].includes(request.status) && !request.jobId && !request.receiptId && !(trace.ids?.jobIds || []).length) {
+      const discard = make('button', 'button secondary', 'Descartar petición'); discard.type = 'button';
+      discard.onclick = async () => {
+        const uncertain = ['sending', 'unknown', 'needs_attention'].includes(request.notification?.status) || (request.answerNotices || []).some(notice => ['sending', 'unknown', 'needs_attention'].includes(notice.notification?.status));
+        const message = `Se cierra esta petición en el panel y se conserva su historial. ${uncertain ? 'La entrega al coordinador no está confirmada: si ya la recibió, ese aviso no se retira y podría seguir trabajando en ella. ' : ''}Podrás volver a enviarla desde Ideas y preguntas.`;
+        const confirmed = typeof confirmIdeaAction === 'function' ? await confirmIdeaAction('Descartar petición', message, 'Descartar') : window.confirm(message);
+        if (!confirmed) return;
+        discard.disabled = true;
+        try {
+          const r = await fetch(`/api/coordinator/requests/${encodeURIComponent(trace.requestId)}/discard`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: true }) });
+          const result = await r.json(); if (!r.ok) throw new Error(result.error); $('refresh').click();
+        } catch (error) { discard.textContent = error.message || 'No se pudo descartar'; discard.disabled = false; }
+      };
+      item.append(discard);
+    }
     if (trace.response?.text) {
       const response = make('section', 'request-answer'); response.append(make('h4', '', 'Respuesta del coordinador'), responseProse(trace.response.text));
       for (const source of trace.response.sources || []) {
