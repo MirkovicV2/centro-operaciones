@@ -123,3 +123,22 @@ test('a criterion the worker escaped twice still names the same criterion; anoth
   const delivery = parseDelivery('```centro-delivery\n' + JSON.stringify(body) + '\n```', { ...identity, acceptance: [criterion] }, { required: true, strictReview: true });
   assert.equal(delivery.approval, 'approved');
 });
+
+test('a criterion whose quotes were eaten by the shell still matches, but only with its exact id', async () => {
+  const { matchesCriterion, criterionId, parseDelivery } = await import('../workflow-contract.mjs');
+  const pairs = [["`reverse('abc') === 'cba'`.", '`reverse(abc) === cba`.'], ["`reverse('') === ''`.", '`reverse() === `.'], ["`reverse(42) === ''`.", '`reverse(42) === `.']];
+  for (const [criterion, eaten] of pairs) {
+    assert.equal(matchesCriterion({ criterion: eaten, criterionId: criterionId(criterion) }, criterion), true, eaten);
+    assert.equal(matchesCriterion({ criterion: eaten }, criterion), false, 'without the id the text has to match');
+    assert.equal(matchesCriterion({ criterion: eaten, criterionId: 'crit_0000000000000000' }, criterion), false);
+  }
+  assert.equal(matchesCriterion({ criterion: '`reverse(abd) === cba`.', criterionId: criterionId("`reverse('abc') === 'cba'`.") }, "`reverse('abc') === 'cba'`."), false, 'another word is another criterion');
+  // The real QA report of the third pilot, as stored.
+  const acceptance = ['`npm test` del sandbox pasa.', ...pairs.map(([criterion]) => criterion)];
+  const identity = { jobId: 'idea-0f33595e-b7a0-46ee-8a42-d140074fc790-v1-code', jobAttempt: 1, stage: 'qa', runId: 'run_d6fadfc7e433', taskId: 'task_d81ff9cee2f5', dispatchId: 'ctx_773785a72173' };
+  const body = { version: 1, ...identity, outcome: 'completed', scope: 'complete', approval: 'approved', summary: 'QA sin ediciones; npm test 22/22.',
+    acceptance: [{ criterion: acceptance[0], criterionId: criterionId(acceptance[0]), status: 'passed', evidence: 'npm test: 22/22' },
+      ...pairs.map(([criterion, eaten]) => ({ criterion: eaten, criterionId: criterionId(criterion), status: 'passed', evidence: 'test pasa' }))],
+    evidence: ['npm test: 22/22'], questions: [], decisions: [], findings: [] };
+  assert.equal(parseDelivery(JSON.stringify(body), { ...identity, acceptance }, { required: true, strictReview: true }).approval, 'approved');
+});
