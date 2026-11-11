@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { projectMemory } from './project-memory.mjs';
 import { resolveOperationsRoot } from './operations-root.mjs';
 import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
-import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, cancelQueuedJob, settledQaRevalidation, stoppedDeveloperCheckpoint, actorContext } from './queue.mjs';
+import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, cancelQueuedJob, settledQaRevalidation, stoppedDeveloperCheckpoint, isDeliveryTransportCheckpoint, actorContext } from './queue.mjs';
 import { parseTailscaleAccess, assertRoleAllows } from './access-control.mjs';
 import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt, resumeWorkflowV2Receipt, retryDestinationAdmission } from '../auto-run.mjs';
 import { destinationCheck, createMissingRemote } from '../project-remote.mjs';
@@ -457,7 +457,9 @@ async function handleApi(request, response, url, tailscale = null) {
       const current = (await loadQueue(QUEUE_ROOT)).jobs.find(item => item.id === reviewedJob[1]);
       const receipt = current?.autoIntent?.eligible ? (await readAutoRun(QUEUE_ROOT)).receipts.find(item => item.jobId === current.id) : null;
       const confirm = body.confirmReviewed === true;
-      if (receipt?.status === 'needs_attention' && (stoppedDeveloperCheckpoint(current) || settledQaRevalidation(current))) {
+      if (receipt?.status === 'needs_attention' && (stoppedDeveloperCheckpoint(current) || settledQaRevalidation(current) || isDeliveryTransportCheckpoint(current))) {
+        // A completed QA/Revisión whose stored report was refused only for how it named the criteria re-reads that same report.
+        // Without this the button fell through to the pre-dispatch retry and failed (second real pilot).
         job = await resumeCoordinatedDispatch(QUEUE_ROOT, current.id, { confirm });
       } else if (receipt?.status === 'needs_attention' && workflowV2Resumable(current)) {
         // Workflow V2 phase B: read the owner's approval and integrate only that candidate.
