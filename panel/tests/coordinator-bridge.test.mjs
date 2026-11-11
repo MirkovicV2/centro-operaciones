@@ -273,3 +273,19 @@ test('destination preparation is launched at the lightest level, on Codex when t
   const moved = await preparationLaunch(root, { CENTRO_ORCA_AGENT: 'claude' });
   assert.deepEqual([moved.agent, moved.model, moved.substitutedFrom.agent], ['claude', null, 'codex']);
 });
+
+test('a panel request is confirmed before the reminder line is written, and the line follows on its own', async t => {
+  const { changeDashboardState, loadDashboardState } = await import('../agency-assistant/dashboard-state.mjs');
+  const { deliverCoordinatorNotice } = await import('../agency-assistant/coordinator-notice.mjs');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'notice-later-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const id = 'coord-0123456789abcdef';
+  await changeDashboardState(root, state => { state.coordinatorRequests.push({ id, kind: 'task', status: 'pending', snapshot: { title: 't', business: 'agency' }, notification: { status: 'pending' } }); });
+  let modes = [], release, reminded = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  const notify = async (request, options) => { modes.push(options.nudge); return { status: 'sent', code: 'coordinator_message_sent', runId: 'run_abcdef123456', senderId: 'term_11111111-2222-3333-4444-555555555555', messageId: 'msg_1' }; };
+  const remind = async () => { await gate; reminded = true; };
+  const delivered = await deliverCoordinatorNotice(root, id, notify, { remind });
+  assert.deepEqual(modes, ['later']); assert.equal(delivered.notification.status, 'sent'); assert.equal(reminded, false, 'the answer does not wait for the terminal');
+  release(); await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(reminded, true);
+  assert.equal((await loadDashboardState(root)).coordinatorRequests[0].notification.status, 'sent');
+});

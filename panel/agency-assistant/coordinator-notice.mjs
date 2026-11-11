@@ -4,7 +4,15 @@ import { notifyCoordinatorRequest, nudgeCoordinator, NUDGE_RETRY_MS, NUDGE_BUSY_
 
 // Keep the target and send intent durable before the external effect. After a
 // crash, only reconcile that same inbox; absence is not proof of non-delivery.
-export function deliverCoordinatorNotice(root, requestId, notify = notifyCoordinatorRequest) {
+// The reminder talks to the real coordinator terminal, so it only follows the real notifier; a simulated one gets none.
+export async function deliverCoordinatorNotice(root, requestId, notify = notifyCoordinatorRequest, { remind = notify === notifyCoordinatorRequest ? remindCoordinator : null } = {}) {
+  const delivered = await deliverOnce(root, requestId, notify);
+  // The reminder line goes after the confirmation is saved, in the background: the panel answers the person at once.
+  if (delivered?.status === 'pending' && delivered.notification?.status === 'sent' && !delivered.notification.nudge && remind) void Promise.resolve().then(() => remind(root, requestId)).catch(() => {});
+  return delivered;
+}
+
+function deliverOnce(root, requestId, notify) {
   return withInboxLock(root, `notice:${requestId}`, async () => {
     const request = (await loadDashboardState(root)).coordinatorRequests.find(item => item.id === requestId);
     if (!request) throw new Error('No encuentro esa solicitud del coordinador.');
@@ -12,7 +20,7 @@ export function deliverCoordinatorNotice(root, requestId, notify = notifyCoordin
     let notification;
     try {
       notification = await notify(request, {
-        cwd: root,
+        cwd: root, nudge: 'later',
         beforeSend: async target => changeDashboardState(root, state => {
           const current = state.coordinatorRequests.find(item => item.id === requestId);
           current.notification = { status: 'sending', ...target, updatedAt: new Date().toISOString() };

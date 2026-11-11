@@ -181,7 +181,9 @@ export async function verifyCoordinatorBinding(binding, { command = execute, cwd
 }
 
 // The panel is not an Orca terminal. A working directory never selects a sender.
-export async function notifyCoordinatorRequest(request, { command = execute, cwd = process.cwd(), env = process.env, beforeSend = async () => {} } = {}) {
+// nudge: 'inline' writes the reminder line before returning; 'later' leaves it to the caller (remindCoordinator), so a
+// person sending from the panel gets the confirmation without waiting for the coordinator's terminal (up to 10 s).
+export async function notifyCoordinatorRequest(request, { command = execute, cwd = process.cwd(), env = process.env, beforeSend = async () => {}, nudge = 'inline' } = {}) {
   const uncertain = ['sending', 'unknown', 'needs_attention'].includes(request.notification?.status) || !!request.sendIntent;
   let stage = 'identity', exitCode, binding;
   const result = (status, code, reason) => ({ status, code, reason, requestId: request.id, stage, uncertain: ['unknown', 'needs_attention'].includes(status), ...(Number.isInteger(exitCode) ? { exitCode } : {}), ...binding });
@@ -226,6 +228,6 @@ export async function notifyCoordinatorRequest(request, { command = execute, cwd
     ], { cwd });
     const messageId = sent?.messageId || sent?.id || sent?.message?.id;
     if (!messageId) return result('unknown', 'coordinator_message_id_missing', 'Orca no devolvió el identificador de entrega; revisa el buzón antes de repetir.');
-    return { ...result('sent', 'coordinator_message_sent', 'Aviso confirmado por Orca.'), messageId, nudge: await nudgeCoordinator(binding, request, { command, cwd, env }) };
+    return { ...result('sent', 'coordinator_message_sent', 'Aviso confirmado por Orca.'), messageId, ...(nudge === 'inline' ? { nudge: await nudgeCoordinator(binding, request, { command, cwd, env }) } : {}) };
   } catch (error) { exitCode = error.exitCode; return result('unknown', safeCode(error), 'Orca no confirmó el resultado del aviso; revisa el buzón del coordinador antes de reintentar.'); }
 }
