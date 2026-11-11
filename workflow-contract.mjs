@@ -20,9 +20,14 @@ export function canonicalCriterion(text) {
 // Stable id derived from the canonical text, so contracts stored without ids keep working.
 export const criterionId = text => 'crit_' + createHash('sha256').update(canonicalCriterion(text)).digest('hex').slice(0, 16);
 export const acceptanceCriteriaIds = acceptance => (acceptance ?? []).map(criterion => ({ id: criterionId(criterion), criterion }));
+// A worker told to send non-ASCII as \uXXXX sometimes escapes twice, and escapes plain ASCII too: after JSON.parse its
+// text still carries a literal \u0027 where the criterion has an apostrophe (second real pilot: an approved review was
+// stopped for "omitting" a criterion it had quoted with its exact id). Undone on the worker's side only, for comparing.
+const unescapedUnicode = text => String(text ?? '').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 export function matchesCriterion(item, criterion) {
   if (!object(item) || typeof criterion !== 'string') return false;
-  return canonicalCriterion(item.criterion) === canonicalCriterion(criterion)
+  const wanted = canonicalCriterion(criterion);
+  return (canonicalCriterion(item.criterion) === wanted || canonicalCriterion(unescapedUnicode(item.criterion)) === wanted)
     && (item.criterionId === undefined || item.criterionId === criterionId(criterion));
 }
 const nonempty = (value, max = 12000) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;

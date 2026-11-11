@@ -281,10 +281,10 @@
           <fieldset class="pipeline-row quota-policy"><legend>Política</legend>
             <label for="quota-reserve">Reserva personal (%)<input id="quota-reserve" name="reservaPersonalPorcentaje" type="number" min="10" max="90" step="1" inputmode="numeric"></label>
             <label for="quota-warn">Avisar desde (%)<input id="quota-warn" name="avisoPorcentaje" type="number" min="1" max="100" step="1" inputmode="numeric"></label>
-            <label for="quota-stale">Una observación vale (horas)<input id="quota-stale" name="caducidadObservacionHoras" type="number" min="1" max="168" step="1" inputmode="numeric"></label>
+            <label for="quota-stale">Una observación de «disponible» vale (horas)<input id="quota-stale" name="caducidadObservacionHoras" type="number" min="1" max="168" step="1" inputmode="numeric"></label>
             <label for="quota-nodata">Sin observación reciente<select id="quota-nodata" name="sinDatos"><option value="admitir">Lanzar y avisar</option><option value="esperar">Esperar</option></select></label>
             <label for="quota-exhausted">Al llegar a la reserva<select id="quota-exhausted" name="alAgotar"><option value="esperar">Esperar</option><option value="sustituir">Sustituir por el otro proveedor</option></select></label>
-            <p class="pipeline-row-note">La sustitución solo usa un proveedor con suscripción y con uso observado por debajo de la reserva. La reserva mínima es del 10 %.</p>
+            <p class="pipeline-row-note">Una observación que deja al proveedor en la reserva vale hasta su reinicio, pasen las horas que pasen. La sustitución solo usa un proveedor con suscripción y con una observación reciente por debajo de la reserva: si la del sustituto ha caducado, la etapa espera. La reserva mínima es del 10 %.</p>
           </fieldset>
           <div class="form-footer"><span id="quota-dirty">Sin cambios</span><div class="button-row"><button type="submit" class="button primary" id="quota-save">Guardar cuota</button></div></div>
         </form>

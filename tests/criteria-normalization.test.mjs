@@ -106,3 +106,20 @@ test('a stored report that validates under the normalized rules recovers without
     readArchive: async () => { archiveReads++; throw Object.assign(new Error('sin archivo'), { code: 'orca_archived_transcript_unverified' }); } }), /sin archivo/);
   assert.equal(archiveReads, 1);
 });
+
+test('a criterion the worker escaped twice still names the same criterion; another text or another id does not', async () => {
+  const { matchesCriterion, criterionId, parseDelivery } = await import('../workflow-contract.mjs');
+  const criterion = "`countWords('Hola mundo cruel') === 3`.";
+  const escaped = '`countWords(\\u0027Hola mundo cruel\\u0027) === 3`.'; // what JSON.parse leaves when the worker wrote \\\\u0027
+  assert.equal(matchesCriterion({ criterion: escaped, criterionId: criterionId(criterion) }, criterion), true);
+  assert.equal(matchesCriterion({ criterion: escaped }, criterion), true);
+  assert.equal(matchesCriterion({ criterion: 'Revisi\\u00f3n del c\\u00f3digo.' }, 'Revisión del código.'), true);
+  assert.equal(matchesCriterion({ criterion: '`countWords(\\u0027Otra cosa\\u0027) === 3`.', criterionId: criterionId(criterion) }, criterion), false);
+  assert.equal(matchesCriterion({ criterion: escaped, criterionId: 'crit_0000000000000000' }, criterion), false);
+  // The real report: an approved review whose every string was escaped twice now validates as the approval it is.
+  const identity = { jobId: 'job-escape-0001', jobAttempt: 1, stage: 'reviewer', runId: 'run_escape0001', taskId: 'task_escape0001', dispatchId: 'ctx_escape0001' };
+  const body = { version: 1, ...identity, outcome: 'completed', scope: 'complete', approval: 'approved', summary: 'Revisi\\u00f3n de solo lectura. RESULTADO: APROBADO',
+    acceptance: [{ criterion: escaped, criterionId: criterionId(criterion), status: 'passed', evidence: 'test/text.test.mjs:70; pasa' }], evidence: ['npm test: 18/18'], questions: [], decisions: [] };
+  const delivery = parseDelivery('```centro-delivery\n' + JSON.stringify(body) + '\n```', { ...identity, acceptance: [criterion] }, { required: true, strictReview: true });
+  assert.equal(delivery.approval, 'approved');
+});
