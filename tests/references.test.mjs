@@ -3,18 +3,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { importReferences, prepareStageReferences, listReferences, scopeFor, setName, ReferenceError, importIdeaZip, ideaAttachments, removeIdeaReferences } from '../references.mjs';
+import zlib from 'node:zlib';
+import { writeFileSync } from 'node:fs';
+import { importReferences, extractZip, prepareStageReferences, listReferences, scopeFor, setName, ReferenceError, importIdeaZip, ideaAttachments, removeIdeaReferences } from '../references.mjs';
 
 const tmp = async t => { const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'refs-')); t.after(() => fs.rm(dir, { recursive: true, force: true })); return dir; };
 const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = buffer => { let c = 0xffffffff; for (const byte of buffer) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
-// Minimal stored (uncompressed) zip, enough to test extraction on any platform.
-function makeZip(entries) {
+// Minimal zip (stored or deflate), enough to test extraction on any platform.
+function makeZip(entries, { deflate = false, symlink = false } = {}) {
   const locals = [], centrals = []; let offset = 0;
   for (const [name, data] of Object.entries(entries)) {
-    const nameBytes = Buffer.from(name), body = Buffer.from(data), crc = crc32(body);
-    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt32LE(crc, 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(body.length, 22); local.writeUInt16LE(nameBytes.length, 26);
-    const central = Buffer.alloc(46); central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt32LE(crc, 16); central.writeUInt32LE(body.length, 20); central.writeUInt32LE(body.length, 24); central.writeUInt16LE(nameBytes.length, 28); central.writeUInt32LE(offset, 42);
+    const nameBytes = Buffer.from(name), plain = Buffer.from(data), crc = crc32(plain), body = deflate ? zlib.deflateRawSync(plain) : plain, method = deflate ? 8 : 0;
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8); local.writeUInt32LE(crc, 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(plain.length, 22); local.writeUInt16LE(nameBytes.length, 26);
+    const central = Buffer.alloc(46); central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(method, 10); central.writeUInt32LE(crc, 16); central.writeUInt32LE(body.length, 20); central.writeUInt32LE(plain.length, 24); if (symlink) central.writeUInt32LE((0xa1ff << 16) >>> 0, 38); central.writeUInt16LE(nameBytes.length, 28); central.writeUInt32LE(offset, 42);
     locals.push(local, nameBytes, body); centrals.push(central, nameBytes); offset += 30 + nameBytes.length + body.length;
   }
   const centralBytes = Buffer.concat(centrals), end = Buffer.alloc(22);
@@ -92,3 +94,16 @@ test('references attached to an idea reach every stage of the jobs born from it,
   assert.deepEqual(await removeIdeaReferences(root, 'abc12345', 'estilo-bar'), []);
   assert.deepEqual((await prepareStageReferences({ root, job: withIdea, stage: 'ux' })).supplied.map(item => item.scope), ['empresa-agency'], 'only the general library is left');
 });
+
+test('the zip reader needs no external tool: deflate works, and unsafe paths or links are refused', async t => {
+  const root = await tmp(t), pack = (entries, options) => fs.writeFile(path.join(root, 'z.zip'), makeZip(entries, options)).then(() => path.join(root, 'z.zip'));
+  const out = path.join(root, 'out'); await fs.mkdir(out);
+  extractZip(await pack({ 'LEEME.md': 'Texto '.repeat(500), 'capturas/uno.txt': 'dentro' }, { deflate: true }), out);
+  assert.equal(await fs.readFile(path.join(out, 'LEEME.md'), 'utf8'), 'Texto '.repeat(500));
+  assert.equal(await fs.readFile(path.join(out, 'capturas', 'uno.txt'), 'utf8'), 'dentro');
+  for (const name of ['../fuera.txt', 'a/../../fuera.txt', '/abs.txt', 'C:/abs.txt', '..\\fuera.txt'])
+    assert.throws(() => extractZip(fsSyncPack(root, { [name]: 'x' }), out), /ruta no válida/, name);
+  assert.throws(() => extractZip(fsSyncPack(root, { 'enlace': '/etc/passwd' }, { symlink: true }), out), /enlaces no se admiten/);
+  await assert.rejects(fs.access(path.join(root, 'fuera.txt')));
+});
+function fsSyncPack(root, entries, options) { const file = path.join(root, 'sync.zip'); writeFileSync(file, makeZip(entries, options)); return file; }

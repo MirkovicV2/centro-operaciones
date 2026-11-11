@@ -5,9 +5,11 @@
 // Un conjunto cuyo contenido no coincide con su manifiesto se omite y se anota; nunca bloquea la etapa.
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const REFERENCES_DIR = path.join('data', 'references');
@@ -40,8 +42,58 @@ async function walk(dir, base = dir) {
   return out;
 }
 
-// bsdtar (Windows 10+) reads zip; unzip covers Linux and macOS; PowerShell is the last resort on Windows.
+// Lector de .zip en Node puro: sin tar, unzip ni PowerShell, igual en Windows y Ubuntu (GNU tar no lee zip y unzip no viene
+// en instalaciones mínimas). Solo admite lo habitual (almacenado o deflate, sin cifrar, sin zip64); lo demás pasa al respaldo.
+// Rechaza rutas que se salen de la carpeta y enlaces simbólicos, y acota el tamaño descomprimido.
+class UnsupportedZip extends Error {}
+const ZIP_LIMITS = { entries: 2000, total: 200_000_000 };
+function unsafeEntry(name) { return !name || name.startsWith('/') || /^[a-zA-Z]:/.test(name) || name.includes('\0') || name.split('/').some(part => part === '..'); }
+export function extractZipNode(zip, destination) {
+  const buffer = readFileSync(zip);
+  let end = -1;
+  for (let at = buffer.length - 22; at >= Math.max(0, buffer.length - 22 - 65535); at--) if (buffer.readUInt32LE(at) === 0x06054b50) { end = at; break; }
+  if (end < 0) throw new UnsupportedZip('sin directorio central');
+  const count = buffer.readUInt16LE(end + 10), size = buffer.readUInt32LE(end + 12), start = buffer.readUInt32LE(end + 16);
+  if (count === 0xffff || size === 0xffffffff || start === 0xffffffff) throw new UnsupportedZip('zip64');
+  if (count > ZIP_LIMITS.entries) throw new ReferenceError('El .zip tiene demasiados archivos.');
+  const root = path.resolve(destination);
+  let at = start, total = 0;
+  const entries = [];
+  for (let n = 0; n < count; n++) {
+    if (at + 46 > buffer.length || buffer.readUInt32LE(at) !== 0x02014b50) throw new UnsupportedZip('directorio central dañado');
+    const flags = buffer.readUInt16LE(at + 8), method = buffer.readUInt16LE(at + 10), packed = buffer.readUInt32LE(at + 20), unpacked = buffer.readUInt32LE(at + 24);
+    const nameLength = buffer.readUInt16LE(at + 28), extraLength = buffer.readUInt16LE(at + 30), commentLength = buffer.readUInt16LE(at + 32);
+    const attributes = buffer.readUInt32LE(at + 38), offset = buffer.readUInt32LE(at + 42);
+    const name = buffer.toString('utf8', at + 46, at + 46 + nameLength).replace(/\\/g, '/');
+    at += 46 + nameLength + extraLength + commentLength;
+    if (flags & 1) throw new UnsupportedZip('cifrado');
+    if (((attributes >>> 16) & 0xf000) === 0xa000) throw new ReferenceError(`Los enlaces no se admiten: ${name}.`);
+    if (unsafeEntry(name)) throw new ReferenceError(`El .zip contiene una ruta no válida: ${name}.`);
+    total += unpacked;
+    if (total > ZIP_LIMITS.total) throw new ReferenceError('El .zip descomprimido supera el límite de tamaño.');
+    entries.push({ name, method, packed, unpacked, offset });
+  }
+  for (const { name, method, packed, unpacked, offset } of entries) {
+    const target = path.resolve(root, ...name.split('/'));
+    if (target !== root && !target.startsWith(root + path.sep)) throw new ReferenceError(`El .zip contiene una ruta no válida: ${name}.`);
+    if (name.endsWith('/')) { mkdirSync(target, { recursive: true }); continue; }
+    if (offset + 30 > buffer.length || buffer.readUInt32LE(offset) !== 0x04034b50) throw new UnsupportedZip('cabecera local dañada');
+    const from = offset + 30 + buffer.readUInt16LE(offset + 26) + buffer.readUInt16LE(offset + 28);
+    if (from + packed > buffer.length) throw new UnsupportedZip('datos incompletos');
+    const raw = buffer.subarray(from, from + packed);
+    let data;
+    if (method === 0) data = raw;
+    else if (method === 8) { try { data = zlib.inflateRawSync(raw, { maxOutputLength: unpacked + 1 }); } catch { throw new UnsupportedZip('deflate no válido'); } }
+    else throw new UnsupportedZip(`método ${method}`);
+    if (data.length !== unpacked) throw new UnsupportedZip('tamaño no coincide');
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, data);
+  }
+}
+
+// Primero el lector propio; si el zip tiene algo que no admite, bsdtar (Windows 10+), unzip (Linux/macOS) o PowerShell (Windows).
 export function extractZip(zip, destination) {
+  try { extractZipNode(zip, destination); return; } catch (error) { if (error instanceof ReferenceError) throw error; /* zip no admitido o lectura fallida: probar el respaldo */ }
   const attempts = [['tar', ['-xf', zip, '-C', destination]], ['unzip', ['-q', zip, '-d', destination]],
     ...(process.platform === 'win32' ? [['powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${destination.replace(/'/g, "''")}' -Force`]]] : [])];
   let last;

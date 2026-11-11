@@ -101,6 +101,19 @@ Para probar publicación, instala [GitHub CLI](https://cli.github.com/) y autent
 
 La integración lee campos de PR (`baseRefOid`, `headRepositoryOwner`, `mergeCommit`…) que el `gh` 2.46.0 de los repositorios de Ubuntu no conoce («Unknown JSON field»). La 2.103.3 del repositorio oficial funciona; la versión mínima exacta no se ha determinado. Antes de integrar, el panel comprueba sin red la lista de campos de `gh pr list --json` y bloquea la integración con un mensaje accionable si falta alguno. Instala `gh` desde el repositorio oficial siguiendo [la guía de instalación en Linux](https://github.com/cli/cli/blob/trunk/docs/install_linux.md) (requiere `sudo`: alta del keyring y de `/etc/apt/sources.list.d/github-cli.list`, `apt update`, `apt install gh`) y comprueba `gh --version` y `gh pr list --json 2>&1 | grep baseRefOid`. Para QA Android en Ubuntu, prepara el SDK y un emulador local si el encargo lo exige. El lanzador de AVD incluido para Windows es específico de esa instalación.
 
+## Utilidades que en Windows son `.cmd`
+
+En Ubuntu se usan los mismos programas de Node; no hace falta instalar nada más (los `.zip` de referencias los lee el propio Centro, sin `unzip`).
+
+| Windows | Ubuntu |
+|---|---|
+| `PROBAR.cmd` | `npm test` |
+| `REINICIAR_PANEL.cmd` | `panel/reiniciar-panel.sh` (pasa las pruebas y no reinicia si hay trabajos en marcha; `--sin-pruebas` las omite) |
+| `DESCARGAR_SKILLS.cmd` / `LIMPIAR_SKILLS.cmd` | `node skills-descargar.mjs` / `node skills-limpiar.mjs` |
+| `IMPORTAR_REFERENCIAS.cmd` | `node references.mjs importar <zip o carpeta> --para <agency\|games\|global\|id>` y `node references.mjs listar` |
+
+Los archivos de `skills/**` se guardan siempre con saltos de línea LF (`.gitattributes`), porque el registro `skills/registry.json` guarda la huella SHA-256 de cada byte. Si editas una skill en Windows, guárdala en LF y registra la nueva huella con `node cli.mjs skills-accept --id <skill>` antes de subirla.
+
 ## Documentación del flujo
 
 - [Contratos de encargo y entrega v1](ORCA_CONTRACTS.md)
