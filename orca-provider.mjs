@@ -5,6 +5,7 @@ import { routeOmission, routeOmits } from './job-route.mjs';
 import { prepareStageSkills, consultedSkills } from './skills-registry.mjs';
 import { toolingLine } from './provider-adapter.mjs';
 import { readQuota, quotaDecision, providerFailureSignal, recordQuotaObservation } from './quota.mjs';
+import { claimHold, releaseJobClaim } from './admission-gate.mjs';
 import { STAGE_TERMS, CLOSING_CRITERIA_NOTE, renderStageContract } from './stage-contract.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -480,6 +481,14 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
           ...(state === 'incierta' ? { aviso: decision.status.reason } : {}) };
       }
     }
+    // The branch reservation is renewed before every new worker: if another PC took it over while this one was
+    // away, this job must not put a second worker on the same branch.
+    const lost = await (ctx.claimHold ?? claimHold)(job, { root: ctx.root });
+    if (lost) {
+      const error = new ProviderError('claim_lost', `${lost.message} La etapa ${role.label} no se lanza.`, { retryable: Boolean(lost.until), uncertain: false });
+      if (lost.until) error.waitUntil = lost.until;
+      throw error;
+    }
     const orcaAgent = launch.agent;
     stageAgent = orcaAgent;
     const launchPreferences = launchArgs(launch);
@@ -495,7 +504,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
     const brief = retry ? null : dispatchBrief(specArtifact, specIdentity, orcaAgent);
-    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, launch, ...(quotaRecord ? { quota: quotaRecord } : {}), ...(appliedContracts.length ? { contracts: appliedContracts.map(({ scope, path: file, sha256 }) => ({ scope, path: file, sha256 })) } : {}), ...(suppliedSkills.length ? { skills: suppliedSkills } : {}), ...(stageSkills?.omitted.length ? { skillsOmitted: stageSkills.omitted } : {}),
+    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, launch, ...(job.team ? { team: job.team } : {}), ...(quotaRecord ? { quota: quotaRecord } : {}), ...(appliedContracts.length ? { contracts: appliedContracts.map(({ scope, path: file, sha256 }) => ({ scope, path: file, sha256 })) } : {}), ...(suppliedSkills.length ? { skills: suppliedSkills } : {}), ...(stageSkills?.omitted.length ? { skillsOmitted: stageSkills.omitted } : {}),
       ...(role.stageKey === 'qa' && job.workflowV2Snapshot ? { workflowV2Snapshot: job.workflowV2Snapshot } : {}), inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
@@ -975,6 +984,8 @@ export async function runOrca(job, ctx, {
   } else if (job.workflow?.steps?.some(step => step.key === 'integration')) {
     await ctx.reportStage?.({ key: 'integration', status: 'skipped', summary: 'Recibo ausente o no elegible; integración omitida.' });
   }
+  // The work is finished and integrated: give the branch back. A failure here only delays others until the claim expires.
+  await (ctx.releaseJobClaim ?? releaseJobClaim)(job, ctx.root).catch(() => {});
   const reviewText = review ? review.text : `Workflow V2: aprobado por el owner (tarea ${workflowV2Approval.task}, identidad ${workflowV2Approval.identity}).`;
   return {
     provider: 'orca-quality-workflow',

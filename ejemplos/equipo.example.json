@@ -1,0 +1,7 @@
+{
+  "_comentario": "Local. Copia a data/equipo.json y pon el id de este PC, que debe existir en equipos/equipos.json. concurrencia: trabajos en marcha a la vez en este PC (1 por defecto). reservas.activas: antes de trabajar en la rama de un proyecto, este PC la reserva en el remoto del proyecto para que el otro no la toque a la vez (docs/EQUIPOS.md).",
+  "version": 1,
+  "id": "dani-windows",
+  "concurrencia": 1,
+  "reservas": { "activas": false, "caducidadMinutos": 30, "remoto": "origin" }
+}

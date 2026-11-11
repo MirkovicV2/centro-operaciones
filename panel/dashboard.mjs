@@ -65,6 +65,7 @@ import { LAUNCH_ROLES, LAUNCH_AGENTS } from '../launch-choice.mjs';
 import { currentActor, addJobStage } from './queue.mjs';
 import { readQuota, writeQuota, quotaStatus, billingWarnings, recordQuotaObservation, quotaConfigured, DEFAULT_QUOTA } from '../quota.mjs';
 import { diagnoseJob } from '../failure-taxonomy.mjs';
+import { readTeam, RESOURCE_NAMES } from '../team.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from '../orca-provider.mjs';
 // With a mixed pipeline some stages run with Claude even when the default agent is Codex.
 const usesClaude = await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }).then(pipeline => pipelineAgents(pipeline, configuredOrcaAgent()).includes('claude'))
@@ -81,6 +82,12 @@ async function pipelineSettings() {
   try { await fs.access(path.join(QUEUE_ROOT, 'data', 'pipeline.json')); } catch { configured = false; }
   try { return { ...base, configured, pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }) }; }
   catch (error) { if (error.code !== 'pipeline_config_invalid') throw error; return { ...base, configured, pipeline: null, error: error.message }; }
+}
+// Which PC this installation is, what every PC of the team can do and whether branches are reserved. Read-only:
+// the files are edited by hand (docs/EQUIPOS.md) because one of them is shared through the repository.
+async function teamSettings() {
+  try { const team = await readTeam(QUEUE_ROOT); return { ...team, resourceNames: RESOURCE_NAMES }; }
+  catch (error) { if (error.code !== 'team_config_invalid') throw error; return { configured: false, error: error.message, equipos: {}, resourceNames: RESOURCE_NAMES }; }
 }
 // Subscriptions and the personal reserve as the settings view shows them. Every status says how it is known.
 async function quotaSettings() {
@@ -330,6 +337,7 @@ async function handleApi(request, response, url, tailscale = null) {
   if (request.method === 'GET' && traceRead) return send(response, 200, await readRequestTrace(QUEUE_ROOT, traceRead[1], { observePreparation }));
   if (request.method === 'GET' && url.pathname === '/api/graph') return send(response, 200, await buildKnowledgeGraph(QUEUE_ROOT, url.searchParams.get('business')));
   if (request.method === 'GET' && url.pathname === '/api/launch-preview') return send(response, 200, await launchPreview(url.searchParams));
+  if (request.method === 'GET' && url.pathname === '/api/team') return send(response, 200, await teamSettings());
   if (request.method === 'GET' && url.pathname === '/api/quota') return send(response, 200, await quotaSettings());
   if (request.method === 'GET' && url.pathname === '/api/pipeline') return send(response, 200, await pipelineSettings());
   if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));

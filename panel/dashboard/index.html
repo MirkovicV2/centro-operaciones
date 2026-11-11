@@ -288,6 +288,11 @@
           </fieldset>
           <div class="form-footer"><span id="quota-dirty">Sin cambios</span><div class="button-row"><button type="submit" class="button primary" id="quota-save">Guardar cuota</button></div></div>
         </form>
+        <div class="form-card team-card"><div class="form-title"><div><h3>Equipos</h3></div></div>
+          <p class="microcopy">Qué PC es esta instalación, qué puede hacer cada uno y si reserva la rama de un proyecto antes de trabajar en ella. Se configura en <code>data/equipo.json</code> (este PC) y <code>equipos/equipos.json</code> (compartido).</p>
+          <div class="queue-guide" id="team-status" role="status">Cargando los equipos…</div>
+          <dl class="pipeline-effective-list" id="team-list"></dl>
+        </div>
         <div class="form-card"><div class="form-title"><div><h3>Escaladas disponibles</h3></div></div><p class="microcopy">Un encargo puede pedir una escalada para un rol indicando motivo, alcance y resultado verificable. Se definen en <code>data/pipeline.json</code>.</p><ul id="pipeline-escalations" class="pipeline-escalations"></ul></div>
       </section>
 

@@ -435,6 +435,7 @@ function renderRun(data) {
     if (step.skills?.length) add('Skills suministradas', step.skills.map(skill => skill.id).join(', '), 'observed');
     if (step.skills?.length && step.skillsConsulted) add('Skills consultadas', step.skillsConsulted.length ? step.skillsConsulted.join(', ') : 'Ninguna declarada', 'reported');
     for (const item of step.skillsOmitted || []) add('Skill no entregada', `${item.id}: ${item.reason}`, 'observed');
+    if (step.team) add('Equipo', step.team.nombre || step.team.id, 'observed');
     if (step.launch?.substitutedFrom) add('Proveedor sustituido', `En lugar de ${step.launch.substitutedFrom.agent} · ${step.launch.substitutedFrom.reason}`, 'observed');
     if (step.quota) add('Cuota al lanzar', step.quota.state === 'incierta' ? `${step.quota.provider}: uso no conocido` : `${step.quota.provider}: ${step.quota.usadoPorcentaje} % usado (reserva ${step.quota.reserva} %)`, step.quota.state === 'incierta' ? 'unknown' : 'observed');
     body.append(kv);
@@ -1612,7 +1613,7 @@ function showSection() {
     if (link.right > strip.right) nav.scrollLeft += link.right - strip.right;
   }
   if (selected === 'conocimiento') void refreshGraph();
-  if (selected === 'ajustes') { void loadPipeline(); void loadQuota(); }
+  if (selected === 'ajustes') { void loadPipeline(); void loadQuota(); void loadTeam(); }
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function updateHistoryProjects(projects) {
@@ -2108,3 +2109,18 @@ $('#quota-form').addEventListener('submit', async event => {
   } catch (error) { $('#quota-status').textContent = `No se guardó: ${error.message}`; $('#quota-status').classList.add('pipeline-error'); notify(error.message, true); button.disabled = false; }
 });
 window.addEventListener('beforeunload', event => { if (quotaState.dirty) event.preventDefault(); });
+
+
+// ---- Equipos (docs/EQUIPOS.md): read-only view of who this PC is and what each PC can do. ----
+async function loadTeam() {
+  const status = $('#team-status'), list = $('#team-list');
+  try {
+    const team = await api('/api/team');
+    status.classList.toggle('pipeline-error', Boolean(team.error));
+    status.textContent = team.error ? `La configuración de equipos no es válida: ${team.error} Mientras tanto no se despacha.`
+      : !team.configured ? `Este PC no está identificado (falta data/equipo.json): sus encargos se anotan como «${team.nombre}», sin comprobar recursos ni reservar ramas.`
+      : `Este PC es ${team.nombre}. Trabajos a la vez: ${team.concurrencia}. Reserva de ramas: ${team.reservas.activas ? `activa (caduca a los ${team.reservas.caducidadMinutos} min sin renovar)` : 'desactivada'}.`;
+    list.replaceChildren(...Object.entries(team.equipos || {}).flatMap(([id, item]) => [el('dt', '', `${item.nombre}${id === team.id && team.configured ? ' (este PC)' : ''}`),
+      el('dd', '', `${item.sistema} · ${item.recursos.length ? item.recursos.map(resource => team.resourceNames[resource] || resource).join(', ') : 'sin recursos declarados'}`)]));
+  } catch (error) { status.textContent = `No se pudieron cargar los equipos: ${error.message}`; status.classList.add('pipeline-error'); }
+}

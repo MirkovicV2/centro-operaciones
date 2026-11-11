@@ -2,6 +2,7 @@ import { workflowV2Resumable } from './workflow-v2-gate.mjs';
 import { validateJobLaunch, LAUNCH_AGENTS } from './launch-choice.mjs';
 import { validateSkillChoice } from './skills-registry.mjs';
 import { admissionHold } from './admission-gate.mjs';
+import { validateRequires } from './team.mjs';
 import { validateJobRoute, routeOmission, routeOmits, routeWithStage, stageSatisfied } from './job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -289,6 +290,7 @@ export function validateSpec(spec) {
   try { validateJobLaunch(spec.launch); } catch (error) { throw new QueueError(error.message, 'launch_choice_invalid'); }
   try { validateJobRoute(spec.route, spec.kind); } catch (error) { throw new QueueError(error.message, 'job_route_invalid'); }
   try { validateSkillChoice(spec.skills); } catch (error) { throw new QueueError(error.message, 'skill_choice_invalid'); }
+  try { validateRequires(spec.requires); } catch (error) { throw new QueueError(error.message, 'job_requires_invalid'); }
 }
 
 export async function addJob(root, spec) {
@@ -303,7 +305,7 @@ export async function addJob(root, spec) {
     const provider = spec.provider ?? 'orca';
     const route = provider === 'orca' ? validateJobRoute(spec.route, spec.kind) : undefined;
     const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true, route);
-    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), ...(route ? { route } : {}), ...(spec.skills ? { skills: validateSkillChoice(spec.skills) } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
+    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), ...(route ? { route } : {}), ...(spec.skills ? { skills: validateSkillChoice(spec.skills) } : {}), ...(spec.requires ? { requires: validateRequires(spec.requires) } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
       ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0,
       ...(currentActor() ? { actor: currentActor() } : {}) };
     job.contract = contract;
@@ -1610,8 +1612,8 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
         else if (selectedJob.attempts >= selectedJob.maxAttempts) throw new QueueError('Se alcanzó el máximo de intentos.', 'attempt_limit');
         // Reasons to wait that are nobody's failure (quota in the personal reserve, another PC owns the job).
         // Checked before the receipt admission so no recovery marker is consumed; the attempt is not counted.
-        const held = hold ? await hold(selectedJob, { root, now: clock() }) : null;
-        if (held) {
+        const held = hold ? await hold(selectedJob, { root, now: clock(), jobs: state.jobs }) : null;
+        if (held && !held.admit) {
           const waiting = { ...held, since: selectedJob.waiting?.since ?? stamp() };
           const same = selectedJob.waiting && ['code', 'provider', 'state', 'until', 'message'].every(key => selectedJob.waiting[key] === waiting[key]);
           if (!same) await commit(root, state, 'job_waiting', { jobs: [{ ...selectedJob, waiting }] }, { jobId: selectedJob.id, code: waiting.code, ...(waiting.provider ? { provider: waiting.provider } : {}) });
@@ -1637,7 +1639,7 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
         const timeoutMs = executionTimeoutMs(selectedJob);
         const remainingTimeoutMs = timeoutMs === null ? null : timeoutMs - (sameAttempt ? elapsedAttemptMs(selectedJob) : 0);
         const { waiting: _noLongerWaiting, ...readyJob } = selectedJob;
-        const job = { ...readyJob, ...admittedFields, state: 'running', attempts: selectedJob.attempts + (sameAttempt ? 0 : 1), startedAt: sameAttempt ? selectedJob.startedAt : segmentStartedAt, error: null,
+        const job = { ...readyJob, ...(held?.admit ?? {}), ...admittedFields, state: 'running', attempts: selectedJob.attempts + (sameAttempt ? 0 : 1), startedAt: sameAttempt ? selectedJob.startedAt : segmentStartedAt, error: null,
           ...(sameAttempt ? { livenessResume: { ...selectedJob.livenessResume, phase: 'consumed', consumedAt: segmentStartedAt } } : {}) };
         const attemptStarted = Date.now();
         await commit(root, state, 'job_started', { jobs: [job] }, { jobId: job.id, attempt: job.attempts });

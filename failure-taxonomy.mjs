@@ -26,6 +26,7 @@ const BY_CODE = Object.freeze({
   workflow_v2_config_invalid: ['configuracion', 'Corrige data/workflow-v2.json.'],
   // Quota.
   provider_quota_wait: ['cuota', 'El encargo espera a que haya cuota fuera de la reserva personal. Actualiza la observación en Ajustes → Cuota si ya se reinició.'],
+  claim_lost: ['operativo', 'Otro equipo tomó la reserva de la rama. Coordina con él antes de reintentar: no debe haber dos trabajadores sobre la misma rama.'],
   provider_quota_exhausted: ['cuota', 'El proveedor dejó de aceptar trabajo. Indica en Ajustes → Cuota cuándo se reinicia, o reintenta la etapa con el otro proveedor. Comprar o recargar es decisión tuya: el Centro no lo hace.'],
   // Temporary unavailability: retry later, nothing to fix in the product.
   provider_unavailable: ['indisponible', 'El proveedor no respondió. Reintenta la etapa más tarde desde la ficha: repite la misma Task y el candidato no ha cambiado.'],
@@ -67,7 +68,11 @@ function fromQuestions(job) {
 
 export function diagnoseJob(job) {
   if (job?.waiting?.code === 'quota') return { category: 'cuota', label: CATEGORY.cuota, waiting: true, message: job.waiting.message, action: BY_CODE.provider_quota_wait[1], ...(job.waiting.until ? { until: job.waiting.until } : {}) };
-  if (job?.waiting?.code === 'claim') return { category: 'operativo', label: 'Reservado por otro equipo', waiting: true, message: job.waiting.message, action: 'Lo ejecuta el otro equipo. Si su reserva quedó abandonada, libérala desde ese equipo o espera a que caduque.', ...(job.waiting.until ? { until: job.waiting.until } : {}) };
+  const held = { claim: ['Reservado por otro equipo', 'Lo ejecuta el otro equipo. Si su reserva quedó abandonada, caduca sola y este PC la tomará en el siguiente ciclo.'],
+    team: ['Asignado a otro equipo', 'Ejecútalo en el equipo al que pertenece, o corrige data/equipo.json si este PC está mal identificado.'],
+    resource: ['Falta un recurso en este PC', 'Ejecútalo en el equipo que dispone del recurso, o corrige equipos/equipos.json si este PC ya lo tiene.'],
+    concurrency: ['En cola de este PC', 'Empezará cuando termine el trabajo en marcha. Para ejecutar más a la vez, sube concurrencia en data/equipo.json.'] }[job?.waiting?.code];
+  if (held) return { category: 'operativo', label: held[0], waiting: true, message: job.waiting.message, action: held[1], ...(job.waiting.until ? { until: job.waiting.until } : {}) };
   if (!['needs_attention', 'retry_wait'].includes(job?.state) || !job.error?.code) return null;
   const [category, action] = fromQuestions(job) ?? BY_CODE[job.error.code] ?? ['operativo', 'Revisa el informe de la etapa y decide en la ficha del trabajo.'];
   return { category, label: CATEGORY[category], code: job.error.code, action, ...(job.state === 'retry_wait' && job.nextAttemptAt ? { until: job.nextAttemptAt, waiting: true } : {}) };
