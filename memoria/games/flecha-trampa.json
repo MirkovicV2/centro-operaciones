@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "proyecto": "Flecha Trampa",
+  "empresa": "games",
+  "alias": ["FlechaTrampa"],
+  "entradas": [
+    {
+      "id": "ritmo-rapido-stepmania",
+      "tipo": "decision",
+      "estado": "vigente",
+      "titulo": "Juego de ritmo rápido tipo StepMania",
+      "texto": "La dirección vigente del juego es un ritmo rápido tipo StepMania. Las decisiones de diseño, controles, feedback y pruebas se toman para ese planteamiento.",
+      "fecha": "2026-11-11",
+      "referencia": { "descripcion": "Preferencia de producto vigente; no está ligada a un commit concreto. Contrasta con la última integración verificada del proyecto." },
+      "procedencia": { "origen": "usuario", "detalle": "Encargo de evolución del Centro de noviembre de 2026, apartado de memoria de proyecto." },
+      "sustituye": ["planteamiento-match-3"]
+    },
+    {
+      "id": "planteamiento-match-3",
+      "tipo": "decision",
+      "estado": "sustituida",
+      "titulo": "Planteamiento anterior como match-3",
+      "texto": "El juego se planteó antes como match-3. Ese planteamiento ya no es vigente: el material, las notas y los candidatos que respondan a él son antecedentes, no criterios.",
+      "fecha": "2026-11-11",
+      "referencia": { "descripcion": "Planteamiento anterior al actual; pendiente de que el equipo anote hasta qué versión del proyecto estuvo vigente." },
+      "procedencia": { "origen": "usuario", "detalle": "Encargo de evolución del Centro de noviembre de 2026, apartado de memoria de proyecto." },
+      "sustituidaPor": "ritmo-rapido-stepmania"
+    }
+  ]
+}

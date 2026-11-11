@@ -66,6 +66,7 @@ import { currentActor, addJobStage } from './queue.mjs';
 import { readQuota, writeQuota, quotaStatus, billingWarnings, recordQuotaObservation, quotaConfigured, DEFAULT_QUOTA } from '../quota.mjs';
 import { diagnoseJob } from '../failure-taxonomy.mjs';
 import { readTeam, RESOURCE_NAMES } from '../team.mjs';
+import { readSharedMemory } from '../project-knowledge.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from '../orca-provider.mjs';
 // With a mixed pipeline some stages run with Claude even when the default agent is Codex.
 const usesClaude = await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }).then(pipeline => pipelineAgents(pipeline, configuredOrcaAgent()).includes('claude'))
@@ -225,6 +226,16 @@ async function dashboardData() {
   const knowledge = await readContextConsultations(QUEUE_ROOT, { requestIds: inbox.coordinatorRequests.map(item => item.id), jobIds: queue.jobs.map(item => item.id) });
   const requestTraces = await buildRequestTraces(QUEUE_ROOT, { requests: inbox.coordinatorRequests.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))), jobs: queue.jobs, questions: inbox.questions, automation, knowledge, observePreparation });
   const planned = await plannedLaunches(queue.jobs);
+  // The team's shared memory per project (memoria/): counts and the decisions in force, for the project card.
+  const sharedMemories = new Map(await Promise.all(inbox.projects.map(async project => {
+    try {
+      const memory = await readSharedMemory({ business: project.business, projectName: project.name });
+      if (!memory) return [project.id, null];
+      const count = states => memory.entradas.filter(entry => states.includes(entry.estado)).length;
+      return [project.id, { file: memory.file, vigentes: count(['vigente', 'validada']), enEvaluacion: count(['en_evaluacion']), historial: count(['sustituida', 'descartado']),
+        decisiones: memory.entradas.filter(entry => entry.tipo === 'decision' && entry.estado === 'vigente').map(entry => entry.titulo).slice(0, 5) }];
+    } catch (error) { return [project.id, { error: error.message }]; }
+  })));
   return {
     executor,
     checkouts: await checkoutChoices(QUEUE_ROOT),
@@ -242,6 +253,7 @@ async function dashboardData() {
       const related = queue.jobs.filter(job => job.projectId === project.id && job.business === project.business).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
       return {
         ...project,
+        ...(sharedMemories.get(project.id) ? { sharedMemory: sharedMemories.get(project.id) } : {}),
         jobCount: related.length,
         openJobCount: related.filter(job => ['queued', 'running', 'retry_wait', 'needs_attention'].includes(job.state)).length,
         recentJobs: related.slice(0, 3).map(job => ({ id: job.id, title: job.title, state: job.state, createdAt: job.createdAt })),

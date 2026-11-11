@@ -10,6 +10,7 @@ import { createWorker } from './providers.mjs';
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 import { readPipeline, previewPipeline, previewText } from './pipeline-config.mjs';
 import { skillsStatus, acceptSkill } from './skills-registry.mjs';
+import { readSharedMemory, proposeLesson, listProposals, acceptLesson } from './project-knowledge.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from './orca-provider.mjs';
 import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
 
@@ -29,6 +30,9 @@ node cli.mjs add --business games|agency --kind analysis|code --title "Título" 
   Recursos que necesita el PC que lo ejecute: --requires godot,emuladorAndroid,telefonoFisico,gpu,navegador (docs/EQUIPOS.md)
 node cli.mjs skills                    Estado de cada skill del registro frente a su huella (docs/SKILLS.md)
 node cli.mjs skills-accept --id SKILL  Tras revisar un cambio, registra las nuevas huellas de esa skill
+node cli.mjs memory --business games|agency --title "Nombre del proyecto"          Memoria compartida del proyecto y propuestas locales (docs/MEMORIA.md)
+node cli.mjs memory-propose --business … --title "Proyecto" --evidence-file "leccion.json"   Propone una lección (queda local, sin efecto)
+node cli.mjs memory-accept --business … --title "Proyecto" --id LECCION --confirm-reviewed   Comprueba procedencia y referencias y la incorpora a memoria/
 node cli.mjs add-stage --id IDENTIFICADOR --stage ux --reason "por qué cambia el alcance"
   Añade Diseño a un trabajo cuya ruta lo omitía, mientras Desarrollo no tenga asignación.
 node cli.mjs preview --business games|agency --kind analysis|code [--project ID_PROYECTO] [--launch-file "reparto.json"]
@@ -243,6 +247,26 @@ async function main() {
       if (o.execute) await assertPanelNotRunning();
       result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5), jobId: o.id });
       break;
+    case 'memory':
+    case 'memory-propose':
+    case 'memory-accept': {
+      try {
+        const scope = { business: o.business, projectName: o.title };
+        if (!['agency', 'games'].includes(o.business) || !o.title) throw new QueueError('Indica --business y --title con el nombre del proyecto.');
+        if (command === 'memory') result = { memoria: await readSharedMemory(scope), propuestas: await listProposals(ROOT, scope) };
+        else if (command === 'memory-propose') {
+          if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con la lección en JSON.');
+          result = await proposeLesson(ROOT, { ...scope, lesson: JSON.parse((await fs.readFile(path.resolve(o['evidence-file']), 'utf8')).replace(/^\uFEFF/, '')) });
+        } else {
+          if (!o['confirm-reviewed']) throw new QueueError('Revisa la propuesta y usa --confirm-reviewed para incorporarla a la memoria compartida.');
+          const { loadDashboardState } = await import('./panel/agency-assistant/dashboard-state.mjs');
+          const project = (await loadDashboardState(ROOT)).projects.find(item => item.business === o.business && item.name.toLowerCase() === o.title.toLowerCase());
+          result = await acceptLesson(ROOT, { ...scope, id: o.id, jobs: (await loadState(ROOT)).jobs, projectId: project?.id ?? null,
+            checkout: project?.checkout ? path.resolve(ROOT, project.checkout) : null, acceptedBy: `cli:${os.userInfo().username}` });
+        }
+      } catch (error) { if (String(error.code ?? '').startsWith('project_memory')) throw new QueueError(error.message, error.code); throw error; }
+      break;
+    }
     case 'skills':
     case 'skills-accept': {
       try { result = command === 'skills-accept' ? await acceptSkill(o.id) : (await skillsStatus()).map(({ manifest, ...skill }) => ({ ...skill, manifest: manifest.slice(0, 12) })); }

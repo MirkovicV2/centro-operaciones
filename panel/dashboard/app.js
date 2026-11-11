@@ -872,6 +872,9 @@ function renderProjects(data) {
 
     if (project.nextAction) card.append(el('p', 'project-next', project.nextAction));
     card.append(el('div', 'project-activity', `${project.jobCount || 0} trabajos · ${project.openJobCount || 0} abiertos`));
+    // Shared memory of the team for this project: what is in force, what is being evaluated and what is only history.
+    if (project.sharedMemory) card.append(el('div', 'project-activity project-memory', project.sharedMemory.error ? `Memoria compartida no aplicada: ${project.sharedMemory.error}`
+      : `Memoria compartida: ${project.sharedMemory.vigentes} vigentes · ${project.sharedMemory.enEvaluacion} en evaluación · ${project.sharedMemory.historial} en historial${project.sharedMemory.decisiones.length ? ` · Decisión vigente: ${project.sharedMemory.decisiones.join('; ')}` : ''}`));
     const latest = project.recentJobs || [];
     if (latest.length) {
       const jobList = el('div', 'project-recent-jobs');
