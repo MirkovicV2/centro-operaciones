@@ -70,7 +70,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help', 'sin-pipeline']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million', 'run', 'name']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -229,7 +229,9 @@ async function main() {
       return;
     }
     case 'vincular': {
-      const linked = await linkCoordinator(ROOT, { business: o.business, runId: o.run, id: o.id, name: o.name });
+      let linked;
+      try { linked = await linkCoordinator(ROOT, { business: o.business, runId: o.run, id: o.id, name: o.name }); }
+      catch (error) { if (String(error.code ?? '').startsWith('link_')) throw new QueueError(error.message, error.code); throw error; }
       console.log(linked.changed ? `vinculado: ${linked.coordinator} (${linked.business}) → Run ${linked.runId}, terminal ${linked.senderId}` : `sin cambios: ${linked.coordinator} ya apuntaba a ${linked.runId}`);
       if (linked.backup) console.log(`copia del archivo anterior: ${linked.backup}`);
       console.log('Comprueba la conexión con curl -fsS http://127.0.0.1:4187/api/coordinators (el panel lee el archivo en cada envío).');

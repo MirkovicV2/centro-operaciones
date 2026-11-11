@@ -58,3 +58,12 @@ test('nothing is written when Orca does not vouch for the coordinator', async t 
   const broken = await root(t, { schemaVersion: 2 });
   await assert.rejects(linkCoordinator(broken, { business: 'agency', runId: RUN }, { command: orca() }), { code: 'link_existing_invalid' });
 });
+
+test('the CLI accepts the vincular options (David\'s first run failed with «Opción desconocida: --run»)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const cli = new URL('../cli.mjs', import.meta.url).pathname;
+  const out = spawnSync(process.execPath, [cli, 'vincular', '--business', 'tienda', '--run', 'run_abcdef123456', '--name', 'X'], { encoding: 'utf8' });
+  const text = out.stdout + out.stderr;
+  assert.doesNotMatch(text, /Opción desconocida/);
+  assert.match(text, /--business agency o --business games/);
+});
