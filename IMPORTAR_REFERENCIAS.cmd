@@ -5,7 +5,7 @@ if "%ZIP%"=="" set /p ZIP=Arrastra aqui el .zip o la carpeta y pulsa Enter:
 set "ZIP=%ZIP:"=%"
 set /p ALCANCE=Para quien: agency, games, global o el id de un proyecto [agency]: 
 if "%ALCANCE%"=="" set "ALCANCE=agency"
-"C:\Program Files\nodejs\node.exe" references.mjs importar "%ZIP%" --para %ALCANCE%
+node references.mjs importar "%ZIP%" --para %ALCANCE%
 echo.
-"C:\Program Files\nodejs\node.exe" references.mjs listar
+node references.mjs listar
 pause

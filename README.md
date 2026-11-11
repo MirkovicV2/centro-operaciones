@@ -4,6 +4,22 @@ Cola local para videojuegos (`games`) y agencia digital (`agency`). Este reposit
 
 ## Empezar
 
+### Arranque rápido tras descargar `main`
+
+El código es el mismo en Windows y Ubuntu; no se versiona nada personal (cola, bóveda de Obsidian, proyectos, credenciales y vínculos con Orca se crean en `data/` la primera vez y son de cada equipo).
+
+| | Windows 10/11 | Ubuntu 26.10 |
+|---|---|---|
+| Requisitos | Node.js 20+ (recomendado 24), Git, Orca | Node.js 20+, Git, curl, python3, Orca (su CLI se llama `orca-ide`) |
+| Descargar | `git clone https://github.com/MirkovicV2/centro-operaciones.git` | igual |
+| Abrir el panel | doble clic en `ABRIR_PANEL.cmd` | `CENTRO_ORCA_AGENT=claude npm start` |
+| Agente de los trabajadores | Codex por defecto; para Claude, define la variable de entorno de usuario `CENTRO_ORCA_AGENT=claude` (`setx CENTRO_ORCA_AGENT claude`) y reabre el panel | `CENTRO_ORCA_AGENT=claude` o `codex` al arrancar |
+| Pruebas | `PROBAR.cmd` | `npm test` |
+| Reiniciar el panel con seguridad | `REINICIAR_PANEL.cmd` | `panel/reiniciar-panel.sh` |
+| Skills y referencias | `DESCARGAR_SKILLS.cmd`, `IMPORTAR_REFERENCIAS.cmd` | `node skills-descargar.mjs`, `node references.mjs importar <zip> --para <ámbito>` |
+
+Después abre <http://127.0.0.1:4187>, conecta tu bóveda en **Conocimiento** y registra tus proyectos. Para que los trabajos corran en Orca, vincula los coordinadores como explica la [guía de coordinación](docs/COORDINATOR_OPERATIONS.md) (en Ubuntu, [docs/UBUNTU_CLAUDE.md](docs/UBUNTU_CLAUDE.md)). Sin Orca puedes usar el panel, guardar ideas y conectar Obsidian.
+
 En Ubuntu 26.10, usa la [guía de instalación para Linux y Claude Code](docs/UBUNTU_CLAUDE.md). Comparte el mismo código y los mismos contratos que Windows.
 
 Cada instalación usa su propia cola y configuración. Instala Node.js 20 o posterior y Git. Para ejecutar agentes, configura Orca en ese equipo y vincula sus coordinadores según la [guía de coordinación](docs/COORDINATOR_OPERATIONS.md). Si Orca está instalado en otra ruta, configura `ORCA_CLI_COMMAND` con la ruta a su ejecutable. La integración remota requiere una cuenta de GitHub con acceso al repositorio de cada proyecto.
