@@ -23,7 +23,15 @@ Abre [el panel local](http://127.0.0.1:4187) y deja esa terminal abierta. Puedes
 1. Instala [Orca para Linux](https://www.onorca.dev/docs/install) y registra su CLI desde **Settings → General → Orca CLI**. En Ubuntu, la CLI externa se llama `orca-ide`. El ejecutable `orca` del sistema puede ser el lector de pantalla de GNOME.
 2. Instala [Claude Code](https://code.claude.com/docs/en/setup) e inicia sesión con tu propia cuenta. Comprueba `claude --version` fuera y dentro de Orca. Desde la terminal que abre el panel, comprueba `orca-ide orchestration worker-start --help`. Para indicar otra ubicación de la CLI, exporta `ORCA_CLI_COMMAND` con la ruta absoluta a su ejecutable antes de arrancar el panel.
 3. Abre el clon en Orca y crea una sesión **Claude Code** para la empresa que quieras probar. En esa sesión, pídele que lea [COORDINATOR_OPERATIONS.md](COORDINATOR_OPERATIONS.md) y [COORDINATOR_PREPARATION.md](COORDINATOR_PREPARATION.md). Pídele que, desde su propia identidad de terminal, cree una Run con `orchestration run-create --objective "Coordinación local de Agencia" --json`, verifique su propietario con `orchestration run-show --id RUN --full --json` y te devuelva `run.id` y `run.coordinator_handle`. Mantén la sesión abierta. Para Videojuegos, usa una sesión y una Run distintas.
-4. Crea `data/coordinator-bindings.json` bajo el clon. Sustituye los dos valores del ejemplo por los que devolvió Orca. Si añades Videojuegos, crea otra entrada con `business: "games"` y enlázala en `businesses.games`.
+4. Vincúlalo desde una terminal en la carpeta del clon, con el `run.id` que te devolvió:
+
+   ```bash
+   node cli.mjs vincular --business agency --run run_DEVUELTO
+   ```
+
+   `vincular` pregunta a Orca quién es el propietario de esa Run y comprueba que su terminal está conectada. Después escribe `data/coordinator-bindings.json` con esos datos. Si el archivo ya existía, conserva la otra empresa y las rutas por proyecto, y guarda una copia del anterior (`coordinator-bindings.json.anterior-…`). Si Orca no confirma el propietario o la terminal está cerrada, no escribe nada. Para Videojuegos, `--business games` con su propia Run. Repite el comando cada vez que reinicies Orca y abras una sesión de coordinador nueva.
+
+   Si prefieres hacerlo a mano, el archivo tiene esta forma (sustituye los dos valores por los que devolvió Orca):
 
 ```json
 {

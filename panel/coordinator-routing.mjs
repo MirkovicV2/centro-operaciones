@@ -19,7 +19,7 @@ export function isCoordinatorIdentity(value) {
     && typeof value?.senderId === 'string' && SENDER.test(value.senderId);
 }
 
-function validatedConfig(config) {
+export function validatedConfig(config) {
   const invalid = () => fail('coordinator_bindings_invalid', 'La configuración de coordinadores no es válida; revísala antes de enviar.');
   if (!plainObject(config) || config.schemaVersion !== 1 || !Array.isArray(config.coordinators)
     || !plainObject(config.projects) || !plainObject(config.businesses)) invalid();
