@@ -420,6 +420,7 @@ function renderRun(data) {
     else add('Modelo', 'No registrado', 'unknown');
     if (step.authorization) add('Autorizado por', step.authorization.coordinatorName || 'coordinador', 'observed');
     if (step.dispatchId) add('Dispatch', step.dispatchId, 'observed');
+    if (step.contracts?.length) add('Contratos de rol', step.contracts.map(item => item.path).join(', '), 'observed');
     // Supplied is the Centro's own record; consulted is what the worker stated in its delivery.
     if (step.skills?.length) add('Skills suministradas', step.skills.map(skill => skill.id).join(', '), 'observed');
     if (step.skills?.length && step.skillsConsulted) add('Skills consultadas', step.skillsConsulted.length ? step.skillsConsulted.join(', ') : 'Ninguna declarada', 'reported');

@@ -564,3 +564,33 @@ test('a required skill that changed stops the stage before any worker starts; on
   assert.match(simulator.started[0].input, /SKILL DE VIDEOJUEGOS · game-production/);
   assert.deepEqual(done.workflow.steps.find(step => step.key === 'developer').skills.map(skill => skill.id), ['game-production', 'godot-gdscript-patterns']);
 });
+
+// One brief shape for every stage and provider (stage-contract.mjs).
+test('every stage brief carries the same eight sections in order, with product criteria kept apart from closing criteria', async t => {
+  const headings = ['1. OBJETIVO', '2. ALCANCE', '3. ENTRADAS', '4. DECISIONES VIGENTES', '5. CRITERIOS DE ACEPTACIÓN', '6. EVIDENCIAS EXIGIDAS', '7. DEVOLUCIÓN Y ESCALADO', '8. ENTREGABLES'];
+  for (const [business, kind] of [['agency', 'code'], ['games', 'code'], ['agency', 'analysis']]) {
+    await withDefaultAgent(t, business === 'games' ? 'claude' : undefined);
+    const f = await fixture(t);
+    await fs.mkdir(path.join(f.root, 'data', 'contracts', 'global'), { recursive: true });
+    await fs.writeFile(path.join(f.root, 'data', 'contracts', 'global', 'qa.md'), 'Comprueba siempre el modo oscuro.');
+    await addJob(f.root, kind === 'code' ? { ...f.spec, business } : { id: f.spec.id, business, kind, provider: 'orca', title: 'Plan', prompt: 'Objetivo: planificar. Criterio: comportamiento verificado.' });
+    const simulator = fakeOrca(f.workspace);
+    await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+    const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+    assert.equal(simulator.started.length, kind === 'code' ? 4 : 1);
+    for (const started of simulator.started) {
+      const positions = headings.map(heading => started.input.indexOf(`== ${heading} ==`));
+      assert.ok(positions.every(position => position >= 0), `${business} ${started.stage}: ${positions}`);
+      assert.deepEqual([...positions].sort((a, b) => a - b), positions, `${business} ${started.stage}: sections in order`);
+      const section = heading => started.input.slice(started.input.indexOf(`== ${heading} ==`), started.input.indexOf('== ', started.input.indexOf(`== ${heading} ==`) + 4));
+      assert.match(section('5. CRITERIOS DE ACEPTACIÓN'), /criterios de cierre: los acredita el motor después/);
+      assert.match(started.input.slice(positions[7]), /CONTRATO DE ENTREGA v1/, 'the delivery format is the last thing the worker reads');
+      assert.ok(started.input.indexOf('PERFIL EXISTENTE') < positions[0]);
+      assert.match(section('2. ALCANCE'), kind === 'code' ? /No hagas commit, push, merge/ : /no cambies código ni archivos/);
+    }
+    // The role contract that applied is recorded on its stage with its fingerprint.
+    const qa = job.workflow.steps.find(step => step.key === 'qa');
+    if (qa) assert.deepEqual(qa.contracts.map(item => `${item.scope}:${item.path}`), ['global:data/contracts/global/qa.md']);
+    if (qa) assert.match(qa.contracts[0].sha256, /^[a-f0-9]{64}$/);
+  }
+});
