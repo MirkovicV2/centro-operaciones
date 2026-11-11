@@ -53,3 +53,39 @@ Con tres encargos no hay base para conclusiones generales; sí para decisiones d
 - Si una etapa se detiene por cuota a mitad de encargo, sube `avisoPorcentaje` o actualiza la observación antes de empezar.
 
 Distingue siempre en el informe lo obtenido con agentes reales de lo obtenido en simulación.
+
+## Primer piloto real (11-11-2026, PC de David)
+
+Encargo «Añadir `truncate(s, max)` en `src/text.mjs` con tests» en el sandbox `eoc-e2e-sandbox`, enviado desde Nuevo
+trabajo. Se hizo en el sandbox y no en el Centro porque ya tenía checkout y permisos. Referencia: el encargo `slugify`
+del 10-11 en el mismo proyecto (todo Claude, ruta completa). Un solo encargo trivial: sirve para saber qué funciona, no
+para comparar modelos.
+
+| | Referencia (10-11) | Piloto (11-11) |
+| --- | --- | --- |
+| Ruta | `interfaz`: Diseño tardó 2 min 48 s en concluir «no aplica» | `funcional`, elegida por el coordinador con motivo registrado |
+| Desarrollo | Claude, modelo por defecto | Claude `sonnet` medium |
+| QA y Revisión | Claude | Claude por sustitución: Codex estaba en la reserva (93 %) |
+| Paradas | 3 (dos recuperaciones y la integración) | 1 (permiso de lectura, 18 min esperando a la persona) |
+| Devoluciones y defectos bloqueantes | 0 | 0 |
+| Resultado | PR fusionada | PR fusionada; 14/14 pruebas, repetidas fuera del pipeline |
+
+Funcionó con agentes reales: ruta sin Diseño, modelo y esfuerzo por etapa, sustitución por cuota anotada en QA y
+Revisión, equipo responsable, contrato en ocho secciones, integración.
+
+No se ha ejercitado: Codex (ni `gpt-6.1-sol` en Orca), Diseño con Claude, escaladas, reservas de rama, Windows.
+
+Lo que salió:
+
+- El contrato local de Desarrollo mandaba leer una skill fuera del checkout (`~/dev/es-skills`) y Claude Code pidió
+  permiso: la etapa esperó 18 minutos. Las skills que cite un contrato deben estar en la lista `allow` del checkout o
+  registradas en el Centro (docs/SKILLS.md), que las copia donde el trabajador ya puede leer.
+- Cada etapa espera unos 2 minutos entre la entrega y el cierre del trabajador en Orca: 6 de los 9 minutos y medio de
+  máquina. El trabajo real fue de 28 s en QA y 46 s en Revisión. Es el punto con más margen; falta saber si Orca
+  permite cerrar antes.
+- El coordinador enrutó el primer aviso en 27 s y no reaccionó al segundo hasta que se le escribió.
+- Un fallo de Git antes de admitir (el repositorio ya no existía) deja el recibo bloqueado sin reintento y sin el
+  detalle del error.
+- A un encargo sin interfaz se le ofrecieron `frontend-design` y `web-testing`; la vista previa del formulario no
+  tiene en cuenta la cuota y anunciaba Codex.
+- Una observación en la reserva caducaba y reabría el proveedor (corregido).

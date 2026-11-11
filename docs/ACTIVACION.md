@@ -94,7 +94,7 @@ Comprobado con Orca simulado (`npm test`) y con el panel en navegador:
 
 Pendiente, porque necesita vuestros equipos o cuentas:
 
-- cualquier ejecución con agentes reales (pilotos);
+- ejecuciones con agentes reales: hay un primer piloto en Ubuntu, solo con Claude (docs/PILOTOS.md); falta Codex, Diseño y Videojuegos;
 - que los modelos y esfuerzos del ejemplo existan en vuestras cuentas;
 - Windows: no se ha ejecutado nada allí. En concreto, que Git Bash de Claude incluye `sha256sum` y que el arranque
   del panel con la espera de 30 s se comporta como el ajuste local de Dani;
