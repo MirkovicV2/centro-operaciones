@@ -1379,6 +1379,7 @@ function renderIdeas(data) {
       card.append(button);
     };
     if (idea.status !== 'trash') addAction('Editar', () => editIdea(idea), busy);
+    if (idea.status !== 'trash') addAction('Adjuntar referencias (.zip)', () => attachRefsToIdea(idea, Boolean(coordinatorRequest)));
     if (!['trash', 'archived'].includes(idea.status) && coordinatorRequest?.status !== 'routed') addAction(coordinatorRequest ? 'Revisar aviso al coordinador' : 'Enviar al coordinador', async () => {
       const result = await api(`/api/ideas/${encodeURIComponent(idea.id)}/coordinator`, { method: 'POST', body: '{}' });
       notify(result.message, ['unknown', 'needs_attention'].includes(result.request?.notification?.status));
@@ -1659,6 +1660,41 @@ function ideaCheckoutHint() {
 }
 $('#idea-project').addEventListener('change', ideaCheckoutHint);
 
+async function postIdeaZip(ideaId, file) {
+  if (!/\.zip$/i.test(file.name)) throw new Error('Las referencias deben ser un .zip.');
+  if (file.size > 40_000_000) throw new Error('El .zip supera los 40 MB.');
+  const response = await fetch(`/api/ideas/${encodeURIComponent(ideaId)}/attachments?name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'content-type': 'application/zip' }, body: file });
+  const value = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(value.error || 'No se pudieron adjuntar las referencias.');
+  return value.attachments ?? [];
+}
+
+async function uploadIdeaRefs(ideaId) {
+  const file = $('#idea-refs').files?.[0];
+  if (!file) return 0;
+  $('#idea-send-status').textContent = 'Subiendo referencias…';
+  return (await postIdeaZip(ideaId, file)).length;
+}
+
+// Adjuntar a una idea ya guardada: el selector de archivos se abre dentro del clic, y la subida no cambia la idea (ni su versión).
+function attachRefsToIdea(idea, alreadyWithCoordinator) {
+  return new Promise((resolve, reject) => {
+    const input = el('input'); input.type = 'file'; input.accept = '.zip,application/zip';
+    input.addEventListener('cancel', () => resolve(null));
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      try {
+        notify('Subiendo referencias…');
+        const attachments = await postIdeaZip(idea.id, file);
+        notify(`Referencias de «${idea.title}»: ${attachments.map(item => `${item.name} (${item.files} archivos)`).join(', ')}.${alreadyWithCoordinator ? ' El coordinador ya tiene la idea y no verá este aviso, pero las etapas que aún no hayan empezado las recibirán.' : ''}`);
+        resolve(attachments);
+      } catch (error) { reject(error); }
+    });
+    input.click();
+  });
+}
+
 async function captureIdea(sendToCoordinator) {
   const form = $('#idea-form');
   if (state.ideaBusy || !form.reportValidity()) return;
@@ -1682,6 +1718,7 @@ async function captureIdea(sendToCoordinator) {
       idea = await save();
     }
     $('#idea-send-status').textContent = idea.notePath ? 'Guardada en Obsidian y localmente' : 'Guardada localmente';
+    if (await uploadIdeaRefs(idea.id)) $('#idea-send-status').textContent += ' · Referencias adjuntas';
     if (sendToCoordinator) {
       $('#idea-send-status').textContent += ' · Avisando al coordinador…';
       const result = await api(`/api/ideas/${encodeURIComponent(idea.id)}/coordinator`, { method: 'POST', body: '{}' });

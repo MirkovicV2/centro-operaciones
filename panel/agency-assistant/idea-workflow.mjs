@@ -13,6 +13,7 @@ import { deliverCoordinatorNotice } from './coordinator-notice.mjs';
 import { assertCoordinatorQuestionsAnswered, coordinatorDecisions, coordinatorJobLink } from './coordinator-dialogue.mjs';
 
 import { withIdeaLock, ideaBusy, ideaBrief, classification } from './idea-model.mjs';
+import { ideaAttachments } from '../../references.mjs';
 const sends = new Map();
 const coordinatorSends = new Map();
 const coordinatorRoutes = new Map();
@@ -181,10 +182,11 @@ export function sendIdeaToCoordinator(root, id, { notify = notifyCoordinatorRequ
     let request = inbox.coordinatorRequests.find(item => item.id === requestId);
     if (!request) {
       const project = inbox.projects.find(item => item.id === idea.projectId && item.business === idea.business);
+      const attachments = (await ideaAttachments(root, idea.id).catch(() => [])).filter(item => item.status === 'ok');
       request = {
         id: requestId, kind: 'idea', ideaId: idea.id, ideaVersion: version, business: idea.business,
         status: 'pending', notification: { status: 'pending' }, createdAt: new Date().toISOString(),
-        snapshot: { schemaVersion: 1, business: idea.business, projectId: project?.id || null, projectName: project?.name || idea.projectName || '', version, focus: idea.focus || '', tags: [...(idea.tags || [])], title: idea.title, text: idea.text, objective: idea.text, successCriteria: 'Definir un resultado verificable y sus decisiones imprescindibles; confirmar criterios y destino antes de encolar código.', destinationConfirmation: null, decisions: [] },
+        snapshot: { schemaVersion: 1, business: idea.business, projectId: project?.id || null, projectName: project?.name || idea.projectName || '', version, focus: idea.focus || '', tags: [...(idea.tags || [])], title: idea.title, text: idea.text, objective: idea.text, successCriteria: 'Definir un resultado verificable y sus decisiones imprescindibles; confirmar criterios y destino antes de encolar código.', destinationConfirmation: null, decisions: [], ...(attachments.length ? { attachments } : {}) },
       };
       await changeDashboardState(root, state => { state.coordinatorRequests.push(request); });
     }

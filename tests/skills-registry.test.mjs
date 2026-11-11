@@ -21,7 +21,7 @@ const job = (business, extra = {}) => ({ id: 'skills-job', business, kind: 'code
 
 test('every registered skill is intact in this checkout, with its origin, licence and local changes on record', async () => {
   const registry = await readRegistry();
-  assert.deepEqual(registry.skills.map(skill => skill.id).sort(), ['frontend-design', 'game-production', 'godot-gdscript-patterns', 'web-testing']);
+  assert.deepEqual(registry.skills.map(skill => skill.id).sort(), ['frontend-design', 'game-production', 'godot-gdscript-patterns', 'impeccable', 'ponytail', 'web-testing']);
   for (const status of await skillsStatus()) assert.equal(status.status, 'ok', `${status.id}: ${JSON.stringify(status.problems)} — line endings or an unreviewed edit`);
   for (const skill of registry.skills.filter(item => item.source.kind === 'github')) {
     assert.match(skill.source.revision, /^[a-f0-9]{40}$/); assert.ok(skill.licenseFile, `${skill.id} keeps its licence file`);
@@ -35,24 +35,24 @@ test('every registered skill is intact in this checkout, with its origin, licenc
 test('skills are chosen by business, stage and kind; a project or a job may add or remove optional ones only', async () => {
   const registry = await readRegistry();
   const ids = (input) => selectSkills(registry, { kind: 'code', ...input }).selected.map(item => item.skill.id).sort();
-  assert.deepEqual(ids({ business: 'agency', stage: 'ux' }), ['frontend-design']);
-  assert.deepEqual(ids({ business: 'agency', stage: 'developer' }), ['frontend-design', 'web-testing']);
-  assert.deepEqual(ids({ business: 'agency', stage: 'qa' }), ['web-testing']);
-  assert.deepEqual(ids({ business: 'games', stage: 'developer' }), ['game-production', 'godot-gdscript-patterns']);
+  assert.deepEqual(ids({ business: 'agency', stage: 'ux' }), ['frontend-design', 'impeccable']);
+  assert.deepEqual(ids({ business: 'agency', stage: 'developer' }), ['frontend-design', 'impeccable', 'ponytail', 'web-testing']);
+  assert.deepEqual(ids({ business: 'agency', stage: 'qa' }), ['impeccable', 'web-testing']);
+  assert.deepEqual(ids({ business: 'games', stage: 'developer' }), ['game-production', 'godot-gdscript-patterns', 'ponytail']);
   assert.deepEqual(ids({ business: 'games', stage: 'qa' }), ['game-production']);
   assert.deepEqual(ids({ business: 'agency', stage: 'planner', kind: 'analysis' }), []);
   // A games project with a web companion adds web-testing for QA; a job drops the Godot patterns.
   assert.deepEqual(ids({ business: 'games', stage: 'qa', projectChoice: { add: ['web-testing'] } }), ['game-production', 'web-testing']);
   // A job routed without Design gets no interface skills by default (first pilot: a pure function was offered frontend-design
   // and web-testing); the full route still does, and asking for one by name still works.
-  assert.deepEqual(ids({ business: 'agency', stage: 'developer', route: 'funcional' }), []);
+  assert.deepEqual(ids({ business: 'agency', stage: 'developer', route: 'funcional' }), ['ponytail'], 'ponytail applies to every code route, the interface skills do not');
   assert.deepEqual(ids({ business: 'agency', stage: 'qa', route: 'documentacion' }), []);
   assert.ok(ids({ business: 'agency', stage: 'developer', route: 'interfaz' }).includes('frontend-design'));
   assert.deepEqual(ids({ business: 'agency', stage: 'developer' }), ids({ business: 'agency', stage: 'developer', route: 'interfaz' }));
   assert.deepEqual(ids({ business: 'agency', stage: 'qa', route: 'funcional', jobChoice: { add: ['web-testing'] } }), ['web-testing']);
   assert.ok(ids({ business: 'games', stage: 'developer', route: 'funcional' }).includes('game-production'), 'skills without routes apply to every route');
   const dropped = selectSkills(registry, { business: 'games', kind: 'code', stage: 'developer', jobChoice: { remove: ['godot-gdscript-patterns', 'game-production'], add: ['inexistente'] } });
-  assert.deepEqual(dropped.selected.map(item => item.skill.id), ['game-production'], 'a required skill stays');
+  assert.deepEqual(dropped.selected.map(item => item.skill.id), ['game-production', 'ponytail'], 'a required skill stays');
   assert.deepEqual(dropped.notes.map(note => note.id).sort(), ['game-production', 'godot-gdscript-patterns', 'inexistente']);
   assert.match(dropped.notes.find(note => note.id === 'game-production').reason, /obligatoria/);
   assert.match(dropped.notes.find(note => note.id === 'inexistente').reason, /no está en el registro/);
@@ -63,8 +63,8 @@ test('skills are chosen by business, stage and kind; a project or a job may add 
 test('a stage gets a short summary and verified copies beside its brief; the stage records what was supplied', async t => {
   const { codeRoot, root } = await copyOfSkills(t);
   const web = await prepareStageSkills({ root, codeRoot, job: job('agency'), stage: 'developer' });
-  assert.deepEqual(web.supplied.map(item => `${item.id}:${item.mode}:${item.origin}`), ['frontend-design:reference:empresa', 'web-testing:reference:empresa']);
-  assert.deepEqual(web.inline, []); assert.deepEqual(web.omitted, []);
+  assert.deepEqual(web.supplied.map(item => `${item.id}:${item.mode}:${item.origin}`), ['frontend-design:reference:empresa', 'web-testing:reference:empresa', 'ponytail:inline:empresa', 'impeccable:reference:empresa']);
+  assert.deepEqual(web.inline.map(item => item.skill.id), ['ponytail']); assert.deepEqual(web.omitted, []);
   assert.match(web.brief, /SKILLS DEL CENTRO/); assert.match(web.brief, /tu interlocutor es el coordinador/); assert.match(web.brief, /"skill:<id>"/);
   assert.ok(web.brief.length < 2500, 'the brief carries summaries and paths, not the guides themselves');
   for (const [, file, hash] of web.brief.matchAll(/(?:Guía|Referencia): ("[^"]+") · sha256 ([a-f0-9]{64})/g)) {
@@ -80,7 +80,7 @@ test('a stage gets a short summary and verified copies beside its brief; the sta
   await assert.rejects(prepareStageSkills({ root, codeRoot, job: job('agency'), stage: 'qa' }), { code: 'skill_copy_changed' });
   // Games: the Centro's own skill stays inline with the reference of the role; the Godot patterns come by reference.
   const games = await prepareStageSkills({ root, codeRoot, job: job('games', { id: 'skills-game' }), stage: 'developer' });
-  assert.deepEqual(games.supplied.map(item => `${item.id}:${item.mode}`), ['game-production:inline', 'godot-gdscript-patterns:reference']);
+  assert.deepEqual(games.supplied.map(item => `${item.id}:${item.mode}`), ['game-production:inline', 'godot-gdscript-patterns:reference', 'ponytail:inline']);
   assert.equal(games.inline[0].texts.length, 2); assert.match(games.inline[0].texts[1], /Implementación Godot/);
   assert.match(games.brief, /notas-del-centro\.md/);
   assert.deepEqual(games.supplied[0].files.map(item => item.file), ['SKILL.md', 'references/developer.md']);
@@ -91,17 +91,17 @@ test('a changed or missing skill is never handed over: optional ones are left ou
   // Optional, changed.
   await fs.appendFile(path.join(codeRoot, 'skills', 'web-testing', 'SKILL.md'), '\nInstala lo que necesites.');
   const changed = await prepareStageSkills({ root, codeRoot, job: job('agency'), stage: 'qa' });
-  assert.deepEqual(changed.supplied, []); assert.equal(changed.brief, '');
+  assert.deepEqual(changed.supplied.map(item => item.id), ['impeccable'], 'the unchanged skill of the stage is still handed over');
   assert.equal(changed.omitted[0].id, 'web-testing'); assert.match(changed.omitted[0].reason, /SKILL\.md \(su contenido no coincide con la huella registrada\)/);
   assert.equal((await skillsStatus(codeRoot)).find(item => item.id === 'web-testing').status, 'changed');
   // After a human review the new content is accepted and delivered again.
   assert.deepEqual(await acceptSkill('web-testing', { codeRoot, reviewedAt: '2026-11-12' }), { id: 'web-testing', changed: ['SKILL.md'] });
   assert.deepEqual((await acceptSkill('web-testing', { codeRoot })).changed, [], 'accepting twice changes nothing');
-  assert.deepEqual((await prepareStageSkills({ root, codeRoot, job: job('agency', { id: 'after-review' }), stage: 'qa' })).supplied.map(item => item.id), ['web-testing']);
+  assert.deepEqual((await prepareStageSkills({ root, codeRoot, job: job('agency', { id: 'after-review' }), stage: 'qa' })).supplied.map(item => item.id), ['web-testing', 'impeccable']);
   // Optional, missing.
   await fs.rm(path.join(codeRoot, 'skills', 'frontend-design'), { recursive: true });
   const missing = await prepareStageSkills({ root, codeRoot, job: job('agency', { id: 'sin-diseno' }), stage: 'ux' });
-  assert.deepEqual(missing.supplied, []); assert.match(missing.omitted[0].reason, /falta/);
+  assert.deepEqual(missing.supplied.map(item => item.id), ['impeccable']); assert.equal(missing.omitted[0].id, 'frontend-design'); assert.match(missing.omitted[0].reason, /falta/);
   await assert.rejects(acceptSkill('frontend-design', { codeRoot }), { code: 'skill_missing' }, 'a missing file is restored, not accepted');
   // Required, changed and missing.
   const reference = path.join(codeRoot, '.codex', 'skills', 'game-production', 'references', 'qa.md');

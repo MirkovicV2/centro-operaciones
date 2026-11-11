@@ -39,10 +39,15 @@ export const STAGE_TERMS = Object.freeze({
 export const CLOSING_CRITERIA_NOTE = 'Son los criterios del producto para tu etapa. La revisión posterior, los checks remotos y el merge son criterios de cierre: los acredita el motor después, con sus propios requisitos.';
 
 // Renders the sections. Every one must have content: a brief with a missing section is a defect of the engine.
-export function renderStageContract(sections) {
+// Order that puts what barely changes between rounds of the same role first and what changes each round (inputs)
+// last-but-one, so a provider's prompt cache keeps the longest possible identical prefix. Headings keep their numbers.
+export const STATIC_FIRST_ORDER = Object.freeze(['evidencias', 'alcance', 'objetivo', 'decisiones', 'criterios', 'devolucion', 'entradas', 'entregables']);
+
+export function renderStageContract(sections, { staticFirst = false } = {}) {
   const unknown = Object.keys(sections).find(key => !STAGE_SECTIONS.some(([name]) => name === key));
   if (unknown) throw Object.assign(new Error(`Sección de contrato desconocida: ${unknown}.`), { code: 'stage_contract_invalid' });
-  return STAGE_SECTIONS.map(([key, heading]) => {
+  const ordered = staticFirst ? STATIC_FIRST_ORDER.map(key => STAGE_SECTIONS.find(([name]) => name === key)) : STAGE_SECTIONS;
+  return ordered.map(([key, heading]) => {
     const body = (sections[key] ?? []).filter(Boolean);
     if (!body.length) throw Object.assign(new Error(`El contrato de la etapa no define ${heading}.`), { code: 'stage_contract_invalid' });
     return `== ${heading} ==\n${body.join('\n\n')}`;

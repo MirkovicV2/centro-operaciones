@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Must stay the first import: see the note in the file.
+import './windows-job-prime.mjs';
 import http from 'node:http';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -14,6 +16,7 @@ import { destinationCheck, createMissingRemote } from '../project-remote.mjs';
 import { workflowV2Resumable, workflowV2Readmissible, workflowV2Live, workflowV2RetryRefusal, candidateFiles } from '../workflow-v2-gate.mjs';
 import { createWorker } from '../providers.mjs';
 import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
+import { importIdeaZip, ideaAttachments, removeIdeaReferences, IDEA_ZIP_MAX_BYTES, ReferenceError as ReferenceSetError } from '../references.mjs';
 import { submitTaskToCoordinator, routeTaskFromCoordinator, checkCoordinatorRequestNotice } from './agency-assistant/coordinator-inbox.mjs';
 import { remindCoordinator } from './agency-assistant/coordinator-notice.mjs';
 import { reportCoordinatorQuestions, answerCoordinatorQuestion, readCoordinatorRequest, withdrawCoordinatorRequest, respondToCoordinatorRequest } from './agency-assistant/coordinator-dialogue.mjs';
@@ -208,6 +211,28 @@ async function readJson(request, maxBytes = 32_000) {
   catch { throw new Error('El contenido JSON no es válido.'); }
 }
 
+async function readRaw(request, maxBytes) {
+  const chunks = []; let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) throw Object.assign(new Error('El archivo es demasiado grande (máximo 40 MB).'), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// Referencias adjuntas a una idea: un .zip crudo en el cuerpo (el nombre va en ?name=). Se verifican y se guardan con huella;
+// el coordinador las ve en el aviso y las etapas las reciben solas (references.mjs).
+async function attachIdeaZip(ideaId, request, name) {
+  const idea = (await loadDashboardState(QUEUE_ROOT)).ideas.find(item => item.id === ideaId);
+  if (!idea) throw Object.assign(new Error('No encuentro esa idea.'), { status: 404 });
+  if (idea.status === 'trash') throw Object.assign(new Error('Restaura la idea antes de adjuntar referencias.'), { status: 409 });
+  const bytes = await readRaw(request, IDEA_ZIP_MAX_BYTES);
+  try { await importIdeaZip(QUEUE_ROOT, ideaId, bytes, name); }
+  catch (error) { if (error instanceof ReferenceSetError) throw Object.assign(new Error(error.message), { status: 400 }); throw error; }
+  return { attachments: await ideaAttachments(QUEUE_ROOT, ideaId) };
+}
+
 async function botRunning() {
   const file = path.join(APP_ROOT, 'data', 'agency-assistant.json.lock');
   try {
@@ -360,6 +385,8 @@ async function handleApi(request, response, url, tailscale = null) {
   if (request.method === 'GET' && traceRead) return send(response, 200, await readRequestTrace(QUEUE_ROOT, traceRead[1], { observePreparation }));
   if (request.method === 'GET' && url.pathname === '/api/graph') return send(response, 200, await buildKnowledgeGraph(QUEUE_ROOT, url.searchParams.get('business')));
   if (request.method === 'GET' && url.pathname === '/api/launch-preview') return send(response, 200, await launchPreview(url.searchParams));
+  const attachmentList = request.method === 'GET' && url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/attachments$/);
+  if (attachmentList) return send(response, 200, { attachments: await ideaAttachments(QUEUE_ROOT, attachmentList[1]) });
   if (request.method === 'GET' && url.pathname === '/api/team') return send(response, 200, await teamSettings());
   if (request.method === 'GET' && url.pathname === '/api/quota') return send(response, 200, await quotaSettings());
   if (request.method === 'GET' && url.pathname === '/api/pipeline') return send(response, 200, await pipelineSettings());
@@ -376,7 +403,11 @@ async function handleApi(request, response, url, tailscale = null) {
   }
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
   assertLocalRequest(request, tailscale);
+  const attachmentUpload = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/attachments$/);
+  if (attachmentUpload) return send(response, 201, await attachIdeaZip(attachmentUpload[1], request, url.searchParams.get('name')));
   const body = await readJson(request);
+  const attachmentRemove = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/attachments\/remove$/);
+  if (attachmentRemove) return send(response, 200, { attachments: await removeIdeaReferences(QUEUE_ROOT, attachmentRemove[1], body.name) });
   const contextRequest = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/context$/);
   if (contextRequest) return send(response, 200, await queryRequestContext(QUEUE_ROOT, contextRequest[1], body));
   const contextJob = url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/context$/);

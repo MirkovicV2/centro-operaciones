@@ -153,6 +153,7 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     `Decisión del coordinador: ${kind !== 'code' ? 'Planificador para análisis sin editar código' : pipelineRoute?.omitted.length ? `pipeline de código Desarrollo → QA → Revisión (ruta ${pipelineRoute.label}; sin Diseño: ${pipelineRoute.reason})` : 'pipeline de código UX → Desarrollo → QA → Revisión'}.`,
     reason ? `Motivo de ruta: ${String(reason).trim().slice(0, 1000)}` : '',
     `Objetivo solicitado: ${snapshot.text}`,
+    snapshot.attachments?.length ? `Referencias adjuntas a la idea (las reciben solas Diseño, Desarrollo, QA y Revisión): ${snapshot.attachments.map(item => `${item.name} (${item.files} archivos)`).join('; ')}` : '',
     `Criterio de éxito: ${snapshot.successCriteria}`,
     `Decisiones confirmadas: ${JSON.stringify(decisions)}`,
     `Destino: ${kind === 'code' ? `${destination.checkout} · ${destination.branch} → ${destination.baseBranch}` : 'análisis'}`,

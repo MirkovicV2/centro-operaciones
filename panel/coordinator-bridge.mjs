@@ -102,6 +102,7 @@ function messageBody(request, env, preparation = null) {
     'Objetivo / solicitud íntegra:',
     snapshot.text,
     ...(snapshot.objective && snapshot.objective !== snapshot.text ? [`Objetivo: ${snapshot.objective}`] : []),
+    ...((snapshot.attachments || []).length ? [`Referencias adjuntas a la idea (${snapshot.attachments.map(item => `${item.name}: ${item.files} archivos`).join('; ')}). El Centro las entrega solas a Diseño, Desarrollo, QA y Revisión con ruta y huella verificadas: no las copies ni las resumas en el encargo ni en los traspasos. Si sabes qué debe tomarse de ellas, dilo en el objetivo.`] : []),
     `Criterio de éxito: ${snapshot.successCriteria || 'Definir resultado verificable y decisiones pendientes antes de encolar código.'}`,
     `Destino confirmado: ${snapshot.destinationConfirmation ? JSON.stringify(snapshot.destinationConfirmation) : 'Pendiente; no autoriza código hasta confirmarlo.'}`,
     `Decisiones guardadas en esta solicitud: ${JSON.stringify(snapshot.decisions || [])}`,

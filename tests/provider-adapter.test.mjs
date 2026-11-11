@@ -79,6 +79,7 @@ test('a shared contract from the repository applies before the local one of the 
   assert.ok(brief.indexOf('Compartido global.') < brief.indexOf('Local global.') && brief.indexOf('Local global.') < brief.indexOf('Compartido de Videojuegos.') && brief.indexOf('Compartido de Videojuegos.') < brief.indexOf('Local del proyecto.'));
   assert.match(brief, /CONTRATO global \(compartido\) · contratos\/global\/reviewer\.md · sha256 [a-f0-9]{64}/);
   assert.deepEqual(await readStageContracts(root, { business: 'agency', stage: 'qa', sharedRoot }), []);
-  // The repository ships the folder and its rules, and no contract that would change today's briefs.
-  assert.deepEqual(await readStageContracts(root, { business: 'agency', stage: 'qa' }), []);
+  // What the repository ships is only shared (versioned) contracts of the global or agency layers, never a local one.
+  const shipped = await readStageContracts(root, { business: 'agency', stage: 'qa' });
+  assert.ok(shipped.every(item => item.shared && ['global', 'empresa-agency'].includes(item.scope)));
 });

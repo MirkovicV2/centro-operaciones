@@ -525,7 +525,7 @@ test('each stage of a web job receives its skills, records them as supplied and 
   await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
   const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
   const supplied = Object.fromEntries(job.workflow.steps.map(step => [step.key, (step.skills ?? []).map(skill => skill.id)]));
-  assert.deepEqual(supplied, { ux: ['frontend-design'], developer: ['frontend-design', 'web-testing'], qa: ['web-testing'], reviewer: ['web-testing'] });
+  assert.deepEqual(supplied, { ux: ['frontend-design', 'impeccable'], developer: ['frontend-design', 'web-testing', 'ponytail', 'impeccable'], qa: ['web-testing', 'impeccable'], reviewer: ['web-testing', 'ponytail', 'impeccable'] });
   const step = key => job.workflow.steps.find(item => item.key === key);
   assert.deepEqual(step('qa').skillsConsulted, ['web-testing'], 'frontend-design was not given to QA, so it cannot count as consulted there');
   assert.deepEqual(step('developer').skillsConsulted, []);
@@ -562,11 +562,11 @@ test('a required skill that changed stops the stage before any worker starts; on
   await runQueue(f.root, { execute: true, worker });
   const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
   assert.match(simulator.started[0].input, /SKILL DE VIDEOJUEGOS · game-production/);
-  assert.deepEqual(done.workflow.steps.find(step => step.key === 'developer').skills.map(skill => skill.id), ['game-production', 'godot-gdscript-patterns']);
+  assert.deepEqual(done.workflow.steps.find(step => step.key === 'developer').skills.map(skill => skill.id), ['game-production', 'godot-gdscript-patterns', 'ponytail']);
 });
 
 // One brief shape for every stage and provider (stage-contract.mjs).
-test('every stage brief carries the same eight sections in order, with product criteria kept apart from closing criteria', async t => {
+test('every stage brief carries the same eight sections in the static-first order, with product criteria kept apart from closing criteria', async t => {
   const headings = ['1. OBJETIVO', '2. ALCANCE', '3. ENTRADAS', '4. DECISIONES VIGENTES', '5. CRITERIOS DE ACEPTACIÓN', '6. EVIDENCIAS EXIGIDAS', '7. DEVOLUCIÓN Y ESCALADO', '8. ENTREGABLES'];
   for (const [business, kind] of [['agency', 'code'], ['games', 'code'], ['agency', 'analysis']]) {
     await withDefaultAgent(t, business === 'games' ? 'claude' : undefined);
@@ -581,7 +581,10 @@ test('every stage brief carries the same eight sections in order, with product c
     for (const started of simulator.started) {
       const positions = headings.map(heading => started.input.indexOf(`== ${heading} ==`));
       assert.ok(positions.every(position => position >= 0), `${business} ${started.stage}: ${positions}`);
-      assert.deepEqual([...positions].sort((a, b) => a - b), positions, `${business} ${started.stage}: sections in order`);
+      // Static-first order (STATIC_FIRST_ORDER in stage-contract.mjs): headings keep their numbers, the stable
+      // role parts come first and the inputs that change every round come just before the delivery format.
+      const staticFirst = [5, 1, 0, 3, 4, 6, 2, 7];
+      assert.deepEqual(staticFirst.map(index => positions[index]), [...positions].sort((a, b) => a - b), `${business} ${started.stage}: sections in static-first order`);
       const section = heading => started.input.slice(started.input.indexOf(`== ${heading} ==`), started.input.indexOf('== ', started.input.indexOf(`== ${heading} ==`) + 4));
       assert.match(section('5. CRITERIOS DE ACEPTACIÓN'), /criterios de cierre: los acredita el motor después/);
       assert.match(started.input.slice(positions[7]), /CONTRATO DE ENTREGA v1/, 'the delivery format is the last thing the worker reads');
@@ -590,7 +593,8 @@ test('every stage brief carries the same eight sections in order, with product c
     }
     // The role contract that applied is recorded on its stage with its fingerprint.
     const qa = job.workflow.steps.find(step => step.key === 'qa');
-    if (qa) assert.deepEqual(qa.contracts.map(item => `${item.scope}:${item.path}`), ['global:data/contracts/global/qa.md']);
+    // The Agency's shared contract (contratos/empresa-agency/qa.md) comes after the global layer; games has none.
+    if (qa) assert.deepEqual(qa.contracts.map(item => `${item.scope}:${item.path}`), business === 'agency' ? ['global:data/contracts/global/qa.md', 'empresa-agency:contratos/empresa-agency/qa.md'] : ['global:data/contracts/global/qa.md']);
     if (qa) assert.match(qa.contracts[0].sha256, /^[a-f0-9]{64}$/);
   }
 });

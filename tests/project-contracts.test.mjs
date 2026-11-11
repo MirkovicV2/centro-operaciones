@@ -15,12 +15,12 @@ const write = async (dir, scope, stage, text) => { await fs.mkdir(path.join(dir,
 
 test('layers apply global, then business, then project; missing or empty layers are skipped', async t => {
   const dir = await root(t);
-  assert.deepEqual(await readStageContracts(dir, { business: 'agency', projectId: 'web', stage: 'reviewer' }), []);
+  assert.deepEqual(await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: 'web', stage: 'reviewer' }), []);
   await write(dir, 'global', 'reviewer', 'Revisa accesibilidad.\n');
   await write(dir, 'empresa-agency', 'reviewer', '');
   await write(dir, 'proyecto-web', 'reviewer', 'Comprueba el formulario de contacto.');
   await write(dir, 'proyecto-otro', 'reviewer', 'No debe aparecer.');
-  const found = await readStageContracts(dir, { business: 'agency', projectId: 'web', stage: 'reviewer' });
+  const found = await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: 'web', stage: 'reviewer' });
   assert.deepEqual(found.map(item => [item.scope, item.path, item.text]), [
     ['global', 'data/contracts/global/reviewer.md', 'Revisa accesibilidad.'],
     ['proyecto-web', 'data/contracts/proyecto-web/reviewer.md', 'Comprueba el formulario de contacto.']]);
@@ -28,8 +28,8 @@ test('layers apply global, then business, then project; missing or empty layers 
   const brief = contractsBrief(found);
   assert.match(brief, /No cambian permisos, publicación, el contrato de entrega/);
   assert.ok(brief.indexOf('global') < brief.indexOf('proyecto web'));
-  assert.deepEqual(await readStageContracts(dir, { business: 'agency', projectId: '../web', stage: 'reviewer' }).then(items => items.map(item => item.scope)), ['global'], 'an unsafe project id is never a path');
-  assert.deepEqual(await readStageContracts(dir, { business: 'agency', projectId: 'web', stage: 'integration' }), []);
+  assert.deepEqual(await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: '../web', stage: 'reviewer' }).then(items => items.map(item => item.scope)), ['global'], 'an unsafe project id is never a path');
+  assert.deepEqual(await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: 'web', stage: 'integration' }), []);
 });
 
 test('oversized files and links fail closed with an actionable error', async t => {
@@ -58,7 +58,7 @@ test('a worker brief carries its stage contracts with provenance; without files 
   const workspace = path.join(dir, 'workspaces', 'game'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
   const run = async id => {
     const briefs = [], specs = [], updates = [];
-    const ctx = { root: dir, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
+    const ctx = { root: dir, sharedContractsRoot: dir, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
     const command = async args => {
       if (args[0] === 'repo') return { repos: [{ path: workspace }] };
       if (args[1] === 'run-create') return { runId: 'run_contract01' };

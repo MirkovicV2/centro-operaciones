@@ -66,32 +66,154 @@ const applyEvent = (state, event) => {
   state.revision = event.revision;
 };
 
-async function readLedger(root, repair = false) {
-  let raw;
-  try { raw = await fs.readFile(ledger(root), 'utf8'); }
-  catch (e) {
-    if (e.code !== 'ENOENT') throw e;
-    try { await fs.access(path.join(dir(root), 'state.json')); } catch (err) { if (err.code === 'ENOENT') { const fresh = emptyState(); ledgerHeads.set(fresh, LEDGER_GENESIS); return fresh; } throw err; }
-    throw new QueueError('Falta el registro de eventos, pero existe una instantánea. Revisión manual necesaria.', 'ledger_missing');
-  }
-  const state = emptyState();
-  const complete = raw.lastIndexOf('\n') + 1;
+// Reading and checking the whole ledger on every load made each panel refresh cost seconds once the file
+// grew to tens of MB. Each process now remembers the state it built and how far into the file it got:
+// - same size and timestamps: the remembered state is returned;
+// - the file grew: only the new lines are read, after checking that the last line already read is still
+//   there byte for byte, and they must chain from it as always;
+// - anything else (shorter, rewritten in place, first load, or more than LEDGER_FULL_VERIFY_MS since the
+//   last complete check): the whole file is read and checked exactly as before.
+// So an edit that keeps the last line and makes the file longer is detected at the next complete check
+// (at most LEDGER_FULL_VERIFY_MS later, or at once in any new process) instead of on the next load.
+const LEDGER_FULL_VERIFY_MS = 60_000;
+// A file seen within this time of its own last change could be rewritten again with the same size and the
+// same timestamps, so such a sighting is never trusted as «unchanged»: the next load checks the file whole.
+const LEDGER_RACY_MS = 50;
+const ledgerCache = new Map();
+const ledgerFullReads = new Map();
+
+function applyLedgerLines(state, lines, head) {
   let previous = null;
-  for (const line of raw.slice(0, complete).split('\n').filter(Boolean)) {
+  for (const line of lines) {
     let event;
     try { event = JSON.parse(line); } catch { throw new QueueError('Registro de eventos dañado. Revisión manual necesaria.', 'ledger_corrupt'); }
     // D: every event the Centro writes names the hash of the exact previous line, so altering, removing or
     // reordering any line before it is detected. Lines without `prev` (history before D, or a manual append at
     // the end) stay valid; the next Centro write chains over them.
-    if (event.prev !== undefined && event.prev !== (previous ? lineHash(previous) : LEDGER_GENESIS)) {
+    if (event.prev !== undefined && event.prev !== (previous === null ? head : lineHash(previous))) {
       throw new QueueError('El registro de eventos no encadena con la línea anterior: se alteró, se borró o se reordenó una entrada. Revisión manual necesaria.', 'ledger_chain_broken');
     }
     applyEvent(state, event);
     previous = line;
   }
-  ledgerHeads.set(state, previous ? lineHash(previous) : LEDGER_GENESIS);
+  return previous === null ? head : lineHash(previous);
+}
+
+// Byte range of the last non-empty complete line in buffer[0, complete), or null.
+function lastLedgerLine(buffer, complete) {
+  let end = complete;
+  while (end > 0) {
+    const newline = end - 1;
+    const start = newline === 0 ? 0 : buffer.lastIndexOf(0x0a, newline - 1) + 1;
+    if (start < newline) return { start, end };
+    end = newline;
+  }
+  return null;
+}
+
+const sameLedgerFile = (cached, stat) => cached.stable && stat.size === cached.fileSize && stat.mtimeMs === cached.mtimeMs && stat.ctimeMs === cached.ctimeMs
+  && cached.observedAt - Math.max(cached.mtimeMs, cached.ctimeMs) >= LEDGER_RACY_MS;
+
+async function readWholeLedger(root) {
+  const file = ledger(root);
+  const handle = await fs.open(file, 'r');
+  let buffer, stat;
+  try { buffer = await handle.readFile(); stat = await handle.stat(); } finally { await handle.close(); }
+  const observedAt = Date.now();
+  const state = emptyState();
+  const complete = buffer.lastIndexOf(0x0a) + 1;
+  const head = applyLedgerLines(state, buffer.toString('utf8', 0, complete).split('\n').filter(Boolean), LEDGER_GENESIS);
+  const record = {
+    stateJson: JSON.stringify(state), head, offset: complete, tail: lastLedgerLine(buffer, complete),
+    fileSize: buffer.length, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, observedAt, stable: stat.size === buffer.length, verifiedAt: observedAt,
+  };
+  ledgerCache.set(file, record);
+  return record;
+}
+
+// Reads what was appended since `cached`. Returns null when the file no longer continues what was read.
+async function extendLedger(root, cached) {
+  const file = ledger(root);
+  const from = cached.tail ? cached.tail.start : cached.offset;
+  const handle = await fs.open(file, 'r');
+  let chunk, stat;
+  try {
+    const { size } = await handle.stat();
+    if (size < cached.offset) return null;
+    chunk = Buffer.allocUnsafe(size - from);
+    let read = 0;
+    while (read < chunk.length) {
+      const { bytesRead } = await handle.read(chunk, read, chunk.length - read, from + read);
+      if (!bytesRead) break;
+      read += bytesRead;
+    }
+    chunk = chunk.subarray(0, read);
+    stat = await handle.stat();
+  } finally { await handle.close(); }
+  const known = cached.offset - from;
+  if (chunk.length < known) return null;
+  if (cached.tail) {
+    const tail = chunk.toString('utf8', 0, known).split('\n').filter(Boolean);
+    if (tail.length !== 1 || chunk[known - 1] !== 0x0a || lineHash(tail[0]) !== cached.head) return null;
+  }
+  const added = chunk.subarray(known);
+  const complete = added.lastIndexOf(0x0a) + 1;
+  const lines = added.toString('utf8', 0, complete).split('\n').filter(Boolean);
+  const position = { fileSize: from + chunk.length, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, observedAt: Date.now(), stable: stat.size === from + chunk.length };
+  if (!lines.length) {
+    const record = { ...cached, offset: cached.offset + complete, ...position };
+    if (ledgerCache.get(file) === cached) ledgerCache.set(file, record);
+    return record;
+  }
+  const state = JSON.parse(cached.stateJson);
+  const head = applyLedgerLines(state, lines, cached.head);
+  const last = lastLedgerLine(added, complete);
+  const record = {
+    stateJson: JSON.stringify(state), head, offset: cached.offset + complete,
+    tail: { start: cached.offset + last.start, end: cached.offset + last.end },
+    ...position, verifiedAt: cached.verifiedAt,
+  };
+  if (ledgerCache.get(file) === cached) ledgerCache.set(file, record);
+  return record;
+}
+
+async function currentLedger(root) {
+  const file = ledger(root);
+  const cached = ledgerCache.get(file);
+  if (cached && Math.abs(Date.now() - cached.verifiedAt) < LEDGER_FULL_VERIFY_MS) {
+    const stat = await fs.stat(file);
+    if (sameLedgerFile(cached, stat)) return cached;
+    // Same size but touched: something rewrote the file without appending. Check it whole.
+    if (stat.size > cached.fileSize || !cached.stable) {
+      const extended = await extendLedger(root, cached);
+      if (extended) return extended;
+    }
+  }
+  // One complete read at a time per ledger: loads that arrive meanwhile wait for it and share it.
+  let reading = ledgerFullReads.get(file);
+  if (!reading) {
+    reading = readWholeLedger(root).finally(() => { if (ledgerFullReads.get(file) === reading) ledgerFullReads.delete(file); });
+    ledgerFullReads.set(file, reading);
+  }
+  return reading;
+}
+
+async function readLedger(root, repair = false) {
+  let record;
+  try { record = await currentLedger(root); }
+  catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+    ledgerCache.delete(ledger(root));
+    try { await fs.access(path.join(dir(root), 'state.json')); } catch (err) { if (err.code === 'ENOENT') { const fresh = emptyState(); ledgerHeads.set(fresh, LEDGER_GENESIS); return fresh; } throw err; }
+    throw new QueueError('Falta el registro de eventos, pero existe una instantánea. Revisión manual necesaria.', 'ledger_missing');
+  }
+  const state = JSON.parse(record.stateJson);
+  ledgerHeads.set(state, record.head);
   // A torn final write was never committed. Only the lock owner may trim it.
-  if (repair && complete < raw.length) await fs.truncate(ledger(root), Buffer.byteLength(raw.slice(0, complete)));
+  if (repair && record.offset < record.fileSize) {
+    await fs.truncate(ledger(root), record.offset);
+    if (ledgerCache.get(ledger(root)) === record) ledgerCache.set(ledger(root), { ...record, stable: false });
+  }
   // D: the snapshot is written after each append, so it can never be ahead of the ledger. If it is, committed
   // events were cut from the end of the ledger. Checked by the lock owner before any new write.
   if (repair) {
@@ -170,7 +292,12 @@ async function acquireLockFile(root, lockName, lockPath) {
       }
       if (!Number.isInteger(owner.pid) || owner.pid <= 0 || !owner.token) throw new QueueError('Bloqueo inválido: revisión manual necesaria.', 'lock_uncertain');
       if (owner.unsafe) throw new QueueError('No se pudo confirmar la parada de un proceso anterior; revisa procesos y bloqueo manualmente.', 'lock_uncertain');
-      if (alive(owner.pid)) throw new QueueError('Ya hay un ejecutor u otra operación de escritura en marcha.', 'locked');
+      if (alive(owner.pid)) {
+        const busy = new QueueError('Ya hay un ejecutor u otra operación de escritura en marcha.', 'locked');
+        // Lets a caller tell a short write of its own process from another executor.
+        busy.lockName = lockName; busy.ownerPid = owner.pid;
+        throw busy;
+      }
       // Serialize reclamation: two stale-lock readers must never unlink a new owner's lock.
       const recoveryPath = path.join(dir(root), lockName + '.recovery.lock');
       let recovery;
@@ -208,13 +335,16 @@ export async function releaseLock(lock) {
   }
 }
 
-export async function acquireLedgerLock(root, waitMs) {
+// sameProcessWaitMs: how long to wait when the ledger lock belongs to this same process. Callers that
+// opt in (the dashboard probe) wait for a write of their own process instead of reporting another executor.
+export async function acquireLedgerLock(root, waitMs, { sameProcessWaitMs = waitMs } = {}) {
   const started = performance.now();
   for (;;) {
     try { return await acquireLock(root); }
     catch (error) {
       const elapsed = performance.now() - started;
-      if (elapsed >= waitMs || error.code !== 'locked' && !(error.initializing && elapsed < 100)) throw error;
+      const limit = error.ownerPid === process.pid ? Math.max(waitMs, sameProcessWaitMs) : waitMs;
+      if (elapsed >= limit || error.code !== 'locked' && !(error.initializing && elapsed < 100)) throw error;
       await wait(25);
     }
   }
@@ -230,7 +360,7 @@ async function mutate(root, action, waitMs = 0) {
 // Unscoped CLI execution keeps its existing exclusive semantics. An automatic
 // lane owns only its company lock while it waits for Orca. Both modes take the
 // shared lock first on entry so a legacy runner cannot overlap a scoped one.
-async function withExecutors(root, business, action) {
+async function withExecutors(root, business, action, { sameProcessWaitMs } = {}) {
   if (!business) {
     return mutate(root, async (state, lock) => {
       const lanes = [];
@@ -242,7 +372,7 @@ async function withExecutors(root, business, action) {
       }
     });
   }
-  const sharedLock = await acquireLedgerLock(root, 2000);
+  const sharedLock = await acquireLedgerLock(root, 2000, { sameProcessWaitMs });
   let lock;
   try {
     try { lock = await acquireLock(root, business); }
@@ -936,8 +1066,15 @@ export function qualityCorrection(job) {
   const rounds = (job.livenessRecoveryHistory || []).filter(item => item.qualityAction?.type === 'correction');
   const criteria = findings.map(item => item.criterion).sort();
   const previous = rounds.at(-1)?.qualityAction.findings.map(item => item.criterion).sort();
-  return findings.length && rounds.length < 5 && (!previous || recoveryFingerprint(previous) !== recoveryFingerprint(criteria))
-    ? { findings, round: rounds.length + 1 } : null;
+  // The same failed criteria as the previous round only mean "no progress" when the blocked candidate was
+  // already corrected before. A different candidate is new work that can fail the same criterion differently.
+  const candidate = block?.delivery?.candidate;
+  const corrected = new Set((job.workflowHistory || []).flatMap(workflow => workflow?.steps || [])
+    .filter(item => ['qa', 'reviewer'].includes(item.key) && item.status === 'blocked' && item.delivery?.candidate)
+    .map(item => item.delivery.candidate));
+  const repeated = previous && recoveryFingerprint(previous) === recoveryFingerprint(criteria)
+    && (!/^[a-f0-9]{64}$/.test(candidate || '') || corrected.has(candidate));
+  return findings.length && rounds.length < 5 && !repeated ? { findings, round: rounds.length + 1 } : null;
 }
 
 export function assertQualityAction(job, action) {
@@ -1588,12 +1725,37 @@ export async function recoverRunning(root, state, business) {
 }
 
 // The panel and CLI share this recovery path; a busy or uncertain lock is never displaced.
-export async function recoverDashboardQueue(root, { business } = {}) {
+// The panel asks on every refresh and the automatic executor on every tick, all in one process. Those
+// questions used to meet each other's locks and report «Ya hay un ejecutor» with nothing running, and the
+// ledger stayed locked while it was read in full. So: one probe at a time per company (callers that arrive
+// meanwhile share its answer), a write of this same process is waited for, and the ledger is only locked
+// when there is an interrupted job to record. A lock held by another process, or a company lock held by a
+// running executor, is reported exactly as before.
+const DASHBOARD_PROBE_SAME_PROCESS_WAIT_MS = 30_000;
+const dashboardProbes = new Map();
+export function recoverDashboardQueue(root, { business } = {}) {
+  const key = `${path.resolve(root)}\n${business ?? ''}`;
+  const pending = dashboardProbes.get(key);
+  if (pending) return pending;
+  const probe = probeDashboardQueue(root, business).finally(() => { if (dashboardProbes.get(key) === probe) dashboardProbes.delete(key); });
+  dashboardProbes.set(key, probe);
+  return probe;
+}
+
+async function probeDashboardQueue(root, business) {
   try {
-    return await withExecutors(root, business, withState => withState(async state => {
-      await recoverRunning(root, state, business);
-      return { available: true };
-    }));
+    return await withExecutors(root, business, async withState => {
+      if (business) {
+        // The company lock is held here, so no executor can start one of its jobs: a read without the
+        // ledger lock is enough to know whether an interrupted job is waiting to be recorded.
+        const { jobs } = await loadState(root);
+        if (!jobs.some(job => job.state === 'running' && job.business === business)) return { available: true };
+      }
+      return withState(async state => {
+        await recoverRunning(root, state, business);
+        return { available: true };
+      });
+    }, { sameProcessWaitMs: DASHBOARD_PROBE_SAME_PROCESS_WAIT_MS });
   } catch (error) {
     if (['locked', 'lock_uncertain'].includes(error.code)) return { available: false, reason: error.message };
     throw error;

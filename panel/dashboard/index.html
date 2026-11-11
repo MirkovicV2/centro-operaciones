@@ -217,6 +217,8 @@
             <p class="microcopy"><span id="idea-checkout">Sin checkout válido</span> · <a href="#proyectos">Configurar checkout</a></p>
             <fieldset class="idea-focus"><legend>Foco del trabajo</legend><label><input type="radio" name="focus" value="" checked> Sin clasificar</label><label><input type="radio" name="focus" value="ux"> Diseño UX: Interfaz, interacción y experiencia</label><label><input type="radio" name="focus" value="code"> Código: Lógica, integración y comportamiento técnico</label><label><input type="radio" name="focus" value="mixed"> Mixto: Experiencia y comportamiento técnico</label></fieldset><label>Etiquetas temáticas (separadas por comas)<input name="tags" maxlength="124" placeholder="Hasta cinco, 24 caracteres cada una"></label><p>El foco orienta el brief; desarrollo conserva UX → Desarrollo → QA → Revisión.</p>
             <label>Idea o indicación<textarea name="text" rows="5" maxlength="6000" required placeholder="Escribe una idea, preferencia o dirección para el siguiente trabajo…"></textarea></label>
+            <label>Referencias (.zip, opcional)<input type="file" id="idea-refs" accept=".zip,application/zip"></label>
+            <p class="microcopy">Capturas y ejemplos de estilo (png, jpg, webp, gif, css, md, txt, json) hasta 40 MB. Añade un LEEME.md que diga qué tomar de cada una. El coordinador las ve y las reciben solas Diseño, Desarrollo, QA y Revisión.</p>
             <div class="idea-actions">
             <button class="button primary full" type="submit">Guardar y enviar al coordinador</button>
             <button class="button secondary full" type="button" id="save-idea-only">Solo guardar la idea</button>

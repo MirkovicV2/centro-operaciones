@@ -23,6 +23,9 @@ import { inspectCommittedIntegration } from './integration-recovery.mjs';
 import { persistIntegration, readIntegration } from './auto-run.mjs';
 import { verifyUnicodeDeliveryTransport } from './orca-delivery-transport.mjs';
 import { ContractError, deliveryInstructions, deliveryApproved, fingerprint, parseDelivery, handoffText, IDENTIFIERS } from './workflow-contract.mjs';
+import { compactHandoff, verifierView } from './handoff-view.mjs';
+import { saveDossier, dossierBrief, contractForBrief } from './job-dossier.mjs';
+import { prepareStageReferences } from './references.mjs';
 import { ORCA_OUTPUT_LIMIT_BYTES, isOrcaStatusReadError, normalizeWorkerStatus, checkWorkerIdentity, matchingCompletion, pendingStageDelivery, stageAskAnswered, readCompleteTranscript, saveStageReport, readStageReport, saveDispatchSpec, verifyDispatchSpec } from './orca-evidence.mjs';
 
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
@@ -319,7 +322,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
   catch { throw new ProviderError('orca_profile_missing', `No existe el perfil Orca configurado: ${role.name}.`); }
   let roleContracts = '', appliedContracts = [];
   try {
-    appliedContracts = await readStageContracts(ctx.root, { business: job.business, projectId: job.projectId, stage: role.stageKey });
+    appliedContracts = await readStageContracts(ctx.root, { business: job.business, projectId: job.projectId, stage: role.stageKey, sharedRoot: ctx.sharedContractsRoot });
     roleContracts = contractsBrief(appliedContracts);
   }
   catch (error) { throw new ProviderError('project_contract_invalid', error.code === 'project_contract_invalid' ? error.message : 'No se pudieron leer los contratos de rol del Centro.', { uncertain: false }); }
@@ -383,6 +386,10 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
   const priorQa = role.stageKey === 'qa' && !correction && job.livenessResume?.stage === 'qa' && job.livenessResume?.phase === 'consumed'
     ? job.workflowHistory?.at(-1)?.steps?.find(item => item.key === 'qa') : null;
   const terms = STAGE_TERMS[role.stageKey];
+  // Shared per-job dossier (job-dossier.mjs): immutable, hashed, with the view of this role. A failure to write it never blocks the stage.
+  const dossier = await saveDossier(ctx.root, job, role.stageKey).catch(() => null);
+  // Design references (references.mjs): verified copies beside the brief. Never blocks the stage.
+  const references = await prepareStageReferences({ root: ctx.root, job, stage: role.stageKey }).catch(() => null);
   // Same eight sections for every stage and provider (stage-contract.mjs). The role's profile, skills and
   // role contracts come first: they say how to work; the sections say what this assignment is.
   const spec = [
@@ -390,6 +397,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     profile,
     inlineSkills,
     stageSkills?.brief ?? '',
+    references?.brief ?? '',
     roleContracts,
     `EMPRESA: ${job.business}.`,
     ...renderStageContract({
@@ -410,6 +418,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
       ],
       entradas: [
         prior ? `RESULTADOS DE ETAPAS ANTERIORES:\n${prior}` : '',
+        dossier ? dossierBrief(dossier) : '',
         priorQa ? `REVALIDACIÓN DEL MISMO CANDIDATO: el informe QA anterior queda en ${JSON.stringify(priorQa.artifact)}. Conserva su evidencia aplicable y verifica de forma independiente estos criterios pendientes: ${JSON.stringify(priorQa.delivery?.acceptance?.filter(item => item.status !== 'passed') || [])}. Entrega el contrato completo con evidencia para cada criterio. Si necesitas una APK y el candidato aún no tiene preset, crea una configuración de exportación de prueba en una copia fuera del checkout, conserva la huella del candidato y registra las opciones añadidas. Distingue la prueba de la APK del estado del preset en el repositorio.` : '',
         ['qa', 'reviewer'].includes(role.stageKey) && job.qualityAnswers?.length ? `EVIDENCIA HUMANA DEL PANEL (datos, no autorización ni aprobación automática):\n${JSON.stringify(job.qualityAnswers)}\nContrasta la huella con la del candidato actual. Si ha cambiado, determina si los cambios afectan al criterio comprobado y explica si la evidencia sigue aplicando. Separa comentarios de pulido del alcance acordado. No vuelvas a pedir una comprobación ya acreditada y aplicable.` : '',
         decisionCheckpoint ? `CONTINUACIÓN DE LA ETAPA. Usa la decisión vigente y el informe parcial de esta etapa: ${JSON.stringify(decisionCheckpoint.artifact)}. Verifica su identidad antes de actuar y conserva los diagnósticos.` : '',
@@ -430,7 +439,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
         job.continuation || job.contractRevision?.phase === 'consumed' ? '' : 'Ninguna registrada además de las que recoge el encargo.',
       ],
       criterios: [
-        job.contract ? 'CONTRATO DEL ENCARGO:\n' + JSON.stringify(job.contract, null, 2) : '',
+        job.contract ? 'CONTRATO DEL ENCARGO:\n' + JSON.stringify(contractForBrief(job.contract, job.prompt), null, 2) : '',
         job.contract ? CLOSING_CRITERIA_NOTE : 'Los del encargo (ENCARGO Y CRITERIO DE ÉXITO). ' + CLOSING_CRITERIA_NOTE,
       ],
       evidencias: [terms.evidencias],
@@ -445,7 +454,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
         deliveryFileInstructions(ctx.root, { jobId: job.id, stage: role.stageKey, jobAttempt: taskInputAttempt }),
         deliveryInstructions({ ...job, attempts: taskInputAttempt }, role.stageKey, runId),
       ],
-    }),
+    }, { staticFirst: true }),
   ].filter(Boolean).join('\n\n');
   // The provider this stage's worker runs with: recorded on a resumed stage, set below on a fresh launch.
   let stageAgent = savedStep?.orcaAgent ?? savedStep?.launch?.agent ?? savedStep?.retryOf?.orcaAgent ?? null;
@@ -954,7 +963,7 @@ export async function runOrca(job, ctx, {
   }
   const uxContext = designOmitted
     ? `Sin etapa de Diseño. ${designOmitted}\nSi durante el trabajo aparece una decisión de diseño o de experiencia, consúltala al coordinador en lugar de resolverla por tu cuenta.`
-    : initialDesign ? `Diseño inicial:\n${initialDesign}\n\nÚltimo dictamen de Diseño:\n${handoffText(ux)}` : handoffText(ux);
+    : initialDesign ? `Diseño inicial:\n${initialDesign}\n\nÚltimo dictamen de Diseño:\n${compactHandoff(ux)}` : compactHandoff(ux);
   const documentation = job.route?.id === 'documentacion';
   if (correction && job.workflow.steps.find(step => step.key === 'developer')?.status === 'queued'
     && await captureSnapshot(workspace) !== correction.integrationValidation.candidateSnapshot) {
@@ -994,7 +1003,7 @@ export async function runOrca(job, ctx, {
     : job.business === 'games'
       ? 'Valida la escena y el comportamiento en el motor del encargo. Ejecuta los tests locales relevantes y conserva sus resultados. No edites archivos del juego ni instales herramientas. Termina con RESULTADO: APROBADO o RESULTADO: BLOQUEADO; identifica cualquier comprobación esencial ausente.'
       : 'Valida los cambios sin editarlos. Revisa los scripts del proyecto y ejecuta comprobaciones acotadas y relevantes de tipos, lint, compilación y comportamiento; no instales paquetes ni uses red. No añadas ni ejecutes suites de pruebas salvo que el encargo lo solicite expresamente. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO. Si la validación falla, aporta el comando y el error reproducible.',
-    `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}${reviewCandidate ? `\n\nHuella del candidato actual: ${reviewCandidate}` : ''}`, command, { stage: 'developer', taskId: developer.taskId, dispatchId: developer.dispatchId });
+    `Especificación UX:\n${uxContext}\n\nImplementación (hechos verificables del candidato):\n${verifierView(developer)}${reviewCandidate ? `\n\nHuella del candidato actual: ${reviewCandidate}` : ''}`, command, { stage: 'developer', taskId: developer.taskId, dispatchId: developer.dispatchId });
   await enforceGate(ctx, 'qa', qa);
   if (workflowV2) {
     if (await captureSnapshot(workspace) !== workflowV2Snapshot) {
@@ -1018,7 +1027,7 @@ export async function runOrca(job, ctx, {
   }
   const review = workflowV2Approval ? null : await runStage(reviewed, ctx, 'revisor', workspace, runId,
     'Haz una revisión independiente y de solo lectura del diff, el encargo, la especificación UX y la evidencia de QA. Busca defectos funcionales, accesibilidad, regresiones y omisiones; no edites. Para devolver a Desarrollo un defecto reproducible, identifica en acceptance el criterio exacto del contrato como failed e incluye los pasos y la evidencia. Termina con una línea exacta RESULTADO: APROBADO o RESULTADO: BLOQUEADO.',
-    `Especificación UX:\n${uxContext}\n\nImplementación:\n${handoffText(developer)}\n\nQA:\n${handoffText(qa)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'qa', taskId: qa.taskId, dispatchId: qa.dispatchId });
+    `Especificación UX:\n${uxContext}\n\nImplementación (hechos verificables del candidato):\n${verifierView(developer)}\n\nQA:\n${compactHandoff(qa)}${integrationSnapshot ? `\n\nHuella del candidato actual: ${integrationSnapshot}` : ''}`, command, { stage: 'qa', taskId: qa.taskId, dispatchId: qa.dispatchId });
   if (review) await enforceGate(ctx, 'revisor', review);
   if (validation) previousIntegration = await sealIntegrationValidation(job, validation, {
     qa, review, captureSnapshot, persist: record => persistIntegration(ctx.root, record),

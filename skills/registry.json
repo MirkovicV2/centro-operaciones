@@ -172,6 +172,100 @@
         "SKILL.md": "642d1890f507b6c69930e8a42163d1b5a7c984531d55af8bdbcec6cf1df1808f",
         "LICENSE.txt": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362"
       }
+    },
+    {
+      "id": "ponytail",
+      "title": "Cambio mínimo y completo (ponytail)",
+      "summary": "Resolver la tarea con el menor código posible sin recortar validación, seguridad ni accesibilidad: reutilizar lo existente, evitar dependencias y abstracciones no pedidas, y dejar una prueba mínima en lógica no trivial.",
+      "root": "skills/ponytail",
+      "entry": "SKILL.md",
+      "mode": "inline",
+      "required": false,
+      "appliesTo": {
+        "businesses": [
+          "agency",
+          "games"
+        ],
+        "kinds": [
+          "code"
+        ],
+        "stages": [
+          "developer",
+          "reviewer"
+        ],
+        "routes": [
+          "interfaz",
+          "funcional"
+        ]
+      },
+      "source": {
+        "kind": "github",
+        "repository": "DietrichGebert/ponytail",
+        "path": "skills/ponytail",
+        "revision": "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+        "retrievedAt": "2026-11-11"
+      },
+      "license": "MIT",
+      "licenseFile": "LICENSE.txt",
+      "localChanges": "Ninguno: SKILL.md y LICENSE.txt son idénticos al original.",
+      "reviewedAt": "2026-11-11",
+      "stageFiles": {},
+      "files": {
+        "SKILL.md": "f18008471528f0adde90a560d053f85935eed5cee26c447b7177ad24472bcf32",
+        "LICENSE.txt": "f1af4301bd3b85026965f9f1cfa101b9bfd73a75c6b92f7a2a72bab5768abd36"
+      }
+    },
+    {
+      "id": "impeccable",
+      "title": "Suelo de calidad de interfaz (Impeccable)",
+      "summary": "Comprobaciones verificables sobre el resultado renderizado (contraste, espaciado, tipografía, estados, foco) y rasgos genéricos que rechazar; QA y Revisión añaden la auditoría técnica de accesibilidad y rendimiento.",
+      "root": "skills/impeccable",
+      "entry": "reference/craft-floor.md",
+      "mode": "reference",
+      "required": false,
+      "appliesTo": {
+        "businesses": [
+          "agency"
+        ],
+        "kinds": [
+          "code"
+        ],
+        "stages": [
+          "ux",
+          "developer",
+          "qa",
+          "reviewer"
+        ],
+        "routes": [
+          "interfaz"
+        ]
+      },
+      "source": {
+        "kind": "github",
+        "repository": "pbakaus/impeccable",
+        "path": "plugin/skills/impeccable",
+        "revision": "c1e0e5492fbb524f5df84d635ecfae7dc438ec45",
+        "retrievedAt": "2026-11-11"
+      },
+      "license": "Apache-2.0",
+      "licenseFile": "LICENSE.txt",
+      "localChanges": "Ninguno en los archivos. Solo se entregan reference/craft-floor.md y reference/audit.md; no se entregan SKILL.md, scripts ni hooks porque exigen ejecutar un lanzador y escribir PRODUCT.md y DESIGN.md en el proyecto.",
+      "reviewedAt": "2026-11-11",
+      "stageFiles": {
+        "ux": [],
+        "developer": [],
+        "qa": [
+          "reference/audit.md"
+        ],
+        "reviewer": [
+          "reference/audit.md"
+        ]
+      },
+      "files": {
+        "reference/craft-floor.md": "b7c0e1c409f36d0ad4fc0d63110d515bee00c27b8c371e3f936a13c41457cc5c",
+        "reference/audit.md": "4c660b3f94956df36c1378699ddcb53bdbfc2e07710b9f48dffefd079a6cc8a2",
+        "LICENSE.txt": "fc0673369dae07c045c46869d3d4c9113678c77fcc7d3b4e3a39ac074cfa68b6"
+      }
     }
   ]
 }
