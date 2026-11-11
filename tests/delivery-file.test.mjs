@@ -64,4 +64,17 @@ test('QA and Revisión receive the context Desarrollo consulted, bounded, instea
   await write('developer', 2, 'x'.repeat(1500), 10);
   const big = JSON.parse(await developerContextForReview(root, job, 2));
   assert.equal(big.truncated, true); assert.ok(JSON.stringify(big).length <= 8000);
+  // Encargo 2 of home-finance: only Diseño consulted. Desarrollo, QA and Revisión get Diseño's consultation.
+  const onlyUx = { id: 'idea-only-ux-v1-code' };
+  const receipt = { schemaVersion: 1, id: 'knowledge-' + sha('ux-only').slice(0, 32), jobId: onlyUx.id, actor: { kind: 'worker', stage: 'ux', jobAttempt: 1 }, createdAt: new Date().toISOString(), connected: true, warnings: [],
+    sources: [{ id: 'source-plan', title: 'Plan', path: 'Contexto/plan.md', startLine: 1, endLine: 2, excerpt: 'Encargo 2: menú lateral.', state: 'vigente', current: true, sha256: 'x' }] };
+  receipt.evidenceSha256 = sha(JSON.stringify(receipt));
+  await fs.writeFile(path.join(dir, receipt.id + '.json'), JSON.stringify(receipt));
+  const { CONTEXT_SOURCES } = await import('../orca-provider.mjs');
+  assert.equal(await developerContextForReview(root, onlyUx, 1), null, 'the default still reads Desarrollo only');
+  for (const stage of ['developer', 'qa', 'reviewer']) {
+    const handed = JSON.parse(await developerContextForReview(root, onlyUx, 1, { from: CONTEXT_SOURCES[stage] }));
+    assert.equal(handed.consultedBy, 'ux', stage); assert.equal(handed.sources[0].id, 'source-plan');
+  }
+  assert.equal(CONTEXT_SOURCES.ux, undefined, 'Diseño consults by itself');
 });

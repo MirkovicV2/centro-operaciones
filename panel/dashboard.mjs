@@ -11,7 +11,7 @@ import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQu
 import { parseTailscaleAccess, assertRoleAllows } from './access-control.mjs';
 import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt, resumeWorkflowV2Receipt, readmitWorkflowV2Receipt, retryDestinationAdmission } from '../auto-run.mjs';
 import { destinationCheck, createMissingRemote } from '../project-remote.mjs';
-import { workflowV2Resumable, workflowV2Readmissible } from '../workflow-v2-gate.mjs';
+import { workflowV2Resumable, workflowV2Readmissible, workflowV2Live, workflowV2RetryRefusal, candidateFiles } from '../workflow-v2-gate.mjs';
 import { createWorker } from '../providers.mjs';
 import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
 import { submitTaskToCoordinator, routeTaskFromCoordinator, checkCoordinatorRequestNotice } from './agency-assistant/coordinator-inbox.mjs';
@@ -366,6 +366,14 @@ async function handleApi(request, response, url, tailscale = null) {
   if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));
   const destinationProbe = request.method === 'GET' && url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9_-]+)\/destination-check$/);
   if (destinationProbe) return send(response, 200, await destinationCheck(QUEUE_ROOT, await registeredProject(destinationProbe[1])));
+  // Read-only: what Workflow V2 waits for on this job and the files of its uncommitted candidate.
+  const v2Decision = request.method === 'GET' && url.pathname.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)\/workflow-v2$/);
+  if (v2Decision) {
+    const job = (await loadQueue(QUEUE_ROOT)).jobs.find(item => item.id === v2Decision[1]);
+    if (!job) return send(response, 404, { error: 'No existe ese trabajo.' });
+    const live = await workflowV2Live(QUEUE_ROOT, job);
+    return send(response, 200, { live, candidate: live && job.state !== 'succeeded' ? await candidateFiles(job.workspace) : null });
+  }
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
   assertLocalRequest(request, tailscale);
   const body = await readJson(request);
@@ -457,6 +465,11 @@ async function handleApi(request, response, url, tailscale = null) {
       const current = (await loadQueue(QUEUE_ROOT)).jobs.find(item => item.id === reviewedJob[1]);
       const receipt = current?.autoIntent?.eligible ? (await readAutoRun(QUEUE_ROOT)).receipts.find(item => item.jobId === current.id) : null;
       const confirm = body.confirmReviewed === true;
+      // A retry that can only find the same Workflow V2 stop spends nothing (it used to cost an attempt).
+      if (receipt?.status === 'needs_attention' && workflowV2Resumable(current)) {
+        const refusal = workflowV2RetryRefusal(current, await workflowV2Live(QUEUE_ROOT, current));
+        if (refusal) return send(response, 409, { error: refusal, code: 'workflow_v2_decision_pending' });
+      }
       if (receipt?.status === 'needs_attention' && (stoppedDeveloperCheckpoint(current) || settledQaRevalidation(current) || isDeliveryTransportCheckpoint(current))) {
         // A completed QA/Revisión whose stored report was refused only for how it named the criteria re-reads that same report.
         // Without this the button fell through to the pre-dispatch retry and failed (second real pilot).

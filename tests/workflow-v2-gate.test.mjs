@@ -129,8 +129,8 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
   const { runOrca } = await import('../orca-provider.mjs');
   const root = await rootWith(t, config());
   const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
-  const run = async (projectId, { changeDuringQa = false, priorQa, gateReturns = false } = {}) => {
-    const starts = [], updates = [], gates = [];
+  const run = async (projectId, { changeDuringQa = false, priorQa, gateReturns = false, preflightFails = false } = {}) => {
+    const starts = [], updates = [], gates = [], preflights = [];
     let snapshotReads = 0;
     const ctx = { root, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
     const command = async args => {
@@ -143,13 +143,19 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
     };
     const runWorkflowV2 = async (job, _ctx, entry, ws) => { gates.push({ job: job.id, entry, ws, snapshot: job.workflowV2Snapshot }); if (gateReturns) return; throw Object.assign(new Error('owner'), { code: 'workflow_v2_owner_pending' }); };
     const outcome = await runOrca({ id: `v2-${projectId}`, business: 'agency', kind: 'code', provider: 'orca', projectId, title: 'V2', prompt: 'Probar V2.', workspace, isolated: true, attempts: 1, ...(priorQa ? { workflow: { steps: [priorQa] } } : {}) },
-      ctx, { command, runWorkflowV2, captureSnapshot: async () => changeDuringQa && ++snapshotReads > 1 ? 'b'.repeat(64) : 'a'.repeat(64) }).then(() => 'succeeded', error => error.code);
-    return { starts, gates, outcome, updates };
+      ctx, { command, runWorkflowV2, captureSnapshot: async () => changeDuringQa && ++snapshotReads > 1 ? 'b'.repeat(64) : 'a'.repeat(64),
+        preflightV2: async entry => { preflights.push(entry.stateRoot); if (preflightFails) throw Object.assign(new Error('V2 no listo'), { code: 'workflow_v2_preflight_failed' }); } })
+      .then(() => 'succeeded', error => error.code);
+    return { starts, gates, outcome, updates, preflights };
   };
   const governed = await run('obi');
   assert.deepEqual(governed.starts, ['ux', 'developer', 'qa'], 'the Centro Revisión stage is not launched');
   assert.equal(governed.gates.length, 1);
+  assert.equal(governed.preflights.length, 1, 'V2 is checked once, before the first agent');
   assert.equal(governed.gates[0].ws, workspace);
+  const notReady = await run('obi', { preflightFails: true });
+  assert.equal(notReady.outcome, 'workflow_v2_preflight_failed');
+  assert.deepEqual(notReady.starts, [], 'no agent is launched when V2 is not ready');
   assert.equal(governed.outcome, 'workflow_v2_owner_pending');
   assert.equal(governed.gates[0].snapshot, 'a'.repeat(64));
   assert.equal(governed.updates.find(item => item.key === 'qa' && item.dispatchStatus === 'starting').workflowV2Snapshot, 'a'.repeat(64));
@@ -165,6 +171,7 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
   const other = await run('forge');
   assert.deepEqual(other.starts, ['ux', 'developer', 'qa', 'reviewer']);
   assert.equal(other.gates.length, 0);
+  assert.equal(other.preflights.length, 0, 'a project without V2 is not checked');
   assert.equal(other.outcome, 'succeeded');
 });
 

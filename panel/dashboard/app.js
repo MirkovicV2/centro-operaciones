@@ -483,6 +483,8 @@ function renderRun(data) {
     callout.append(actions);
     main.append(callout);
   }
+  const v2Task = job.workflow?.steps?.find(step => step.key === 'reviewer')?.workflowV2?.task;
+  if (v2Task && job.state === 'needs_attention') main.append(workflowV2Decision(job, data, receipt));
 
   main.append(el('h3', 'run-h3', 'Etapas'));
   // The route and every stage it leaves out or added later, with the reason someone gave.
@@ -818,6 +820,62 @@ function renderJobs(data) {
   }
   if (!list.children.length) list.append(el('div', 'empty-state', 'No hay trabajos abiertos en esta vista. Los cerrados est?n en Historial.'));
   restoreDetails();
+}
+
+// The owner's decision in Workflow V2, without the terminal guesswork: the live V2 state, the
+// reviewer's recommendation, the exact command for this state and the files of the candidate.
+// The verdict itself stays in V2 (typed confirmation); the panel only integrates once V2 shows it approved.
+function workflowV2Decision(job, data, receipt) {
+  const section = el('section', 'run-v2');
+  section.append(el('h3', '', 'Tu decisión en Workflow V2'), el('p', 'microcopy', 'Consultando Workflow V2…'));
+  api(`/api/jobs/${encodeURIComponent(job.id)}/workflow-v2`).then(({ live, candidate }) => {
+    section.replaceChildren(el('h3', '', 'Tu decisión en Workflow V2'));
+    if (!live) { section.append(el('p', 'microcopy', 'Este trabajo ya no está gobernado por Workflow V2.')); return; }
+    if (!live.available) { section.append(el('p', '', live.error)); return; }
+    section.append(el('p', 'run-v2-status', `Estado en V2: ${live.status}${live.tier ? ` · nivel ${live.tier}` : ''}`));
+    for (const review of live.reviews) {
+      section.append(el('p', '', `Revisión «${review.role}»: recomienda ${review.recommendation === 'ACCEPT' ? 'aceptar' : review.recommendation === 'REJECT' ? 'rechazar' : review.recommendation || 'sin dato'}${review.isolation ? ` · aislamiento ${review.isolation.toLowerCase()}` : ''}.`));
+    }
+    if (live.blockedReason) section.append(el('p', '', `Motivo del bloqueo: ${live.blockedReason}`));
+    section.append(el('p', 'run-v2-next', live.next.text));
+    if (live.next.command) {
+      const row = el('div', 'run-v2-command');
+      const code = el('code', '', live.next.command);
+      const copy = el('button', 'button secondary', 'Copiar'); copy.type = 'button';
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(live.next.command); notify('Comando copiado. Pégalo en la terminal: V2 te pedirá confirmarlo.'); }
+        catch { notify('No se pudo copiar; selecciona el comando a mano.', true); }
+      };
+      row.append(code, copy);
+      section.append(row);
+    }
+    if (live.next.action === 'integrate' || live.next.action === 'retry') {
+      const go = el('button', 'button', live.next.action === 'integrate' ? 'Integrar este candidato' : 'Reenviar a Workflow V2'); go.type = 'button';
+      go.disabled = !data.executor?.available;
+      go.onclick = async () => {
+        go.disabled = true;
+        try {
+          await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { method: 'POST', body: JSON.stringify({ confirmReviewed: true, noDispatchConfirmed: false }) });
+          notify(live.next.action === 'integrate' ? 'Integrando solo el candidato aprobado.' : 'Reenviando el mismo candidato a Workflow V2.');
+          await refresh();
+        } catch (error) { notify(error.message, true); go.disabled = false; }
+      };
+      section.append(go);
+    }
+    if (candidate?.files?.length) {
+      const binaries = candidate.files.filter(file => file.binary && file.change === 'nuevo');
+      const details = el('details', 'run-v2-files');
+      details.dataset.panelDetail = `${job.id}-v2-files`;
+      details.append(el('summary', '', `Archivos del candidato: ${candidate.total}${binaries.length ? ` · ${binaries.length} binarios nuevos` : ''}`));
+      if (binaries.length) details.append(el('p', 'microcopy', 'Los binarios nuevos entran tal cual en la integración. Si alguno es un artefacto generado (capturas de un script, por ejemplo), recházalo o ignóralo en el proyecto antes de la próxima vuelta: tocar el checkout ahora invalida la aprobación.'));
+      const list = el('ul');
+      for (const file of candidate.files) list.append(el('li', file.binary && file.change === 'nuevo' ? 'is-binary' : '', `${file.change} · ${file.path}${file.binary ? ' (binario)' : ''}`));
+      if (candidate.total > candidate.files.length) list.append(el('li', 'microcopy', `… y ${candidate.total - candidate.files.length} más.`));
+      details.append(list);
+      section.append(details);
+    } else if (candidate?.error) section.append(el('p', 'microcopy', `No se pudieron listar los archivos: ${candidate.error}`));
+  }).catch(error => { section.replaceChildren(el('h3', '', 'Tu decisión en Workflow V2'), el('p', '', error.message)); });
+  return section;
 }
 
 // A retried job whose new attempt the executor refused at admission: still queued, receipt blocked.
