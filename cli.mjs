@@ -42,6 +42,8 @@ node cli.mjs reconcile --id IDENTIFICADOR --dispatch-id ctx_... --evidence-file 
 node cli.mjs reconcile-code --id IDENTIFICADOR --decision-file "decision.json" --confirm-reviewed
   Verifica cada dispatch y las aprobaciones QA/Revisión en Orca antes de registrar la decisión.
 node cli.mjs retry --id IDENTIFICADOR --confirm-reviewed
+  Con otro proveedor: añade --substitute codex|claude --reason "por qué". Solo si el trabajador anterior terminó de forma confirmada;
+  conserva sus efectos y su informe (docs/CUOTA.md).
 node cli.mjs attempt-limit --id IDENTIFICADOR --max-attempts 5
 node cli.mjs resolve --id IDENTIFICADOR --confirm-reviewed
 node cli.mjs cancel --id IDENTIFICADOR --confirm-reviewed   Solo trabajos en cola que no han arrancado nunca
@@ -54,7 +56,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -247,7 +249,7 @@ async function main() {
       break;
     }
     case 'add-stage': result = await addJobStage(ROOT, o.id, { stage: o.stage, reason: o.reason }); break;
-    case 'retry': result = await retryJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'retry': result = await retryJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'], ...(o.substitute ? { substitute: o.substitute, reason: o.reason } : {}) }); break;
     case 'attempt-limit': {
       const job = await increaseJobAttemptLimit(ROOT, o.id, numeric(o['max-attempts'], NaN));
       result = { id: job.id, state: job.state, attempts: job.attempts, maxAttempts: job.maxAttempts };

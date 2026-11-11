@@ -1,0 +1,14 @@
+{
+  "_comentario": "Opcional y local: cada PC tiene sus cuentas. Copia a data/quota.json o usa Ajustes → Cuota y suscripciones. Sin este archivo no se comprueba el uso. Los porcentajes se anotan a mano desde la pantalla de uso de cada proveedor: el Centro no puede consultar el saldo de una suscripción (docs/CUOTA.md).",
+  "version": 1,
+  "reservaPersonalPorcentaje": 10,
+  "avisoPorcentaje": 75,
+  "caducidadObservacionHoras": 6,
+  "sinDatos": "admitir",
+  "alAgotar": "esperar",
+  "sustituciones": { "claude": "codex", "codex": "claude" },
+  "proveedores": {
+    "claude": { "autenticacion": "suscripcion" },
+    "codex": { "autenticacion": "suscripcion" }
+  }
+}

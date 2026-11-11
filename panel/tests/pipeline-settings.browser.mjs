@@ -10,7 +10,11 @@ const browser = await chromium.launch({ headless: true });
 try {
   for (const width of [320, 1440]) {
     let saved = null;
-    const writes = [], previews = [];
+    const writes = [], previews = [], quotaWrites = [];
+    const quota = { reservaPersonalPorcentaje: 10, avisoPorcentaje: 75, caducidadObservacionHoras: 6, sinDatos: 'admitir', alAgotar: 'esperar', sustituciones: {}, proveedores: {} };
+    const quotaSettings = () => ({ configured: quotaWrites.length > 0, agents: ['codex', 'claude'], quota, warnings: Object.keys(quota.proveedores).length ? [] : ['claude: no se ha declarado cómo se autentica en Orca (suscripción o API). Compruébalo en Orca y anótalo aquí.'],
+      status: Object.fromEntries(['codex', 'claude'].map(agent => { const used = quota.proveedores[agent]?.usadoPorcentaje;
+        return [agent, used === undefined ? { state: 'incierta', reason: `${agent}: no hay ninguna observación de uso.` } : used >= 100 - quota.reservaPersonalPorcentaje ? { state: 'reserva', usadoPorcentaje: used, reason: `${agent}: uso observado ${used} %. El ${quota.reservaPersonalPorcentaje} % restante es la reserva de trabajo personal.` } : { state: 'disponible', usadoPorcentaje: used, observadoEn: '2026-11-11T10:00:00Z' }]; })) });
     const settings = () => ({ configured: Boolean(saved), defaultAgent: 'codex', roles: ['planificador', 'ux', 'desarrollador', 'qa', 'revisor'], agents: ['codex', 'claude'], businesses: ['agency', 'games'],
       levelNames: ['ligero', 'estandar', 'profundo'], levels: { roles: {}, agents: {} }, example, pipeline: saved || empty });
     const snapshot = {
@@ -18,6 +22,8 @@ try {
         plannedLaunch: { developer: { agent: 'claude', model: 'sonnet', effort: 'medium', source: 'general' } },
         workflow: { steps: [{ key: 'ux', label: 'Diseño UX', status: 'succeeded', launch: { agent: 'claude', model: 'sonnet', effort: 'medium', source: 'general' } }, { key: 'developer', label: 'Implementación', status: 'queued' }] } },
         { id: 'sin-diseno', business: 'agency', title: 'Cálculo de IVA', state: 'queued', kind: 'code', provider: 'orca', attempts: 0, maxAttempts: 5, createdAt: '2026-11-09',
+          waiting: { code: 'quota', provider: 'claude', message: 'claude: uso observado 93 %.' },
+          diagnosis: { category: 'cuota', label: 'Cuota del proveedor', waiting: true, message: 'claude: uso observado 93 %. El 10 % restante es la reserva de trabajo personal.', action: 'El encargo espera a que haya cuota fuera de la reserva personal.' },
           route: { id: 'funcional', label: 'Cambio funcional sin interfaz', reason: 'Solo cambia un cálculo del servidor.', omitted: [{ stage: 'ux', reason: 'Solo cambia un cálculo del servidor.' }] },
           workflow: { steps: [{ key: 'ux', label: 'Diseño UX', status: 'skipped', routeOmitted: true, summary: 'Omitida por la ruta «Cambio funcional sin interfaz»: Solo cambia un cálculo del servidor.' }, { key: 'developer', label: 'Implementación', status: 'queued' }] } }],
       queue: {}, projects: [{ id: 'web', name: 'Web corporativa', business: 'agency', status: 'active', checkout: '', branch: '' }], ideas: [], questions: [], domains: [], tasks: [], messages: [],
@@ -34,10 +40,17 @@ try {
         if (body.disable) saved = null; else saved = body.pipeline;
         return route.fulfill({ json: settings() });
       }
+      if (url.pathname === '/api/quota' && request.method() === 'POST') {
+        const body = JSON.parse(request.postData()); quotaWrites.push(body);
+        if (body.policy) Object.assign(quota, body.policy);
+        if (body.observation) { const { provider, ...rest } = body.observation; quota.proveedores[provider] = { ...quota.proveedores[provider], ...rest }; }
+        return route.fulfill({ json: quotaSettings() });
+      }
       if (url.pathname === '/api/jobs' && request.method() === 'POST') { writes.push(JSON.parse(request.postData())); return route.fulfill({ status: 202, json: { message: 'Solicitud enviada.' } }); }
       assert.equal(request.method(), 'GET', url.pathname);
       if (url.pathname === '/api/state') return route.fulfill({ json: snapshot });
       if (url.pathname === '/api/pipeline') return route.fulfill({ json: settings() });
+      if (url.pathname === '/api/quota') return route.fulfill({ json: quotaSettings() });
       if (url.pathname === '/api/launch-preview') {
         previews.push(url.search);
         const launch = url.searchParams.get('launch') ? JSON.parse(url.searchParams.get('launch')) : null;
@@ -94,6 +107,22 @@ try {
     await page.waitForFunction(() => /claude · sonnet/.test(document.querySelector('#pipeline-effective').textContent));
     await noOverflow('settings after save');
 
+    // Cuota: nothing is assumed about a subscription; what the owner notes is what the panel shows, and it survives a refresh while typing.
+    assert.match(await page.locator('#quota-status').innerText(), /Sin política de cuota/);
+    assert.match(await page.locator('#quota-warnings').innerText(), /no se ha declarado cómo se autentica/);
+    assert.equal(await page.locator('#quota-reserve').getAttribute('min'), '10');
+    await page.locator('#quota-claude-autenticacion').selectOption('suscripcion');
+    await page.locator('#quota-claude-usadoPorcentaje').fill('93');
+    await page.locator('#refresh').dispatchEvent('click');
+    await page.waitForTimeout(150);
+    assert.equal(await page.locator('#quota-claude-usadoPorcentaje').inputValue(), '93', 'a typed observation survives a refresh');
+    await page.locator('#quota-save').click();
+    await page.waitForFunction(() => /No se lanzan etapas con claude/.test(document.querySelector('#quota-status').textContent));
+    assert.equal(quotaWrites[0].policy.reservaPersonalPorcentaje, 10);
+    assert.deepEqual(quotaWrites.find(item => item.observation?.provider === 'claude').observation, { provider: 'claude', autenticacion: 'suscripcion', reiniciaEn: '', usadoPorcentaje: 93 });
+    assert.equal(quotaWrites.some(item => item.observation?.provider === 'codex'), false, 'an untouched provider is not rewritten');
+    await noOverflow('quota');
+
     // Job page: a launched stage shows what it used; a pending one shows what is planned.
     await page.goto('http://127.0.0.1:43894/#trabajo/pendiente');
     await page.getByRole('heading', { name: 'Encargo en cola', exact: true }).waitFor();
@@ -107,6 +136,7 @@ try {
     await page.getByRole('heading', { name: 'Cálculo de IVA', exact: true }).waitFor();
     assert.match(await page.locator('.run-route').innerText(), /Ruta: Cambio funcional sin interfaz[\s\S]*Diseño UX: omitida\. Solo cambia un cálculo del servidor\./);
     assert.equal(await page.locator('.run-stage').count(), 1, 'only the stages that run are numbered');
+    assert.match(await page.locator('.run-diagnosis').innerText(), /En espera · Cuota del proveedor[\s\S]*reserva de trabajo personal[\s\S]*Qué hacer: El encargo espera/);
     await noOverflow('route');
 
     // Nuevo trabajo: preview of the split, one stage pinned for this job, sent with the request.

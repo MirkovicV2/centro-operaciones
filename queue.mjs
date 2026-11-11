@@ -1,6 +1,7 @@
 import { workflowV2Resumable } from './workflow-v2-gate.mjs';
-import { validateJobLaunch } from './launch-choice.mjs';
+import { validateJobLaunch, LAUNCH_AGENTS } from './launch-choice.mjs';
 import { validateSkillChoice } from './skills-registry.mjs';
+import { admissionHold } from './admission-gate.mjs';
 import { validateJobRoute, routeOmission, routeOmits, routeWithStage, stageSatisfied } from './job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -1289,7 +1290,9 @@ export async function increaseJobAttemptLimit(root, id, maxAttempts) {
   }, 2000);
 }
 
-export async function retryJob(root, id, { confirm = false, stoppedDeveloperRecovery } = {}) {
+// substitute: relaunch the failed stage with the other provider. Only after its previous worker is confirmed finished;
+// its effects and report are kept and the new assignment is a new Task that follows the previous one.
+export async function retryJob(root, id, { confirm = false, stoppedDeveloperRecovery, substitute, reason } = {}) {
   if (!confirm) throw new QueueError('Revisa los resultados/efectos previos y usa --confirm-reviewed para reintentar.');
   return mutate(root, async state => {
     const previous = state.jobs.find(j => j.id === id);
@@ -1320,6 +1323,18 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
       (activeStep.status === 'blocked' && !['interrupted', 'orca_empty_result'].includes(activeStep.error)
         && ['rejected', 'failed', 'cancelled', 'abandoned', 'completed'].includes(activeStep.dispatchStatus))
     );
+    let substitution = null;
+    if (substitute !== undefined) {
+      const from = activeStep?.orcaAgent ?? activeStep?.launch?.agent ?? 'codex';
+      if (!LAUNCH_AGENTS.includes(substitute)) throw new QueueError(`El proveedor sustituto debe ser ${LAUNCH_AGENTS.join(' o ')}.`, 'substitution_invalid');
+      if (recovery || !activeStep || !safelyRetryableStage || !['ux', 'developer', 'qa', 'reviewer', 'planner'].includes(activeStep.key)) throw new QueueError('Solo se sustituye el proveedor de una etapa de agente que falló de forma confirmada.', 'substitution_invalid');
+      if (substitute === from) throw new QueueError(`La etapa ya se lanzó con ${from}; para repetirla con el mismo proveedor usa el reintento normal.`, 'substitution_invalid');
+      // "Confirmed finished": Orca reported the worker's final state, or it rejected the launch and no worker exists.
+      if (!(activeStep.dispatchSettled === true || activeStep.dispatchStatus === 'rejected')) throw new QueueError('No consta que el trabajador anterior haya terminado. Comprueba su dispatch en Orca antes de sustituir el proveedor.', 'substitution_unconfirmed');
+      if (typeof reason !== 'string' || reason.trim().length < 4 || reason.length > 500) throw new QueueError('Indica el motivo de la sustitución (4–500 caracteres).', 'substitution_invalid');
+      substitution = { from, to: substitute, reason: reason.trim(), at: stamp(), ...(currentActor() ? { actor: currentActor() } : {}),
+        ...(activeStep.dispatchId ? { previousDispatchId: activeStep.dispatchId } : {}), ...(activeStep.artifact ? { previousArtifact: activeStep.artifact } : {}) };
+    }
     const workflowHistory = workflow
       ? [...(previous.workflowHistory ?? []), { ...workflow, attempt: previous.attempts, savedAt: stamp() }]
       : previous.workflowHistory;
@@ -1335,7 +1350,8 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
         steps: workflow.steps.map((step, index) => index < resetAt || step.routeOmitted
           ? step
           : { key: step.key, label: step.label, profile: step.profile, status: 'queued',
-            ...(index === resetAt && IDENTIFIERS.taskId.test(step.taskId ?? '') && IDENTIFIERS.dispatchId.test(step.dispatchId ?? '') && (recovery || ['failed', 'cancelled', 'abandoned'].includes(step.dispatchStatus))
+            ...(index === resetAt && substitution ? { substitution, ...(IDENTIFIERS.taskId.test(step.taskId ?? '') ? { predecessorTaskId: step.taskId, supersedesDispatchId: step.dispatchId } : {}) }
+              : index === resetAt && IDENTIFIERS.taskId.test(step.taskId ?? '') && IDENTIFIERS.dispatchId.test(step.dispatchId ?? '') && (recovery || ['failed', 'cancelled', 'abandoned'].includes(step.dispatchStatus))
               ? { retryOf: { taskId: step.taskId, dispatchId: step.dispatchId, dispatchStatus: recovery ? 'stopped' : step.dispatchStatus,
                 ...(recovery ? { recoveryId: recovery.id } : {}), ...(step.orcaAgent ? { orcaAgent: step.orcaAgent } : {}), ...(step.launch?.agent ? { launch: step.launch } : {}), ...(step.skills?.length ? { skills: step.skills } : {}),
                 taskInputAttempt: step.taskInputAttempt ?? step.attempt ?? previous.attempts } }
@@ -1554,7 +1570,7 @@ export async function recoverDashboardQueue(root, { business } = {}) {
   }
 }
 
-export async function runQueue(root, { execute = false, worker, now, clock = Date.now, maxJobs = 5, jobId, business, beforeStart } = {}) {
+export async function runQueue(root, { execute = false, worker, now, clock = Date.now, maxJobs = 5, jobId, business, beforeStart, hold = admissionHold } = {}) {
   root = path.resolve(root);
   if (typeof clock !== 'function') throw new QueueError('clock debe ser una función.');
   if (business !== undefined && !QUEUE_BUSINESSES.includes(business)) throw new QueueError('Empresa inválida.');
@@ -1592,6 +1608,15 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
         if (revisedContract) assertContractRevisionCheckpoint(selectedJob, selectedJob.contractRevision);
         if (sameAttempt) assertLivenessResume(selectedJob, selectedJob.livenessResume);
         else if (selectedJob.attempts >= selectedJob.maxAttempts) throw new QueueError('Se alcanzó el máximo de intentos.', 'attempt_limit');
+        // Reasons to wait that are nobody's failure (quota in the personal reserve, another PC owns the job).
+        // Checked before the receipt admission so no recovery marker is consumed; the attempt is not counted.
+        const held = hold ? await hold(selectedJob, { root, now: clock() }) : null;
+        if (held) {
+          const waiting = { ...held, since: selectedJob.waiting?.since ?? stamp() };
+          const same = selectedJob.waiting && ['code', 'provider', 'state', 'until', 'message'].every(key => selectedJob.waiting[key] === waiting[key]);
+          if (!same) await commit(root, state, 'job_waiting', { jobs: [{ ...selectedJob, waiting }] }, { jobId: selectedJob.id, code: waiting.code, ...(waiting.provider ? { provider: waiting.provider } : {}) });
+          return { held: true };
+        }
         // Auto-run admission runs under the existing exclusive queue lock.
         // A declined admission never changes the job or consumes an attempt.
         const admission = beforeStart ? await beforeStart(selectedJob) : {};
@@ -1611,12 +1636,14 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
         const segmentStartedAt = stamp();
         const timeoutMs = executionTimeoutMs(selectedJob);
         const remainingTimeoutMs = timeoutMs === null ? null : timeoutMs - (sameAttempt ? elapsedAttemptMs(selectedJob) : 0);
-        const job = { ...selectedJob, ...admittedFields, state: 'running', attempts: selectedJob.attempts + (sameAttempt ? 0 : 1), startedAt: sameAttempt ? selectedJob.startedAt : segmentStartedAt, error: null,
+        const { waiting: _noLongerWaiting, ...readyJob } = selectedJob;
+        const job = { ...readyJob, ...admittedFields, state: 'running', attempts: selectedJob.attempts + (sameAttempt ? 0 : 1), startedAt: sameAttempt ? selectedJob.startedAt : segmentStartedAt, error: null,
           ...(sameAttempt ? { livenessResume: { ...selectedJob.livenessResume, phase: 'consumed', consumedAt: segmentStartedAt } } : {}) };
         const attemptStarted = Date.now();
         await commit(root, state, 'job_started', { jobs: [job] }, { jobId: job.id, attempt: job.attempts });
         return { job, sameAttempt, sameAttemptRecoveryId, segmentStartedAt, remainingTimeoutMs, attemptStarted, budget: state.budget };
       });
+      if (admitted?.held) continue; // this job waits; another one may still run
       if (!admitted) break;
       let { job, budget } = admitted;
       const { sameAttempt, sameAttemptRecoveryId, segmentStartedAt, remainingTimeoutMs, attemptStarted } = admitted;
@@ -1760,7 +1787,8 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
           }
           // Automatic retries are only permitted for errors known to have rejected work.
           const retry = error.retryable === true && error.uncertain !== true && job.attempts < job.maxAttempts;
-          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), nextAttemptAt: retry ? new Date(clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null,
+          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), // A provider that said when it will accept work again is retried then, not on the generic backoff.
+            nextAttemptAt: retry ? new Date(Number.isFinite(Date.parse(error.waitUntil ?? '')) && Date.parse(error.waitUntil) > clock() ? Date.parse(error.waitUntil) : clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null,
             error: { code: error.code || 'worker_error', message: error.safeMessage || 'El ejecutor falló; revisa el trabajo y su resultado antes de continuar.', ...boundedErrorDetails(error.details) } };
           job = { ...job, ...(error.partialResult ? { result: error.partialResult } : {}),
             attemptHistory: [...(job.attemptHistory ?? []), { attempt: job.attempts, startedAt: segmentStartedAt, finishedAt: job.finishedAt, elapsedMs: Date.now() - attemptStarted, outcome: job.state, ...(sameAttempt ? { recoveryId: sameAttemptRecoveryId } : {}), promptChars: job.prompt.length, error: job.error.code,

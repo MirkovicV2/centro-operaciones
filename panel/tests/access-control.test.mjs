@@ -19,7 +19,7 @@ test('parseTailscaleAccess accepts the legacy single login as admin and the new 
 
 test('roles: revisar reads only, ejecutar cannot change configuration or projects, admin can do everything', () => {
   const posts = ['/api/jobs', '/api/jobs/j1/retry', '/api/jobs/j1/resolve', '/api/jobs/j1/resume', '/api/auto-run/r1/retry-checkout', '/api/auto-run/r1/review', '/api/coordinator/requests/c1/route', '/api/ideas/i1/coordinator', '/api/questions/q1/answer'];
-  const adminOnly = ['/api/config', '/api/pipeline', '/api/auto-run', '/api/projects', '/api/projects/p1/update'];
+  const adminOnly = ['/api/config', '/api/pipeline', '/api/quota', '/api/auto-run', '/api/projects', '/api/projects/p1/update'];
   for (const pathname of [...posts, ...adminOnly, '/api/state']) {
     assert.equal(roleAllows('revisar', 'GET', pathname), true); assert.equal(roleAllows('admin', 'POST', pathname), true);
     assert.equal(roleAllows('revisar', 'POST', pathname), false);

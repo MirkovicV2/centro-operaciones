@@ -13,6 +13,7 @@ const pipelineState = { server: null, draft: null, dirty: false, loading: null }
 const emptyDraft = () => ({ general: { roles: {} }, empresas: {}, proyectos: {}, escaladas: {} });
 const cloneDraft = value => JSON.parse(JSON.stringify(value || emptyDraft()));
 const jobLaunchState = { preview: null, request: 0 };
+const quotaState = { server: null, dirty: false, loading: null };
 // Appearance: Claro | Oscuro | Sistema. "Sistema" follows the OS; a manual choice is kept in this browser.
 const THEME_KEY = 'operations-theme';
 function applyTheme(choice) {
@@ -386,6 +387,15 @@ function renderRun(data) {
   }
   main.append(bar);
 
+  // Why the job is not moving, by kind: product, configuration, quota, provider, a decision or a test by a person.
+  if (job.diagnosis) {
+    const diagnosis = el('section', `run-diagnosis is-${job.diagnosis.category}`);
+    diagnosis.append(el('h3', '', job.diagnosis.waiting ? `En espera · ${job.diagnosis.label}` : job.diagnosis.label));
+    if (job.diagnosis.message) diagnosis.append(el('p', '', job.diagnosis.message));
+    if (job.diagnosis.until) diagnosis.append(el('p', 'microcopy', `Se volverá a intentar a partir de ${formatDate(job.diagnosis.until)}.`));
+    diagnosis.append(el('p', 'run-diagnosis-action', `Qué hacer: ${job.diagnosis.action}`));
+    main.append(diagnosis);
+  }
   if (job.state === 'needs_attention') {
     const callout = el('section', 'run-callout');
     callout.append(el('h3', '', 'Este trabajo espera tu decisión'), el('p', '', job.error?.message || 'Revisa la etapa y sus informes antes de continuar.'));
@@ -425,6 +435,8 @@ function renderRun(data) {
     if (step.skills?.length) add('Skills suministradas', step.skills.map(skill => skill.id).join(', '), 'observed');
     if (step.skills?.length && step.skillsConsulted) add('Skills consultadas', step.skillsConsulted.length ? step.skillsConsulted.join(', ') : 'Ninguna declarada', 'reported');
     for (const item of step.skillsOmitted || []) add('Skill no entregada', `${item.id}: ${item.reason}`, 'observed');
+    if (step.launch?.substitutedFrom) add('Proveedor sustituido', `En lugar de ${step.launch.substitutedFrom.agent} · ${step.launch.substitutedFrom.reason}`, 'observed');
+    if (step.quota) add('Cuota al lanzar', step.quota.state === 'incierta' ? `${step.quota.provider}: uso no conocido` : `${step.quota.provider}: ${step.quota.usadoPorcentaje} % usado (reserva ${step.quota.reserva} %)`, step.quota.state === 'incierta' ? 'unknown' : 'observed');
     body.append(kv);
     const summary = step.delivery?.summary || step.summary;
     if (summary) { const details = el('details', 'run-report'); details.dataset.panelDetail = `run-${job.id}-${step.key}`; details.append(el('summary', '', 'Informe de la etapa'), el('pre', 'workflow-stage-report', summary)); body.append(details); }
@@ -1600,7 +1612,7 @@ function showSection() {
     if (link.right > strip.right) nav.scrollLeft += link.right - strip.right;
   }
   if (selected === 'conocimiento') void refreshGraph();
-  if (selected === 'ajustes') void loadPipeline();
+  if (selected === 'ajustes') { void loadPipeline(); void loadQuota(); }
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function updateHistoryProjects(projects) {
@@ -2027,3 +2039,72 @@ async function refreshJobLaunch() {
 $('#job-project').addEventListener('change', () => void refreshJobLaunch());
 $('#job-launch').addEventListener('toggle', () => void refreshJobLaunch());
 $('#job-form').addEventListener('reset', () => setTimeout(() => void refreshJobLaunch(), 0));
+
+
+// ---- Cuota y suscripciones (docs/CUOTA.md). Like the split form, it is never rebuilt by the periodic refresh. ----
+const quotaStateNames = { disponible: 'Disponible', reserva: 'En la reserva personal', agotada: 'Agotada', incierta: 'Uso no conocido' };
+const localDateTime = value => { if (!value) return ''; const date = new Date(value); if (Number.isNaN(date.getTime())) return ''; const pad = number => String(number).padStart(2, '0'); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`; };
+function quotaProviderRow(agent, provider, status) {
+  const row = el('fieldset', 'pipeline-row quota-provider'); row.dataset.provider = agent;
+  row.append(el('legend', '', agent === 'claude' ? 'Claude' : 'Codex'));
+  const field = (label, node, name) => { const wrapper = el('label', '', label); node.id = `quota-${agent}-${name}`; node.dataset.field = name; wrapper.htmlFor = node.id; wrapper.append(node); return wrapper; };
+  const auth = el('select'); for (const [value, text] of [['desconocida', 'Sin comprobar'], ['suscripcion', 'Suscripción'], ['api', 'API (coste adicional)']]) auth.add(new Option(text, value));
+  auth.value = provider.autenticacion || 'desconocida';
+  const used = el('input'); used.type = 'number'; used.min = '0'; used.max = '100'; used.step = '1'; used.inputMode = 'numeric'; used.placeholder = 'Sin anotar';
+  const reset = el('input'); reset.type = 'datetime-local'; reset.value = localDateTime(provider.reiniciaEn);
+  const exhausted = el('input'); exhausted.type = 'checkbox'; exhausted.checked = status.state === 'agotada';
+  const exhaustedLabel = el('label', 'quota-check'); exhausted.id = `quota-${agent}-exhausted`; exhausted.dataset.field = 'exhausted'; exhaustedLabel.htmlFor = exhausted.id; exhaustedLabel.append(exhausted, document.createTextNode(' Ya no acepta trabajo hasta el reinicio'));
+  row.append(field('Autenticación en Orca', auth, 'autenticacion'), field('Uso observado ahora (%)', used, 'usadoPorcentaje'), field('Se reinicia', reset, 'reiniciaEn'), exhaustedLabel);
+  const note = el('p', 'pipeline-row-note', `${quotaStateNames[status.state] || status.state}. ${status.reason || status.aviso || (status.usadoPorcentaje !== undefined ? `Uso observado ${status.usadoPorcentaje} % el ${formatDate(status.observadoEn)}.` : '')}`);
+  note.classList.toggle('pipeline-error', ['reserva', 'agotada'].includes(status.state));
+  row.append(note);
+  for (const control of [auth, used, reset, exhausted]) control.addEventListener(control.tagName === 'INPUT' && control.type !== 'checkbox' ? 'input' : 'change', () => setQuotaDirty(true));
+  return row;
+}
+function setQuotaDirty(dirty) { quotaState.dirty = dirty; $('#quota-dirty').textContent = dirty ? 'Cambios sin guardar' : 'Sin cambios'; $('#quota-save').disabled = !dirty; }
+function renderQuota(server) {
+  quotaState.server = server;
+  const status = $('#quota-status'), blocked = server.agents.filter(agent => ['reserva', 'agotada'].includes(server.status[agent].state));
+  status.classList.toggle('pipeline-error', Boolean(server.error) || blocked.length > 0);
+  status.textContent = server.error ? `El archivo guardado no es válido: ${server.error} Mientras tanto no se lanza trabajo.`
+    : !server.configured ? 'Sin política de cuota en esta instalación: las etapas se lanzan sin comprobar el uso. Anota la autenticación y el uso de cada proveedor y guarda para activarla.'
+    : blocked.length ? `No se lanzan etapas con ${blocked.join(' ni ')}: ${blocked.map(agent => server.status[agent].reason).join(' ')}`
+    : `Reserva personal del ${server.quota.reservaPersonalPorcentaje} % activa.`;
+  $('#quota-warnings').replaceChildren(...server.warnings.map(text => el('li', '', text)));
+  $('#quota-providers').replaceChildren(...server.agents.map(agent => quotaProviderRow(agent, server.quota.proveedores[agent] || {}, server.status[agent])));
+  for (const name of ['reservaPersonalPorcentaje', 'avisoPorcentaje', 'caducidadObservacionHoras', 'sinDatos', 'alAgotar']) $('#quota-form').elements[name].value = server.quota[name];
+  setQuotaDirty(false);
+}
+function loadQuota(force = false) {
+  if ((quotaState.dirty || quotaState.server) && !force) return Promise.resolve();
+  quotaState.loading ||= api('/api/quota').then(renderQuota)
+    .catch(error => { $('#quota-status').textContent = `No se pudo cargar la cuota: ${error.message}`; $('#quota-status').classList.add('pipeline-error'); })
+    .finally(() => { quotaState.loading = null; });
+  return quotaState.loading;
+}
+for (const control of $('#quota-form').querySelectorAll('.quota-policy input, .quota-policy select')) control.addEventListener(control.tagName === 'SELECT' ? 'change' : 'input', () => setQuotaDirty(true));
+$('#quota-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!quotaState.dirty || !quotaState.server) return;
+  const form = event.currentTarget, button = $('#quota-save'); button.disabled = true;
+  try {
+    const number = name => Number(form.elements[name].value);
+    const substitute = form.elements.alAgotar.value === 'sustituir';
+    let server = await api('/api/quota', { method: 'POST', body: JSON.stringify({ policy: { reservaPersonalPorcentaje: number('reservaPersonalPorcentaje'), avisoPorcentaje: number('avisoPorcentaje'),
+      caducidadObservacionHoras: number('caducidadObservacionHoras'), sinDatos: form.elements.sinDatos.value, alAgotar: form.elements.alAgotar.value, sustituciones: substitute ? { claude: 'codex', codex: 'claude' } : {} } }) });
+    for (const row of $('#quota-providers').querySelectorAll('.quota-provider')) {
+      const value = name => row.querySelector(`[data-field="${name}"]`).value, agent = row.dataset.provider, before = quotaState.server.quota.proveedores[agent] || {};
+      const reset = value('reiniciaEn') ? new Date(value('reiniciaEn')).toISOString() : '';
+      const exhausted = row.querySelector('[data-field="exhausted"]').checked;
+      if (exhausted && !reset) throw new Error(`Para marcar ${agent} como agotado, indica cuándo se reinicia.`);
+      const observation = { provider: agent, autenticacion: value('autenticacion'), reiniciaEn: reset,
+        ...(value('usadoPorcentaje') !== '' ? { usadoPorcentaje: Number(value('usadoPorcentaje')) } : {}),
+        ...(exhausted ? { agotadaHasta: reset } : quotaState.server.status[agent].state === 'agotada' ? { agotadaHasta: '' } : {}) };
+      const changed = observation.autenticacion !== (before.autenticacion || 'desconocida') || reset !== (before.reiniciaEn ? new Date(before.reiniciaEn).toISOString() : '') || 'usadoPorcentaje' in observation || 'agotadaHasta' in observation;
+      if (changed) server = await api('/api/quota', { method: 'POST', body: JSON.stringify({ observation }) });
+    }
+    renderQuota(server);
+    notify('Cuota guardada. Se aplica a las etapas que aún no se han lanzado.');
+  } catch (error) { $('#quota-status').textContent = `No se guardó: ${error.message}`; $('#quota-status').classList.add('pipeline-error'); notify(error.message, true); button.disabled = false; }
+});
+window.addEventListener('beforeunload', event => { if (quotaState.dirty) event.preventDefault(); });

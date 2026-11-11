@@ -594,3 +594,148 @@ test('every stage brief carries the same eight sections in order, with product c
     if (qa) assert.match(qa.contracts[0].sha256, /^[a-f0-9]{64}$/);
   }
 });
+
+// Quota and provider failures (quota.mjs, admission-gate.mjs, failure-taxonomy.mjs).
+const hoursFromNow = hours => new Date(Date.now() + hours * 3_600_000).toISOString();
+async function writeQuotaFile(root, providers, policy = {}) {
+  await fs.mkdir(path.join(root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(root, 'data', 'quota.json'), JSON.stringify({ version: 1, ...policy, proveedores: providers }));
+}
+const observed = (usadoPorcentaje, extra = {}) => ({ autenticacion: 'suscripcion', usadoPorcentaje, observadoEn: new Date().toISOString(), ...extra });
+
+test('a job whose provider is inside the personal reserve waits without starting, without a worker and without spending an attempt', async t => {
+  await withDefaultAgent(t, undefined);
+  const { diagnoseJob } = await import('../failure-taxonomy.mjs');
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+  const reset = hoursFromNow(3);
+  await writeQuotaFile(f.root, { claude: observed(93, { reiniciaEn: reset }), codex: observed(20) });
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const run = () => runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  assert.deepEqual((await run()).jobs, []);
+  const waiting = (await loadState(f.root)).jobs[0];
+  assert.deepEqual([waiting.state, waiting.attempts, simulator.started.length], ['queued', 0, 0]);
+  assert.deepEqual([waiting.waiting.code, waiting.waiting.provider, waiting.waiting.state, waiting.waiting.until], ['quota', 'claude', 'reserva', reset]);
+  assert.deepEqual([diagnoseJob(waiting).category, diagnoseJob(waiting).waiting], ['cuota', true]);
+  // Polling again records nothing new.
+  const revision = (await loadState(f.root)).revision;
+  await run(); assert.equal((await loadState(f.root)).revision, revision, 'the same wait is not written again on every cycle');
+  // The owner looks again after the reset: the job starts, the wait is cleared and each stage keeps the quota it was launched under.
+  await writeQuotaFile(f.root, { claude: observed(12), codex: observed(20) });
+  await run();
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  assert.equal(done.attempts, 1); assert.equal(Object.hasOwn(done, 'waiting'), false);
+  assert.deepEqual(done.workflow.steps.map(step => `${step.quota.provider}:${step.quota.state}:${step.quota.usadoPorcentaje}`), ['claude:disponible:12', 'claude:disponible:12', 'codex:disponible:20', 'codex:disponible:20']);
+});
+
+test('with the substitution policy a stage moves to the other subscription instead of waiting, and says so', async t => {
+  await withDefaultAgent(t, undefined);
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+  await writeQuotaFile(f.root, { claude: observed(95), codex: observed(20) }, { alAgotar: 'sustituir', sustituciones: { claude: 'codex' } });
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+  // Claude's model name does not travel: the substitute uses the level of that role in its own table.
+  assert.deepEqual(simulator.started.map(launchedWith), ['codex gpt-6.1-sol medium', 'codex gpt-6.1-sol medium', 'codex gpt-6.1-sol medium', 'codex gpt-6.1-sol high']);
+  const design = job.workflow.steps[0];
+  assert.deepEqual([design.orcaAgent, design.launch.source, design.launch.substitutedFrom.agent, design.launch.substitutedFrom.reason], ['codex', 'sustitución', 'claude', 'cuota']);
+  assert.equal(job.workflow.steps[2].launch.substitutedFrom, undefined, 'QA was Codex all along');
+  // If the substitute is not known to be available, nothing is substituted: the job waits.
+  const g = await fixture(t);
+  await fs.mkdir(path.join(g.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(g.root, 'data', 'pipeline.json'), await mixedExample());
+  await writeQuotaFile(g.root, { claude: observed(95), codex: { autenticacion: 'api', usadoPorcentaje: 5, observadoEn: new Date().toISOString() } }, { alAgotar: 'sustituir', sustituciones: { claude: 'codex' } });
+  await addJob(g.root, g.spec);
+  const other = fakeOrca(g.workspace);
+  await runQueue(g.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: other.command }) });
+  assert.deepEqual([(await loadState(g.root)).jobs[0].waiting.provider, other.started.length], ['claude', 0], 'work is never moved onto paid API billing');
+});
+
+test('a worker stopped by its provider is not a product failure; the stage can then be handed to the other provider keeping what was done', async t => {
+  await withDefaultAgent(t, 'claude');
+  const { diagnoseJob } = await import('../failure-taxonomy.mjs');
+  const { readQuota, quotaStatus } = await import('../quota.mjs');
+  const f = await fixture(t);
+  await writeQuotaFile(f.root, { claude: observed(60), codex: observed(10) });
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => {
+    const value = await simulator.command(args);
+    if (simulator.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (simulator.started.length === 1 && args[1] === 'inbox') { value.messages[0].payload = JSON.stringify({ ...JSON.parse(value.messages[0].payload), outcome: 'failed' }); value.messages[0].body = 'Claude usage limit reached. Your limit will reset later.'; }
+    return value;
+  };
+  const run = () => runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  await run();
+  const stopped = (await loadState(f.root)).jobs[0];
+  assert.deepEqual([stopped.state, stopped.error.code], ['needs_attention', 'provider_quota_exhausted'], JSON.stringify(stopped.error));
+  assert.match(stopped.error.message, /Deducido del texto, sin confirmar\. No es un fallo del producto/);
+  assert.equal(diagnoseJob(stopped).category, 'cuota');
+  const step = stopped.workflow.steps[0];
+  assert.deepEqual([step.status, step.dispatchStatus, step.dispatchSettled, step.providerSignal.inferred], ['failed', 'failed', true, true]);
+  const claude = quotaStatus(await readQuota(f.root), 'claude');
+  assert.deepEqual([claude.state, claude.inferida], ['agotada', true], 'no other stage is sent to that provider meanwhile');
+  // Substitution needs a reason, a different provider and a worker known to have finished.
+  await assert.rejects(retryJob(f.root, stopped.id, { confirm: true, substitute: 'claude', reason: 'El mismo proveedor' }), { code: 'substitution_invalid' });
+  await assert.rejects(retryJob(f.root, stopped.id, { confirm: true, substitute: 'codex' }), { code: 'substitution_invalid', message: /motivo/ });
+  await assert.rejects(retryJob(f.root, stopped.id, { confirm: true, substitute: 'gemini', reason: 'Otro proveedor' }), { code: 'substitution_invalid' });
+  const retried = await retryJob(f.root, stopped.id, { confirm: true, substitute: 'codex', reason: 'Claude sin cuota hasta la tarde.' });
+  assert.deepEqual([retried.workflow.steps[0].substitution.from, retried.workflow.steps[0].substitution.to, retried.workflow.steps[0].retryOf], ['claude', 'codex', undefined]);
+  // The remaining stages still resolve to Claude, which is exhausted: the job waits, and says which provider.
+  await run();
+  assert.equal((await loadState(f.root)).jobs[0].waiting?.provider, 'claude');
+  // Once the default moves to Codex for the rest, the substituted stage runs as a new Task that follows the old one.
+  process.env.CENTRO_ORCA_AGENT = 'codex';
+  await run();
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  const second = simulator.started[1];
+  assert.equal(second.args.includes('--retry-of'), false, 'a different provider cannot be a native retry of the same Task');
+  assert.equal(second.args[second.args.indexOf('--parent') + 1], simulator.started[0].taskId);
+  assert.equal(launchedWith(second).split(' ')[0], 'codex');
+  assert.match(second.input, /SUSTITUCIÓN DE PROVEEDOR: continúas la etapa de un trabajador anterior \(claude\)/);
+  assert.match(second.input, /Claude sin cuota hasta la tarde\./);
+  assert.equal(done.workflow.steps[0].launch.substitutedFrom.agent, 'claude');
+  assert.equal(simulator.started.length, 5, 'one failed worker, its substitute and the three later stages: nothing duplicated');
+});
+
+test('an uncertain dispatch can never be substituted: the same dispatch is consulted first', async t => {
+  const f = await fixture(t); await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => { if (args[1] === 'worker-start') throw Object.assign(new Error('socket hang up'), { code: 'orca_command_failed' }); return simulator.command(args); };
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const uncertain = (await loadState(f.root)).jobs[0];
+  assert.equal(uncertain.state, 'needs_attention'); assert.equal(uncertain.workflow.steps[0].dispatchStatus, 'unknown');
+  await assert.rejects(retryJob(f.root, uncertain.id, { confirm: true, substitute: 'claude', reason: 'Probar con el otro proveedor' }), error => ['dispatch_unknown', 'substitution_invalid', 'substitution_unconfirmed'].includes(error.code));
+  assert.equal((await loadState(f.root)).jobs[0].workflow.steps[0].substitution, undefined);
+});
+
+test('a provider that is temporarily unavailable stops the job as such; the retry repeats the same Task and never starts a second worker on its own', async t => {
+  const { diagnoseJob } = await import('../failure-taxonomy.mjs');
+  const f = await fixture(t); await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => {
+    const value = await simulator.command(args);
+    if (simulator.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (simulator.started.length === 1 && args[1] === 'inbox') { value.messages[0].payload = JSON.stringify({ ...JSON.parse(value.messages[0].payload), outcome: 'failed' }); value.messages[0].body = 'API Error 529: the service is overloaded.'; }
+    return value;
+  };
+  const run = extra => runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }), ...extra });
+  await run();
+  const stopped = (await loadState(f.root)).jobs[0];
+  assert.deepEqual([stopped.state, stopped.error.code], ['needs_attention', 'provider_unavailable'], JSON.stringify(stopped.error));
+  assert.equal(diagnoseJob(stopped).category, 'indisponible'); assert.match(diagnoseJob(stopped).action, /el candidato no ha cambiado/);
+  // Time passing does not relaunch it: this stage already has a worker in Orca.
+  await run({ now: Date.now() + 3_600_000 });
+  assert.equal(simulator.started.length, 1);
+  await retryJob(f.root, stopped.id, { confirm: true });
+  await run();
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  const retry = simulator.started[1];
+  assert.equal(retry.args[retry.args.indexOf('--retry-of') + 1], simulator.started[0].dispatchId);
+  assert.equal(simulator.started.length, 5);
+});

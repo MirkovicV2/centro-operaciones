@@ -172,7 +172,8 @@ function jobEntry(jobLaunch, roleName, pipeline) {
 
 // Returns what a stage is launched with and where each field came from.
 // model/effort null = the agent's own default. `level` is set only when both come from the level table.
-export function resolveStageLaunch({ roleName, business = null, projectId = null, jobLaunch = null, levels, pipeline = EMPTY_PIPELINE, defaultAgent = 'codex', fallbackRoles = {} }) {
+// forcedAgent: a substitution (quota policy, or the operator replacing a provider) applied on top of every layer.
+export function resolveStageLaunch({ roleName, business = null, projectId = null, jobLaunch = null, levels, pipeline = EMPTY_PIPELINE, defaultAgent = 'codex', fallbackRoles = {}, forcedAgent = null }) {
   const state = { agent: defaultAgent, level: levels.roles?.[roleName] ?? fallbackRoles[roleName] ?? null, model: undefined, effort: undefined };
   const origin = { agent: 'por defecto', model: 'por defecto', effort: 'por defecto' };
   let source = 'por defecto';
@@ -196,6 +197,7 @@ export function resolveStageLaunch({ roleName, business = null, projectId = null
   apply(projectId ? pipeline.proyectos[projectId]?.roles[roleName] : null, 'proyecto');
   const job = jobEntry(jobLaunch, roleName, pipeline);
   if (job && (!job.onlyFor || job.onlyFor === state.agent)) apply(job.entry, job.source);
+  if (forcedAgent && forcedAgent !== state.agent) apply({ agent: forcedAgent }, 'sustitución');
   const table = levels.agents?.[state.agent]?.[state.level] ?? {};
   const fromLevel = state.model === undefined && state.effort === undefined;
   return {

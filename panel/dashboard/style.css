@@ -1336,3 +1336,19 @@ button.history-row { cursor: pointer; } button.history-row:hover { background: v
 .run-route { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; overflow-wrap: anywhere; }
 .run-route-title { margin: 0; color: var(--text); }
 .run-route-notes { margin: 6px 0 0; padding-left: 18px; color: var(--soft); }
+
+/* Ajustes · cuota; página del trabajo · diagnóstico. */
+.quota-form { margin-bottom: 16px; }
+.quota-warnings { margin: 0 0 12px; padding-left: 18px; font-size: 13px; color: var(--amber); overflow-wrap: anywhere; }
+.quota-warnings:empty { display: none; }
+.quota-check { display: flex !important; align-items: center; gap: 8px; min-height: 36px; }
+.quota-policy { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.run-diagnosis { margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent-line); border-radius: 10px; overflow-wrap: anywhere; }
+.run-diagnosis h3 { margin: 0 0 6px; font-size: 14px; font-weight: 620; }
+.run-diagnosis p { margin: 0 0 6px; font-size: 13.5px; }
+.run-diagnosis-action { color: var(--text); }
+.run-diagnosis.is-producto, .run-diagnosis.is-incierto { border-left-color: var(--rose); }
+.run-diagnosis.is-cuota, .run-diagnosis.is-configuracion { border-left-color: var(--amber); }
+@media (max-width: 1100px) { .quota-policy { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 370px) { .quota-policy { grid-template-columns: minmax(0, 1fr); } }
+.pipeline-row input[type=checkbox] { width: auto; min-width: 0; flex: none; }

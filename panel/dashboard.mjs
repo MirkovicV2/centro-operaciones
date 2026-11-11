@@ -63,6 +63,8 @@ import { inspectOrcaAgentSettings } from '../orca-settings.mjs';
 import { readPipeline, pipelineAgents, previewPipeline, writePipeline, disablePipeline, resolveStageLaunch, STAGE_ROLES, PIPELINE_BUSINESSES } from '../pipeline-config.mjs';
 import { LAUNCH_ROLES, LAUNCH_AGENTS } from '../launch-choice.mjs';
 import { currentActor, addJobStage } from './queue.mjs';
+import { readQuota, writeQuota, quotaStatus, billingWarnings, recordQuotaObservation, quotaConfigured, DEFAULT_QUOTA } from '../quota.mjs';
+import { diagnoseJob } from '../failure-taxonomy.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from '../orca-provider.mjs';
 // With a mixed pipeline some stages run with Claude even when the default agent is Codex.
 const usesClaude = await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }).then(pipeline => pipelineAgents(pipeline, configuredOrcaAgent()).includes('claude'))
@@ -79,6 +81,27 @@ async function pipelineSettings() {
   try { await fs.access(path.join(QUEUE_ROOT, 'data', 'pipeline.json')); } catch { configured = false; }
   try { return { ...base, configured, pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }) }; }
   catch (error) { if (error.code !== 'pipeline_config_invalid') throw error; return { ...base, configured, pipeline: null, error: error.message }; }
+}
+// Subscriptions and the personal reserve as the settings view shows them. Every status says how it is known.
+async function quotaSettings() {
+  const configured = await quotaConfigured(QUEUE_ROOT);
+  let quota = DEFAULT_QUOTA, error;
+  try { quota = await readQuota(QUEUE_ROOT); } catch (failure) { if (failure.code !== 'quota_config_invalid') throw failure; error = failure.message; }
+  return { configured, agents: LAUNCH_AGENTS, quota, status: Object.fromEntries(LAUNCH_AGENTS.map(agent => [agent, quotaStatus(quota, agent)])), warnings: billingWarnings(quota), ...(error ? { error } : {}) };
+}
+async function saveQuota(body) {
+  try {
+    if (body.policy) {
+      const current = await readQuota(QUEUE_ROOT).catch(() => DEFAULT_QUOTA);
+      const { reservaPersonalPorcentaje, avisoPorcentaje, caducidadObservacionHoras, sinDatos, alAgotar, sustituciones } = body.policy;
+      await writeQuota(QUEUE_ROOT, { ...current, reservaPersonalPorcentaje, avisoPorcentaje, caducidadObservacionHoras, sinDatos, alAgotar, sustituciones });
+    }
+    if (body.observation) {
+      const { provider, ...observation } = body.observation;
+      await recordQuotaObservation(QUEUE_ROOT, provider, observation);
+    }
+  } catch (error) { if (error.code === 'quota_config_invalid') throw Object.assign(new Error(error.message), { status: 400, code: error.code }); throw error; }
+  return quotaSettings();
 }
 // What each stage that has not been launched yet would be launched with right now. Launched stages keep their own record.
 async function plannedLaunches(jobs) {
@@ -202,6 +225,7 @@ async function dashboardData() {
     jobs: queue.jobs.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(job => ({
       ...job,
       ...(planned.get(job.id) && Object.keys(planned.get(job.id)).length ? { plannedLaunch: planned.get(job.id) } : {}),
+      ...(diagnoseJob(job) ? { diagnosis: diagnoseJob(job) } : {}),
       prompt: safeMarkdownText(job.prompt || '').slice(0, 6000),
       result: job.result ? { ...job.result, text: safeMarkdownText(job.result.text || '').slice(0, 12000) } : job.result,
     })),
@@ -306,6 +330,7 @@ async function handleApi(request, response, url, tailscale = null) {
   if (request.method === 'GET' && traceRead) return send(response, 200, await readRequestTrace(QUEUE_ROOT, traceRead[1], { observePreparation }));
   if (request.method === 'GET' && url.pathname === '/api/graph') return send(response, 200, await buildKnowledgeGraph(QUEUE_ROOT, url.searchParams.get('business')));
   if (request.method === 'GET' && url.pathname === '/api/launch-preview') return send(response, 200, await launchPreview(url.searchParams));
+  if (request.method === 'GET' && url.pathname === '/api/quota') return send(response, 200, await quotaSettings());
   if (request.method === 'GET' && url.pathname === '/api/pipeline') return send(response, 200, await pipelineSettings());
   if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
@@ -328,6 +353,7 @@ async function handleApi(request, response, url, tailscale = null) {
     const config = await saveDashboardConfig(QUEUE_ROOT, { vaultPath: body.vaultPath, autoRun: false });
     return send(response, 200, config);
   }
+  if (url.pathname === '/api/quota') return send(response, 200, await saveQuota(body));
   if (url.pathname === '/api/pipeline') {
     try {
       if (body.disable === true) { if (body.confirm !== true) throw Object.assign(new Error('Confirma explícitamente volver al agente único.'), { status: 400 }); await disablePipeline(QUEUE_ROOT, { actor: currentActor() }); }
@@ -402,7 +428,7 @@ async function handleApi(request, response, url, tailscale = null) {
       } else {
         job = receipt?.status === 'needs_attention'
           ? await retryAutoReceipt(QUEUE_ROOT, reviewedJob[1], { confirm, noDispatchConfirmed: body.noDispatchConfirmed === true })
-          : await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm });
+          : await retryJob(QUEUE_ROOT, reviewedJob[1], { confirm, ...(body.substitute ? { substitute: body.substitute, reason: body.reason } : {}) });
       }
     } else if (reviewedJob[2] === 'cancel') {
       job = await cancelQueuedJob(QUEUE_ROOT, reviewedJob[1], { confirm: body.confirmReviewed === true });
