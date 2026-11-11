@@ -1,0 +1,23 @@
+{
+  "_comentario": "Los PCs del equipo y lo que puede hacer cada uno. Compartido por el repositorio: sin secretos, rutas ni cuentas. Cada instalación dice cuál es en su data/equipo.json (ejemplos/equipo.example.json). PENDIENTE DE CONFIRMAR POR CADA PERSONA: los recursos de abajo son una primera propuesta (Godot y emulador en el PC de Windows, por las herramientas de games-android-qa.ps1); corrige los de tu PC antes de crear data/equipo.json (docs/EQUIPOS.md).",
+  "version": 1,
+  "equipos": {
+    "dani-windows": {
+      "nombre": "PC de Dani",
+      "sistema": "windows",
+      "recursos": [
+        "godot",
+        "emuladorAndroid",
+        "gpu",
+        "navegador"
+      ]
+    },
+    "david-ubuntu": {
+      "nombre": "PC de David",
+      "sistema": "ubuntu",
+      "recursos": [
+        "navegador"
+      ]
+    }
+  }
+}

@@ -17,11 +17,17 @@
 // and the checkout still has the fingerprint QA validated. Each candidate gets its own V2
 // task (job id + fingerprint prefix), so a changed candidate needs a new approval.
 //
+// Decision on GitHub (per project, "ownerDecision": "github", needs phase B): when V2 recommends accepting,
+// the Centro does not wait for `wfv2 approve`. It opens the PR with exactly that candidate and never merges
+// it: the owner's merge on GitHub is the decision, and closing the PR is the rejection. A V2 rejection or
+// block still stops the job. The V2 task stays in pendiente_owner; the merged PR is the record.
+//
 // data/workflow-v2.json (local, private, gitignored like the rest of data/):
 //   { "version": 1, "engineeringSystem": "<checkout of engineering-system>", "python": "python3",
 //     "projects": { "<projectId>": { "stateRoot": "<dir outside the checkout>",
 //       "reviewerConfig": "<reviewer.json>" | null, "allowedPaths": ["src/"], "checks": ["unit-tests"],
-//       "risks": [], "declaredTier": null, "timeoutMs": 3600000, "integrateAfterApproval": false } } }
+//       "risks": [], "declaredTier": null, "timeoutMs": 3600000, "integrateAfterApproval": false,
+//       "pythonEnv": "<virtualenv for checks declaring python_env>" | null, "ownerDecision": "v2" | "github" } } }
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -55,11 +61,15 @@ export function normalizeWorkflowV2(value) {
     if (!strings(entry.risks ?? [], s => NAME.test(s))) fail(`${id}: risks debe ser una lista de nombres.`);
     if (entry.declaredTier != null && !TIERS.has(entry.declaredTier)) fail(`${id}: declaredTier debe ser FAST, STANDARD, CRITICAL o null.`);
     if (entry.integrateAfterApproval != null && typeof entry.integrateAfterApproval !== 'boolean') fail(`${id}: integrateAfterApproval debe ser true o false.`);
+    if (entry.pythonEnv != null && !absolute(entry.pythonEnv)) fail(`${id}: pythonEnv debe ser una ruta absoluta o null.`);
+    const ownerDecision = entry.ownerDecision ?? 'v2';
+    if (!['v2', 'github'].includes(ownerDecision)) fail(`${id}: ownerDecision debe ser "v2" o "github".`);
+    if (ownerDecision === 'github' && entry.integrateAfterApproval !== true) fail(`${id}: ownerDecision "github" necesita integrateAfterApproval: true.`);
     const timeoutMs = entry.timeoutMs ?? 3_600_000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 4 * 3_600_000) fail(`${id}: timeoutMs entre 60000 y 14400000.`);
     projects[id] = { stateRoot: entry.stateRoot, reviewerConfig: entry.reviewerConfig ?? null, allowedPaths: [...entry.allowedPaths],
       checks: [...(entry.checks ?? [])], risks: [...(entry.risks ?? [])], declaredTier: entry.declaredTier ?? null, timeoutMs,
-      integrateAfterApproval: entry.integrateAfterApproval === true };
+      integrateAfterApproval: entry.integrateAfterApproval === true, pythonEnv: entry.pythonEnv ?? null, ownerDecision };
   }
   return { engineeringSystem: value.engineeringSystem, python, projects };
 }
@@ -153,12 +163,27 @@ const MESSAGES = {
   rejected: 'El revisor de Workflow V2 rechazó el candidato. Lee el informe en V2, registra tu veredicto y corrige.',
   reviewer_missing: 'Workflow V2 necesita una revisión, pero el proyecto no tiene revisor configurado (reviewerConfig).',
   checks_failed: 'Las comprobaciones de Workflow V2 fallaron en el sandbox; no se lanzó ninguna revisión.',
-  blocked: 'Workflow V2 quedó bloqueado por un fallo operativo; no es un rechazo del producto.',
+  blocked: 'Workflow V2 quedó bloqueado por un fallo operativo; no es un rechazo del producto. Corrige la causa, desbloquéalo en V2 (wfv2 unblock) y pulsa Reintentar: se reenvía el mismo candidato, sin volver a lanzar agentes.',
   unexpected: 'Workflow V2 devolvió un estado que el Centro no reconoce.',
 };
 
-// Runs `wfv2 submit` on the checkout, reports the reviewer stage and always ends by throwing:
-// in phase A a governed job stops here for the owner.
+// With "ownerDecision": "github", a V2 summary in which every required review recommends accepting stands in
+// for the owner's V2 approval: the binding the integration is tied to. Null otherwise. Pure.
+export function githubRecommendation(entry, summary, prior) {
+  if (entry?.ownerDecision !== 'github' || !entry.integrateAfterApproval) return null;
+  const reviews = Array.isArray(summary?.reviews) ? summary.reviews : [];
+  const accepts = reviews.length > 0 && reviews.every(review => review?.recommendation === 'ACCEPT');
+  if (!accepts || !['pendiente_owner', 'revision', 'aprobado'].includes(summary?.status)) return null;
+  const identity = summary.identity ?? prior?.identity, evidenceId = summary.evidence_id ?? prior?.evidenceId;
+  if (typeof identity !== 'string' || !identity || typeof evidenceId !== 'string' || !evidenceId || !HEX64.test(prior?.candidate ?? '') || !HEX64.test(prior?.qaSnapshot ?? '')) return null;
+  if ((prior.identity && prior.identity !== identity) || (prior.evidenceId && prior.evidenceId !== evidenceId)) return null;
+  const binding = { task: prior.task, identity, evidenceId, candidate: prior.candidate, qaSnapshot: prior.qaSnapshot };
+  return { binding, record: { ...prior, ...binding, outcome: 'recommended', decision: 'github', status: String(summary.status) },
+    summary: `Workflow V2 recomienda aceptar (tarea ${prior.task}${summary.tier ? `, nivel ${summary.tier}` : ''}). Tu decisión es la PR: fusiónala si te convence o ciérrala para rechazar. El Centro no la fusiona.` };
+}
+
+// Runs `wfv2 submit` on the checkout and reports the reviewer stage. It ends by throwing (the job stops for the
+// owner), except with the decision on GitHub, where a recommendation to accept returns the binding to integrate.
 export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defaultRun } = {}) {
   const task = buildV2Task(job, entry);
   await ctx.reportStage?.({ key: 'reviewer', status: 'running', summary: `Workflow V2: enviando el candidato (tarea ${task.id}).`, workflowV2: { task: task.id } });
@@ -168,7 +193,8 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
     const taskFile = path.join(temp, 'task.json');
     await fs.writeFile(taskFile, JSON.stringify(task, null, 2));
     const argv = [entry.python, '-m', 'wfv2.cli', '--repo', entry.stateRoot, 'submit', task.id,
-      '--worktree', workspace, '--task-file', taskFile, ...(entry.reviewerConfig ? ['--reviewer-config', entry.reviewerConfig] : [])];
+      '--worktree', workspace, '--task-file', taskFile, ...(entry.reviewerConfig ? ['--reviewer-config', entry.reviewerConfig] : []),
+      ...(entry.pythonEnv ? ['--python-env', entry.pythonEnv] : [])];
     result = await run(argv, { cwd: entry.engineeringSystem, timeoutMs: entry.timeoutMs, signal: ctx.signal });
   } catch (error) {
     await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: 'No se pudo ejecutar Workflow V2.', error: 'workflow_v2_unavailable' });
@@ -201,6 +227,12 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
   const workflowV2 = { task: task.id, outcome, status: summary.status, tier: summary.tier ?? null, candidate, qaSnapshot: job.workflowV2Snapshot ?? null,
     identity: summary.identity ?? null, evidenceId: summary.evidence_id ?? null, reviews: summary.reviews ?? [],
     blockedReason: summary.blocked_reason ?? null, next: summary.next ?? null };
+  // Decision on GitHub: V2's recommendation to accept is enough to open the PR; the owner decides by merging it.
+  const recommendation = githubRecommendation(entry, summary, workflowV2);
+  if (recommendation) {
+    await ctx.reportStage?.({ key: 'reviewer', status: 'succeeded', summary: recommendation.summary, workflowV2: recommendation.record });
+    return recommendation.binding;
+  }
   const line = [MESSAGES[entry.integrateAfterApproval && outcome === 'owner_pending' ? 'owner_pending_b' : outcome], summary.tier ? `Nivel ${summary.tier}.` : '', summary.blocked_reason ? `Motivo: ${summary.blocked_reason}.` : '',
     summary.next ? `Siguiente: ${summary.next}` : ''].filter(Boolean).join(' ');
   await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: line.slice(0, 1000), error: code, workflowV2 });
@@ -247,6 +279,14 @@ export async function resolveWorkflowV2Approval(job, ctx, entry, prior, { run = 
     const error = new ProviderError('workflow_v2_identity_mismatch', 'Workflow V2 devolvió el estado de otra tarea.', { uncertain: true });
     await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code, workflowV2: record('identity_mismatch') });
     throw error;
+  }
+  const recommended = githubRecommendation(entry, status, prior);
+  if (recommended && status.status !== 'aprobado') {
+    if (job.workflow?.steps?.find(step => step.key === 'reviewer')?.status !== 'succeeded') {
+      await ctx.reportStage?.({ key: 'reviewer', status: 'running', summary: `Workflow V2: comprobando la recomendación (tarea ${prior.task}).` });
+    }
+    await ctx.reportStage?.({ key: 'reviewer', status: 'succeeded', summary: recommended.summary, workflowV2: recommended.record });
+    return recommended.binding;
   }
   if (status.status === 'aprobado') {
     if (!('identity' in status) || !('evidence_id' in status)) {
@@ -297,11 +337,36 @@ export async function bindWorkflowV2Approval(job, approval, { previous, persist 
   return record;
 }
 
+// Phase B: a job the owner resumed after approving in V2 is admitted again with its candidate still
+// uncommitted in the checkout, so admission must not demand a clean tree. Integration later checks
+// that the checkout is exactly the QA snapshot V2 reviewed. Pure.
+export function workflowV2Readmissible(job) {
+  if (job?.state !== 'queued' || job.kind !== 'code') return false;
+  const steps = job.workflow?.steps ?? [];
+  const reviewer = steps.find(step => step.key === 'reviewer'), v2 = reviewer?.workflowV2;
+  // A resubmission (V2 blocked before producing evidence) carries the same uncommitted candidate but no evidence yet.
+  const evidenceless = reviewer?.status === 'blocked' && reviewer.error === 'workflow_v2_blocked' && !v2?.evidenceId && !(v2?.reviews?.length);
+  return Boolean(v2?.task && v2.identity && (v2.evidenceId || evidenceless) && HEX64.test(v2.qaSnapshot ?? '') && HEX64.test(v2.candidate ?? '')
+    && steps.find(step => step.key === 'qa')?.status === 'succeeded');
+}
+
 // Phase B: whether a stopped job can be resumed to read the owner's V2 approval and integrate. Pure.
 // Either the job stopped waiting for the owner, or the approval was already seen and the integration
 // step stopped (interrupted by a restart, or blocked); integration resumes from its own record.
 const RESUMABLE_V2_STOPS = new Set(['workflow_v2_owner_pending', 'workflow_v2_unavailable']);
+// V2 stopped before producing any evidence (an operational block, e.g. a check without its Python environment) and
+// the owner unblocked it: the same candidate is submitted again. No review exists yet, so nothing can be repeated.
+export function workflowV2Resubmittable(job) {
+  if (job?.state !== 'needs_attention' || job.kind !== 'code') return false;
+  const steps = job.workflow?.steps ?? [];
+  const reviewer = steps.find(step => step.key === 'reviewer'), integration = steps.find(step => step.key === 'integration');
+  const v2 = reviewer?.workflowV2;
+  return reviewer?.status === 'blocked' && reviewer.error === 'workflow_v2_blocked' && Boolean(v2?.task) && !v2.evidenceId && !(v2.reviews?.length)
+    && HEX64.test(v2.qaSnapshot ?? '') && steps.find(step => step.key === 'qa')?.status === 'succeeded'
+    && (!integration || integration.status === 'queued');
+}
 export function workflowV2Resumable(job) {
+  if (workflowV2Resubmittable(job)) return true;
   if (job?.state !== 'needs_attention' || job.kind !== 'code') return false;
   const steps = job.workflow?.steps ?? [];
   const reviewer = steps.find(step => step.key === 'reviewer'), integration = steps.find(step => step.key === 'integration');
@@ -310,4 +375,129 @@ export function workflowV2Resumable(job) {
   if (steps.find(step => step.key === 'qa')?.status !== 'succeeded') return false;
   if (reviewer.status === 'blocked') return RESUMABLE_V2_STOPS.has(reviewer.error) && (!integration || integration.status === 'queued');
   return reviewer.status === 'succeeded' && v2.outcome === 'approved' && integration?.status === 'blocked' && !integration.dispatchId;
+}
+
+// ---- The owner's decision, seen from the panel (read-only) ----
+//
+// The Centro never records a V2 verdict: approval stays a typed confirmation of the owner in the
+// terminal. The panel shows what V2 waits for, the exact command for this state and the files of
+// the candidate, and refuses a retry that could only find the same stop (it spent an attempt).
+
+const shellQuote = value => /^[A-Za-z0-9._/+:=@-]+$/.test(value) ? value : `'${String(value).replace(/'/g, `'\\''`)}'`;
+
+// What the owner does next in V2 for this status. Pure.
+export function nextV2Step(entry, task, summary) {
+  const base = `cd ${shellQuote(entry.engineeringSystem)} && ${entry.python} -m wfv2.cli --repo ${shellQuote(entry.stateRoot)}`;
+  const status = String(summary?.status ?? '');
+  const required = Array.isArray(summary?.required_reviews) ? summary.required_reviews.map(String) : [];
+  const accepted = new Set(Array.isArray(summary?.accepted) ? summary.accepted.map(String) : []);
+  const reviewed = new Set((Array.isArray(summary?.reviews) ? summary.reviews : []).map(review => String(review?.role ?? '')));
+  if (entry.ownerDecision === 'github' && ['pendiente_owner', 'revision', 'aprobado'].includes(status)) {
+    return { action: 'github', text: 'En este proyecto decides en GitHub: fusiona la PR si te convence o ciérrala para rechazar. No hace falta aprobar en V2.' };
+  }
+  switch (status) {
+    case 'pendiente_owner':
+      return { action: 'approve', text: 'Las revisiones obligatorias están aceptadas: falta tu aprobación final de la tarea. Si no te convence, usa reject.', command: `${base} approve ${task}` };
+    case 'revision': {
+      const role = required.find(item => !accepted.has(item) && reviewed.has(item) && /^[a-z0-9_-]+$/.test(item));
+      return role
+        ? { action: 'verdict', text: `Lee la revisión «${role}» y registra tu veredicto (accepted o rejected).`, command: `${base} verdict ${task} ${role} accepted` }
+        : { action: 'wait', text: 'V2 espera una revisión que todavía no existe; consulta su estado.', command: `${base} status ${task}` };
+    }
+    case 'bloqueado':
+      return { action: 'unblock', text: 'V2 está bloqueado por un fallo operativo: corrige la causa y desbloquéalo; después pulsa Reintentar.', command: `${base} unblock ${task}` };
+    case 'preparacion':
+      return { action: 'retry', text: 'Desbloqueada: pulsa Reintentar y el Centro reenviará el mismo candidato.' };
+    case 'aprobado':
+      return { action: 'integrate', text: 'Aprobada por ti: pulsa Integrar y el Centro integrará solo este candidato.' };
+    default:
+      return { action: 'none', text: `Estado «${status.slice(0, 40)}»: resuélvelo en V2.`, command: `${base} status ${task}` };
+  }
+}
+
+// Live V2 status of the task recorded on the reviewer step, or null when the job is not governed by V2.
+export async function workflowV2Live(root, job, { run = defaultRun } = {}) {
+  const task = job?.workflow?.steps?.find(step => step.key === 'reviewer')?.workflowV2?.task;
+  if (typeof task !== 'string' || !task) return null;
+  const entry = await workflowV2For(root, job);
+  if (!entry) return null;
+  const unavailable = detail => ({ task, available: false, error: `No se pudo consultar Workflow V2: ${detail}`.slice(0, 300) });
+  let result;
+  try { result = await run([entry.python, '-m', 'wfv2.cli', '--repo', entry.stateRoot, 'status', task], { cwd: entry.engineeringSystem, timeoutMs: 30_000 }); }
+  catch (error) { return unavailable(excerpt(error.message)); }
+  if (result.timedOut || result.code !== 0) return unavailable(result.timedOut ? 'se agotó el tiempo' : excerpt(result.stderr.trim().split('\n').at(-1) ?? '') || `salida ${result.code}`);
+  let summary;
+  try { summary = JSON.parse(result.stdout); } catch { return unavailable('la salida no es JSON'); }
+  if (summary?.task !== task) return unavailable('devolvió el estado de otra tarea');
+  const list = value => Array.isArray(value) ? value.map(item => String(item).slice(0, 40)) : [];
+  return { task, available: true, status: String(summary.status ?? ''), tier: summary.tier ?? null,
+    required: list(summary.required_reviews), accepted: list(summary.accepted),
+    reviews: (Array.isArray(summary.reviews) ? summary.reviews : []).slice(0, 10).map(review => ({ role: String(review?.role ?? ''),
+      recommendation: String(review?.recommendation ?? ''), isolation: String(review?.isolation ?? '') })),
+    blockedReason: summary.blocked_reason ? excerpt(String(summary.blocked_reason)) : null, next: nextV2Step(entry, task, summary) };
+}
+
+// A retry that would only meet the same V2 stop is refused before touching the queue. Pure.
+export function workflowV2RetryRefusal(job, live) {
+  if (!live?.available) return null;
+  const reviewer = job?.workflow?.steps?.find(step => step.key === 'reviewer');
+  if (reviewer?.status !== 'blocked') return null;
+  const command = live.next?.command ? ` Comando: ${live.next.command}` : '';
+  if (reviewer.error === 'workflow_v2_owner_pending' && live.status !== 'aprobado') {
+    return `Falta tu decisión en Workflow V2 (estado: ${live.status}). ${live.next.text}${command} No se ha gastado ningún intento.`;
+  }
+  if (reviewer.error === 'workflow_v2_blocked' && live.status === 'bloqueado') {
+    return `Workflow V2 sigue bloqueado. ${live.next.text}${command} No se ha gastado ningún intento.`;
+  }
+  return null;
+}
+
+const BINARY = /\.(png|jpe?g|gif|webp|ico|bmp|tiff?|pdf|zip|gz|tgz|bz2|xz|7z|rar|mp[34]|mov|webm|wav|ogg|woff2?|ttf|otf|eot|sqlite3?|db|bin|exe|dll|so|dylib|pyc|class|jar)$/i;
+const CHANGE = { '??': 'nuevo', A: 'nuevo', M: 'modificado', D: 'borrado', R: 'renombrado', C: 'copiado', T: 'modificado', U: 'en conflicto' };
+// The files of the uncommitted candidate in the checkout (read-only `git status`), new binaries flagged.
+export async function candidateFiles(workspace, { run = defaultRun, limit = 500 } = {}) {
+  if (typeof workspace !== 'string' || !path.isAbsolute(workspace)) return { files: [], error: 'Sin checkout.' };
+  let result;
+  try { result = await run(['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: workspace, timeoutMs: 30_000 }); }
+  catch (error) { return { files: [], error: excerpt(error.message) }; }
+  if (result.timedOut || result.code !== 0) return { files: [], error: excerpt(result.stderr.trim()) || 'git status falló.' };
+  const entries = result.stdout.split('\0').filter(Boolean), files = [];
+  for (let index = 0; index < entries.length; index++) {
+    const code = entries[index].slice(0, 2), file = entries[index].slice(3);
+    if (code[0] === 'R' || code[0] === 'C') index++; // the origin path follows a rename or copy
+    const key = code === '??' ? '??' : (code[0] !== ' ' ? code[0] : code[1]);
+    files.push({ path: file, change: CHANGE[key] ?? 'modificado', binary: BINARY.test(file) });
+  }
+  return { files: files.slice(0, limit), total: files.length };
+}
+
+// Before any agent runs: a V2 misconfiguration used to surface only after UX, Development and QA
+// (Encargo 2 of home-finance lost 13 minutes of agents and half an hour of recovery). Checks the
+// paths and that `wfv2` starts; it cannot know which checks need the Python environment.
+export async function preflightWorkflowV2(entry, { run = defaultRun, stat = fs.stat } = {}) {
+  const problems = [];
+  const expect = async (target, kind, label) => {
+    try {
+      const info = await stat(target);
+      if (kind === 'dir' ? !info.isDirectory() : !info.isFile()) problems.push(`${label} no es ${kind === 'dir' ? 'una carpeta' : 'un archivo'} (${target})`);
+      return true;
+    } catch { problems.push(`no existe ${label} (${target})`); return false; }
+  };
+  const system = await expect(entry.engineeringSystem, 'dir', 'engineeringSystem');
+  await expect(entry.stateRoot, 'dir', 'stateRoot');
+  if (entry.reviewerConfig) await expect(entry.reviewerConfig, 'file', 'reviewerConfig');
+  if (entry.pythonEnv && await expect(entry.pythonEnv, 'dir', 'pythonEnv')) {
+    const found = await Promise.any(['bin/python', 'Scripts/python.exe'].map(name => stat(path.join(entry.pythonEnv, name)))).then(() => true, () => false);
+    if (!found) problems.push(`pythonEnv no contiene un intérprete (bin/python) (${entry.pythonEnv})`);
+  }
+  if (system) {
+    try {
+      const result = await run([entry.python, '-m', 'wfv2.cli', '--help'], { cwd: entry.engineeringSystem, timeoutMs: 30_000 });
+      if (result.timedOut || result.code !== 0) problems.push(`wfv2 no arranca: ${result.timedOut ? 'se agotó el tiempo' : excerpt(result.stderr.trim().split('\n').at(-1) ?? '') || `salida ${result.code}`}`);
+    } catch (error) { problems.push(`wfv2 no arranca: ${excerpt(error.message)}`); }
+  }
+  if (problems.length) {
+    throw new ProviderError('workflow_v2_preflight_failed',
+      `Workflow V2 no está listo para este proyecto; no se ha lanzado ningún agente. Corrige data/${WORKFLOW_V2_FILE}: ${problems.join('; ')}.`.slice(0, 900), { uncertain: false });
+  }
 }

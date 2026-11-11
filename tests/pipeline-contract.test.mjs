@@ -348,3 +348,398 @@ test('unavailable token measurements remain null and long legacy context is not 
   assert.match(handoffText({ text: 'X'.repeat(6606) + 'ACEPTACIÓN' }), /ACEPTACIÓN$/);
   assert.throws(() => handoffText({ text: 'X'.repeat(25000) }), /referencia/);
 });
+
+// Mixed pipeline (data/pipeline.json): each stage is launched with its own agent, model and effort.
+const mixedExample = () => fs.readFile(new URL('../ejemplos/pipeline.mixto.example.json', import.meta.url), 'utf8');
+const flagOf = (args, flag) => args.includes(flag) ? [args[args.indexOf(flag) + 1]] : [];
+const launchedWith = item => ['--agent', '--model', '--effort'].flatMap(flag => flagOf(item.args, flag)).join(' ');
+async function withDefaultAgent(t, agent) {
+  const previous = process.env.CENTRO_ORCA_AGENT;
+  if (agent === undefined) delete process.env.CENTRO_ORCA_AGENT; else process.env.CENTRO_ORCA_AGENT = agent;
+  t.after(() => { if (previous === undefined) delete process.env.CENTRO_ORCA_AGENT; else process.env.CENTRO_ORCA_AGENT = previous; });
+}
+
+for (const [business, design] of [['agency', 'claude sonnet medium'], ['games', 'claude sonnet high']]) {
+  test(`mixed profile in ${business}: Claude runs Diseño and Desarrollo, Codex runs QA and Revisión, and each stage records it`, async t => {
+    await withDefaultAgent(t, undefined);
+    const f = await fixture(t);
+    await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+    await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+    await addJob(f.root, { ...f.spec, business });
+    const simulator = fakeOrca(f.workspace);
+    await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+    const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+    assert.deepEqual(simulator.started.map(launchedWith), [design, design, 'codex gpt-6.1-sol medium', 'codex gpt-6.1-sol high']);
+    assert.deepEqual(job.workflow.steps.filter(step => step.launch).map(step => `${step.key}:${step.orcaAgent}:${step.launch.source}`),
+      business === 'games' ? ['ux:claude:empresa', 'developer:claude:empresa', 'qa:codex:general', 'reviewer:codex:general'] : ['ux:claude:general', 'developer:claude:general', 'qa:codex:general', 'reviewer:codex:general']);
+    // Only Claude workers get the Claude-specific COMMANDS line of the brief.
+    assert.deepEqual(simulator.started.map(item => /COMANDOS: /.test(item.launchInput)), [true, true, false, false]);
+  });
+}
+
+test('a native retry keeps the agent, model and effort recorded at launch after the configuration changes', async t => {
+  await withDefaultAgent(t, undefined);
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  const file = path.join(f.root, 'data', 'pipeline.json');
+  await fs.writeFile(file, await mixedExample());
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => {
+    const value = await simulator.command(args);
+    if (simulator.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (simulator.started.length === 1 && args[1] === 'inbox') { const payload = JSON.parse(value.messages[0].payload); payload.outcome = 'failed'; value.messages[0].payload = JSON.stringify(payload); }
+    return value;
+  };
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const failed = (await loadState(f.root)).jobs[0]; assert.equal(failed.state, 'needs_attention');
+  assert.equal(launchedWith(simulator.started[0]), 'claude sonnet medium');
+  // The operator moves Diseño to Codex and QA to Claude before retrying.
+  const changed = JSON.parse(await mixedExample());
+  changed.general.roles.ux = { agent: 'codex', model: 'gpt-6-luna', effort: 'high' };
+  changed.general.roles.qa = { agent: 'claude', model: 'haiku' };
+  await fs.writeFile(file, JSON.stringify(changed));
+  await retryJob(f.root, failed.id, { confirm: true });
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  const retry = simulator.started[1];
+  assert.equal(retry.args[retry.args.indexOf('--retry-of') + 1], simulator.started[0].dispatchId);
+  assert.equal(launchedWith(retry), 'claude sonnet medium', 'the same Task keeps its recorded launch');
+  assert.equal(done.workflow.steps[0].launch.recovered, true);
+  assert.equal(launchedWith(simulator.started[3]), 'claude haiku', 'stages not launched yet use the configuration in force');
+  assert.equal(simulator.started.length, 5, 'one retry and no duplicated worker');
+});
+
+test('an invalid data/pipeline.json stops the stage before any worker starts, without an uncertain dispatch', async t => {
+  await withDefaultAgent(t, undefined);
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), JSON.stringify({ version: 1, general: { roles: { ux: { model: 'sonnet' } } } }));
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const job = (await loadState(f.root)).jobs[0];
+  assert.equal(job.state, 'needs_attention'); assert.equal(job.error.code, 'pipeline_config_invalid');
+  assert.equal(simulator.started.length, 0);
+  // Fixing the file and retrying launches normally.
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+  await retryJob(f.root, job.id, { confirm: true });
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded');
+  assert.equal(simulator.started.length, 4);
+});
+
+// Routes (job-route.mjs): only Diseño can be left out, always with a visible reason.
+const functional = { id: 'funcional', reason: 'Solo cambia un cálculo del servidor; no hay interfaz que diseñar.' };
+
+test('a functional route runs Desarrollo, QA and Revisión, keeps Diseño as skipped with its reason and tells Desarrollo why', async t => {
+  const f = await fixture(t);
+  await assert.rejects(addJob(f.root, { ...f.spec, route: { id: 'funcional' } }), { code: 'job_route_invalid', message: /indica el motivo/ });
+  await assert.rejects(addJob(f.root, { ...f.spec, route: { id: 'solo-desarrollo', reason: 'Es trivial' } }), { code: 'job_route_invalid' });
+  await assert.rejects(addJob(f.root, { ...f.spec, id: 'analisis', kind: 'analysis', workspace: undefined, isolated: undefined, route: functional }), { code: 'job_route_invalid', message: /solo aplica a trabajos de código/ });
+  const added = await addJob(f.root, { ...f.spec, route: functional });
+  assert.deepEqual(added.workflow.steps.map(step => `${step.key}:${step.status}`), ['ux:skipped', 'developer:queued', 'qa:queued', 'reviewer:queued']);
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+  assert.deepEqual(simulator.started.map(item => item.stage), ['developer', 'qa', 'reviewer']);
+  assert.deepEqual(job.workflow.steps.map(step => step.status), ['skipped', 'succeeded', 'succeeded', 'succeeded']);
+  assert.equal(job.workflow.steps[0].routeOmitted, true);
+  assert.match(job.workflow.steps[0].summary, /Omitida por la ruta «Cambio funcional sin interfaz»: Solo cambia un cálculo/);
+  assert.match(simulator.started[0].input, /Sin etapa de Diseño\. Omitida por la ruta/);
+  assert.match(simulator.started[0].input, /consúltala al coordinador/);
+  assert.equal(simulator.started[0].args.includes('--deps'), false, 'Desarrollo has no predecessor Task to depend on');
+  assert.equal(job.result.stages.ux, null);
+});
+
+test('a job without a route is exactly the full route, and a documentation route checks documentation', async t => {
+  const f = await fixture(t);
+  const plain = await addJob(f.root, f.spec);
+  assert.equal(Object.hasOwn(plain, 'route'), false);
+  assert.deepEqual(plain.workflow.steps.map(step => step.status), ['queued', 'queued', 'queued', 'queued']);
+  const docs = await fixture(t); // the simulator answers for one fixed job id, so each job gets its own root
+  await addJob(docs.root, { ...docs.spec, route: { id: 'documentacion', reason: 'Solo se actualiza la guía de instalación.' } });
+  const simulator = fakeOrca(docs.workspace);
+  await runQueue(docs.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const documented = (await loadState(docs.root)).jobs[0]; assert.equal(documented.state, 'succeeded', JSON.stringify(documented.error));
+  assert.deepEqual(simulator.started.map(item => item.stage), ['developer', 'qa', 'reviewer']);
+  assert.match(simulator.started[0].input, /Edita la documentación que pide el encargo/);
+  assert.match(simulator.started[1].input, /Valida la documentación sin editarla/);
+  assert.match(simulator.started[2].input, /revisión independiente/, 'Revisión is the same in every route');
+});
+
+test('a scope change adds Diseño before Desarrollo has an assignment, records who and why, and is refused afterwards', async t => {
+  const { addJobStage } = await import('../queue.mjs');
+  const f = await fixture(t);
+  await addJob(f.root, { ...f.spec, route: functional });
+  await assert.rejects(addJobStage(f.root, f.spec.id, { stage: 'qa', reason: 'Añadir QA' }), { code: 'job_route_invalid', message: /QA y Revisión siempre/ });
+  await assert.rejects(addJobStage(f.root, f.spec.id, { stage: 'ux' }), /por qué cambia el alcance/);
+  const changed = await addJobStage(f.root, f.spec.id, { stage: 'ux', reason: 'Ahora también cambia el formulario de alta.' });
+  assert.deepEqual(changed.workflow.steps.map(step => `${step.key}:${step.status}`), ['ux:queued', 'developer:queued', 'qa:queued', 'reviewer:queued']);
+  assert.deepEqual(changed.route.omitted, []);
+  assert.equal(changed.route.added[0].reason, 'Ahora también cambia el formulario de alta.');
+  assert.equal(changed.workflow.steps[0].addedByScopeChange.stage, 'ux');
+  await assert.rejects(addJobStage(f.root, f.spec.id, { stage: 'ux', reason: 'Otra vez el mismo cambio' }), { code: 'job_route_stage_present' });
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  assert.deepEqual(simulator.started.map(item => item.stage), ['ux', 'developer', 'qa', 'reviewer']);
+  assert.equal((await loadState(f.root)).jobs[0].state, 'succeeded');
+  // Once Desarrollo has been assigned, the route is closed.
+  const g = await fixture(t);
+  await addJob(g.root, { ...g.spec, route: functional });
+  const failing = fakeOrca(g.workspace);
+  const command = async args => {
+    const value = await failing.command(args);
+    if (failing.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (failing.started.length === 1 && args[1] === 'inbox') { const payload = JSON.parse(value.messages[0].payload); payload.outcome = 'failed'; value.messages[0].payload = JSON.stringify(payload); }
+    return value;
+  };
+  await runQueue(g.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  assert.equal((await loadState(g.root)).jobs[0].state, 'needs_attention');
+  await assert.rejects(addJobStage(g.root, g.spec.id, { stage: 'ux', reason: 'Tarde para añadir diseño' }), { code: 'job_route_locked' });
+  // A retry of that job keeps Diseño omitted and repeats only the failed Desarrollo Task.
+  await retryJob(g.root, g.spec.id, { confirm: true });
+  await assert.rejects(addJobStage(g.root, g.spec.id, { stage: 'ux', reason: 'Tarde para añadir diseño' }), { code: 'job_route_locked' }, 'a native retry reuses a brief written without a design');
+  await runQueue(g.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const retried = (await loadState(g.root)).jobs[0];
+  assert.equal(retried.state, 'succeeded', JSON.stringify(retried.error));
+  assert.deepEqual(retried.workflow.steps.map(step => step.status), ['skipped', 'succeeded', 'succeeded', 'succeeded']);
+  assert.deepEqual(failing.started.map(item => item.stage), ['developer', 'developer', 'qa', 'reviewer']);
+});
+
+test('the integration proof of a route without Diseño covers its real stages and still demands every one of them', async () => {
+  const { integrationValidationSteps } = await import('../queue.mjs');
+  const { validateJobRoute } = await import('../job-route.mjs');
+  const step = key => ({ key, status: 'succeeded', runId: 'run_fixture1', taskId: `task_${key}0001`, dispatchId: `ctx_${key}0001`, taskInputAttempt: 1, artifact: { sha256: 'a'.repeat(64) } });
+  const steps = [{ key: 'ux', status: 'skipped', routeOmitted: true, summary: 'Omitida' }, step('developer'), step('qa'), step('reviewer')];
+  const job = { route: validateJobRoute(functional, 'code'), workflow: { runId: 'run_fixture1', steps } };
+  assert.deepEqual(integrationValidationSteps(job).map(item => item.stage), ['developer', 'qa', 'reviewer']);
+  assert.throws(() => integrationValidationSteps({ ...job, route: undefined }), { code: 'integration_recovery_invalid' }, 'a skipped Diseño is only acceptable when the route says so');
+  assert.throws(() => integrationValidationSteps({ ...job, workflow: { ...job.workflow, steps: steps.filter(item => item.key !== 'qa') } }), { code: 'integration_recovery_invalid' });
+});
+
+// Skills (skills-registry.mjs): supplied by the Centro to either provider, recorded per stage.
+test('each stage of a web job receives its skills, records them as supplied and records separately what the worker says it consulted', async t => {
+  const f = await fixture(t); await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace, (result, started) => { if (started.at(-1).stage === 'qa') result.evidence = ['skill:web-testing recorrido a 320 px', 'skill:frontend-design']; });
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+  const supplied = Object.fromEntries(job.workflow.steps.map(step => [step.key, (step.skills ?? []).map(skill => skill.id)]));
+  assert.deepEqual(supplied, { ux: ['frontend-design', 'impeccable'], developer: ['frontend-design', 'web-testing', 'ponytail', 'impeccable'], qa: ['web-testing', 'impeccable'], reviewer: ['web-testing', 'ponytail', 'impeccable'] });
+  const step = key => job.workflow.steps.find(item => item.key === key);
+  assert.deepEqual(step('qa').skillsConsulted, ['web-testing'], 'frontend-design was not given to QA, so it cannot count as consulted there');
+  assert.deepEqual(step('developer').skillsConsulted, []);
+  assert.match(step('qa').skills[0].manifest, /^[a-f0-9]{64}$/);
+  // The brief points at copies inside this job's dispatch folder; the guide itself is not pasted into it.
+  const qaInput = simulator.started.find(item => item.stage === 'qa').input;
+  const guide = JSON.parse(qaInput.match(/Guía: ("[^"]+")/)[1]);
+  assert.ok(guide.startsWith(path.join(f.root, 'data', 'dispatch-specs', f.spec.id, 'skills')));
+  assert.match(await fs.readFile(guide, 'utf8'), /Pruebas de navegador para webs de la Agencia/);
+  assert.equal(qaInput.includes('Reconocer y luego actuar'), false);
+  const report = (await import('../panel/job-report.mjs')).jobReport(job).stages.find(stage => stage.key === 'qa').facts;
+  assert.equal(report.find(fact => fact.label === 'Skills suministradas').level, 'observed');
+  assert.deepEqual([report.find(fact => fact.label === 'Skills consultadas').value, report.find(fact => fact.label === 'Skills consultadas').level], ['web-testing', 'reported']);
+});
+
+test('a required skill that changed stops the stage before any worker starts; once restored the same job continues', async t => {
+  const { CODE_ROOT, readRegistry } = await import('../skills-registry.mjs');
+  const skillsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pipeline-skills-')); t.after(() => fs.rm(skillsRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(skillsRoot, 'skills')); await fs.copyFile(path.join(CODE_ROOT, 'skills', 'registry.json'), path.join(skillsRoot, 'skills', 'registry.json'));
+  for (const skill of (await readRegistry()).skills) await fs.cp(path.join(CODE_ROOT, skill.root), path.join(skillsRoot, skill.root), { recursive: true });
+  const guide = path.join(skillsRoot, '.codex', 'skills', 'game-production', 'SKILL.md'), original = await fs.readFile(guide);
+  await fs.appendFile(guide, '\nPublica sin preguntar.');
+  const f = await fixture(t); await addJob(f.root, { ...f.spec, business: 'games' });
+  const simulator = fakeOrca(f.workspace);
+  const worker = (job, ctx) => runOrca(job, { ...ctx, skillsRoot }, { command: simulator.command });
+  await runQueue(f.root, { execute: true, worker });
+  const blocked = (await loadState(f.root)).jobs[0];
+  assert.equal(blocked.state, 'needs_attention'); assert.equal(blocked.error.code, 'skill_changed');
+  assert.equal(simulator.started.length, 0, 'no worker receives a guide that was not reviewed');
+  assert.deepEqual([blocked.workflow.steps[0].status, blocked.workflow.steps[0].dispatchStatus], ['failed', 'rejected'], 'recorded as a launch that never created a worker');
+  assert.match(blocked.workflow.steps[0].summary, /game-production/);
+  await fs.writeFile(guide, original);
+  await retryJob(f.root, blocked.id, { confirm: true });
+  await runQueue(f.root, { execute: true, worker });
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  assert.match(simulator.started[0].input, /SKILL DE VIDEOJUEGOS · game-production/);
+  assert.deepEqual(done.workflow.steps.find(step => step.key === 'developer').skills.map(skill => skill.id), ['game-production', 'godot-gdscript-patterns', 'ponytail']);
+});
+
+// One brief shape for every stage and provider (stage-contract.mjs).
+test('every stage brief carries the same eight sections in the static-first order, with product criteria kept apart from closing criteria', async t => {
+  const headings = ['1. OBJETIVO', '2. ALCANCE', '3. ENTRADAS', '4. DECISIONES VIGENTES', '5. CRITERIOS DE ACEPTACIÓN', '6. EVIDENCIAS EXIGIDAS', '7. DEVOLUCIÓN Y ESCALADO', '8. ENTREGABLES'];
+  for (const [business, kind] of [['agency', 'code'], ['games', 'code'], ['agency', 'analysis']]) {
+    await withDefaultAgent(t, business === 'games' ? 'claude' : undefined);
+    const f = await fixture(t);
+    await fs.mkdir(path.join(f.root, 'data', 'contracts', 'global'), { recursive: true });
+    await fs.writeFile(path.join(f.root, 'data', 'contracts', 'global', 'qa.md'), 'Comprueba siempre el modo oscuro.');
+    await addJob(f.root, kind === 'code' ? { ...f.spec, business } : { id: f.spec.id, business, kind, provider: 'orca', title: 'Plan', prompt: 'Objetivo: planificar. Criterio: comportamiento verificado.' });
+    const simulator = fakeOrca(f.workspace);
+    await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+    const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+    assert.equal(simulator.started.length, kind === 'code' ? 4 : 1);
+    for (const started of simulator.started) {
+      const positions = headings.map(heading => started.input.indexOf(`== ${heading} ==`));
+      assert.ok(positions.every(position => position >= 0), `${business} ${started.stage}: ${positions}`);
+      // Static-first order (STATIC_FIRST_ORDER in stage-contract.mjs): headings keep their numbers, the stable
+      // role parts come first and the inputs that change every round come just before the delivery format.
+      const staticFirst = [5, 1, 0, 3, 4, 6, 2, 7];
+      assert.deepEqual(staticFirst.map(index => positions[index]), [...positions].sort((a, b) => a - b), `${business} ${started.stage}: sections in static-first order`);
+      const section = heading => started.input.slice(started.input.indexOf(`== ${heading} ==`), started.input.indexOf('== ', started.input.indexOf(`== ${heading} ==`) + 4));
+      assert.match(section('5. CRITERIOS DE ACEPTACIÓN'), /criterios de cierre: los acredita el motor después/);
+      assert.match(started.input.slice(positions[7]), /CONTRATO DE ENTREGA v1/, 'the delivery format is the last thing the worker reads');
+      assert.ok(started.input.indexOf('PERFIL EXISTENTE') < positions[0]);
+      assert.match(section('2. ALCANCE'), kind === 'code' ? /No hagas commit, push, merge/ : /no cambies código ni archivos/);
+    }
+    // The role contract that applied is recorded on its stage with its fingerprint.
+    const qa = job.workflow.steps.find(step => step.key === 'qa');
+    // The Agency's shared contract (contratos/empresa-agency/qa.md) comes after the global layer; games has none.
+    if (qa) assert.deepEqual(qa.contracts.map(item => `${item.scope}:${item.path}`), business === 'agency' ? ['global:data/contracts/global/qa.md', 'empresa-agency:contratos/empresa-agency/qa.md'] : ['global:data/contracts/global/qa.md']);
+    if (qa) assert.match(qa.contracts[0].sha256, /^[a-f0-9]{64}$/);
+  }
+});
+
+// Quota and provider failures (quota.mjs, admission-gate.mjs, failure-taxonomy.mjs).
+const hoursFromNow = hours => new Date(Date.now() + hours * 3_600_000).toISOString();
+async function writeQuotaFile(root, providers, policy = {}) {
+  await fs.mkdir(path.join(root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(root, 'data', 'quota.json'), JSON.stringify({ version: 1, ...policy, proveedores: providers }));
+}
+const observed = (usadoPorcentaje, extra = {}) => ({ autenticacion: 'suscripcion', usadoPorcentaje, observadoEn: new Date().toISOString(), ...extra });
+
+test('a job whose provider is inside the personal reserve waits without starting, without a worker and without spending an attempt', async t => {
+  await withDefaultAgent(t, undefined);
+  const { diagnoseJob } = await import('../failure-taxonomy.mjs');
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+  const reset = hoursFromNow(3);
+  await writeQuotaFile(f.root, { claude: observed(93, { reiniciaEn: reset }), codex: observed(20) });
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const run = () => runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  assert.deepEqual((await run()).jobs, []);
+  const waiting = (await loadState(f.root)).jobs[0];
+  assert.deepEqual([waiting.state, waiting.attempts, simulator.started.length], ['queued', 0, 0]);
+  assert.deepEqual([waiting.waiting.code, waiting.waiting.provider, waiting.waiting.state, waiting.waiting.until], ['quota', 'claude', 'reserva', reset]);
+  assert.deepEqual([diagnoseJob(waiting).category, diagnoseJob(waiting).waiting], ['cuota', true]);
+  // Polling again records nothing new.
+  const revision = (await loadState(f.root)).revision;
+  await run(); assert.equal((await loadState(f.root)).revision, revision, 'the same wait is not written again on every cycle');
+  // The owner looks again after the reset: the job starts, the wait is cleared and each stage keeps the quota it was launched under.
+  await writeQuotaFile(f.root, { claude: observed(12), codex: observed(20) });
+  await run();
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  assert.equal(done.attempts, 1); assert.equal(Object.hasOwn(done, 'waiting'), false);
+  assert.deepEqual(done.workflow.steps.map(step => `${step.quota.provider}:${step.quota.state}:${step.quota.usadoPorcentaje}`), ['claude:disponible:12', 'claude:disponible:12', 'codex:disponible:20', 'codex:disponible:20']);
+});
+
+test('with the substitution policy a stage moves to the other subscription instead of waiting, and says so', async t => {
+  await withDefaultAgent(t, undefined);
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(f.root, 'data', 'pipeline.json'), await mixedExample());
+  await writeQuotaFile(f.root, { claude: observed(95), codex: observed(20) }, { alAgotar: 'sustituir', sustituciones: { claude: 'codex' } });
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: simulator.command }) });
+  const job = (await loadState(f.root)).jobs[0]; assert.equal(job.state, 'succeeded', JSON.stringify(job.error));
+  // Claude's model name does not travel: the substitute uses the level of that role in its own table.
+  assert.deepEqual(simulator.started.map(launchedWith), ['codex gpt-6.1-sol medium', 'codex gpt-6.1-sol medium', 'codex gpt-6.1-sol medium', 'codex gpt-6.1-sol high']);
+  const design = job.workflow.steps[0];
+  assert.deepEqual([design.orcaAgent, design.launch.source, design.launch.substitutedFrom.agent, design.launch.substitutedFrom.reason], ['codex', 'sustitución', 'claude', 'cuota']);
+  assert.equal(job.workflow.steps[2].launch.substitutedFrom, undefined, 'QA was Codex all along');
+  // If the substitute is not known to be available, nothing is substituted: the job waits.
+  const g = await fixture(t);
+  await fs.mkdir(path.join(g.root, 'data'), { recursive: true });
+  await fs.writeFile(path.join(g.root, 'data', 'pipeline.json'), await mixedExample());
+  await writeQuotaFile(g.root, { claude: observed(95), codex: { autenticacion: 'api', usadoPorcentaje: 5, observadoEn: new Date().toISOString() } }, { alAgotar: 'sustituir', sustituciones: { claude: 'codex' } });
+  await addJob(g.root, g.spec);
+  const other = fakeOrca(g.workspace);
+  await runQueue(g.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command: other.command }) });
+  assert.deepEqual([(await loadState(g.root)).jobs[0].waiting.provider, other.started.length], ['claude', 0], 'work is never moved onto paid API billing');
+});
+
+test('a worker stopped by its provider is not a product failure; the stage can then be handed to the other provider keeping what was done', async t => {
+  await withDefaultAgent(t, 'claude');
+  const { diagnoseJob } = await import('../failure-taxonomy.mjs');
+  const { readQuota, quotaStatus } = await import('../quota.mjs');
+  const f = await fixture(t);
+  await writeQuotaFile(f.root, { claude: observed(60), codex: observed(10) });
+  await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => {
+    const value = await simulator.command(args);
+    if (simulator.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (simulator.started.length === 1 && args[1] === 'inbox') { value.messages[0].payload = JSON.stringify({ ...JSON.parse(value.messages[0].payload), outcome: 'failed' }); value.messages[0].body = 'Claude usage limit reached. Your limit will reset later.'; }
+    return value;
+  };
+  const run = () => runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  await run();
+  const stopped = (await loadState(f.root)).jobs[0];
+  assert.deepEqual([stopped.state, stopped.error.code], ['needs_attention', 'provider_quota_exhausted'], JSON.stringify(stopped.error));
+  assert.match(stopped.error.message, /Deducido del texto, sin confirmar\. No es un fallo del producto/);
+  assert.equal(diagnoseJob(stopped).category, 'cuota');
+  const step = stopped.workflow.steps[0];
+  assert.deepEqual([step.status, step.dispatchStatus, step.dispatchSettled, step.providerSignal.inferred], ['failed', 'failed', true, true]);
+  const claude = quotaStatus(await readQuota(f.root), 'claude');
+  assert.deepEqual([claude.state, claude.inferida], ['agotada', true], 'no other stage is sent to that provider meanwhile');
+  // Substitution needs a reason, a different provider and a worker known to have finished.
+  await assert.rejects(retryJob(f.root, stopped.id, { confirm: true, substitute: 'claude', reason: 'El mismo proveedor' }), { code: 'substitution_invalid' });
+  await assert.rejects(retryJob(f.root, stopped.id, { confirm: true, substitute: 'codex' }), { code: 'substitution_invalid', message: /motivo/ });
+  await assert.rejects(retryJob(f.root, stopped.id, { confirm: true, substitute: 'gemini', reason: 'Otro proveedor' }), { code: 'substitution_invalid' });
+  const retried = await retryJob(f.root, stopped.id, { confirm: true, substitute: 'codex', reason: 'Claude sin cuota hasta la tarde.' });
+  assert.deepEqual([retried.workflow.steps[0].substitution.from, retried.workflow.steps[0].substitution.to, retried.workflow.steps[0].retryOf], ['claude', 'codex', undefined]);
+  // The remaining stages still resolve to Claude, which is exhausted: the job waits, and says which provider.
+  await run();
+  assert.equal((await loadState(f.root)).jobs[0].waiting?.provider, 'claude');
+  // Once the default moves to Codex for the rest, the substituted stage runs as a new Task that follows the old one.
+  process.env.CENTRO_ORCA_AGENT = 'codex';
+  await run();
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  const second = simulator.started[1];
+  assert.equal(second.args.includes('--retry-of'), false, 'a different provider cannot be a native retry of the same Task');
+  assert.equal(second.args[second.args.indexOf('--parent') + 1], simulator.started[0].taskId);
+  assert.equal(launchedWith(second).split(' ')[0], 'codex');
+  assert.match(second.input, /SUSTITUCIÓN DE PROVEEDOR: continúas la etapa de un trabajador anterior \(claude\)/);
+  assert.match(second.input, /Claude sin cuota hasta la tarde\./);
+  assert.equal(done.workflow.steps[0].launch.substitutedFrom.agent, 'claude');
+  assert.equal(simulator.started.length, 5, 'one failed worker, its substitute and the three later stages: nothing duplicated');
+});
+
+test('an uncertain dispatch can never be substituted: the same dispatch is consulted first', async t => {
+  const f = await fixture(t); await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => { if (args[1] === 'worker-start') throw Object.assign(new Error('socket hang up'), { code: 'orca_command_failed' }); return simulator.command(args); };
+  await runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }) });
+  const uncertain = (await loadState(f.root)).jobs[0];
+  assert.equal(uncertain.state, 'needs_attention'); assert.equal(uncertain.workflow.steps[0].dispatchStatus, 'unknown');
+  await assert.rejects(retryJob(f.root, uncertain.id, { confirm: true, substitute: 'claude', reason: 'Probar con el otro proveedor' }), error => ['dispatch_unknown', 'substitution_invalid', 'substitution_unconfirmed'].includes(error.code));
+  assert.equal((await loadState(f.root)).jobs[0].workflow.steps[0].substitution, undefined);
+});
+
+test('a provider that is temporarily unavailable stops the job as such; the retry repeats the same Task and never starts a second worker on its own', async t => {
+  const { diagnoseJob } = await import('../failure-taxonomy.mjs');
+  const f = await fixture(t); await addJob(f.root, f.spec);
+  const simulator = fakeOrca(f.workspace);
+  const command = async args => {
+    const value = await simulator.command(args);
+    if (simulator.started.length === 1 && args[1] === 'worker-show') value.state = 'failed';
+    if (simulator.started.length === 1 && args[1] === 'inbox') { value.messages[0].payload = JSON.stringify({ ...JSON.parse(value.messages[0].payload), outcome: 'failed' }); value.messages[0].body = 'API Error 529: the service is overloaded.'; }
+    return value;
+  };
+  const run = extra => runQueue(f.root, { execute: true, worker: (job, ctx) => runOrca(job, ctx, { command }), ...extra });
+  await run();
+  const stopped = (await loadState(f.root)).jobs[0];
+  assert.deepEqual([stopped.state, stopped.error.code], ['needs_attention', 'provider_unavailable'], JSON.stringify(stopped.error));
+  assert.equal(diagnoseJob(stopped).category, 'indisponible'); assert.match(diagnoseJob(stopped).action, /el candidato no ha cambiado/);
+  // Time passing does not relaunch it: this stage already has a worker in Orca.
+  await run({ now: Date.now() + 3_600_000 });
+  assert.equal(simulator.started.length, 1);
+  await retryJob(f.root, stopped.id, { confirm: true });
+  await run();
+  const done = (await loadState(f.root)).jobs[0]; assert.equal(done.state, 'succeeded', JSON.stringify(done.error));
+  const retry = simulator.started[1];
+  assert.equal(retry.args[retry.args.indexOf('--retry-of') + 1], simulator.started[0].dispatchId);
+  assert.equal(simulator.started.length, 5);
+});

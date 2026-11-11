@@ -54,6 +54,25 @@ export function githubRepository(origin) {
 export { sameRepository } from './repository-name.mjs';
 import { sameRepository } from './repository-name.mjs';
 
+// Turns a failed Git call of the destination check into the error a person can act on.
+// Two causes need no stderr reading: the repository is gone (or this account cannot see it), and the branch is not on
+// the remote (`ls-remote --exit-code` answers 2 with nothing on stderr).
+export function destinationGitError(args, error, repository) {
+  const stderr = String(error?.stderr || '');
+  const details = {
+    command: 'git ' + args[0], ...(Number.isInteger(error?.code) ? { exitCode: error.code } : {}),
+    ...(typeof error?.code === 'string' ? { reason: error.code } : {}), ...(error?.killed ? { timedOut: true } : {}),
+    ...(stderr ? { stderr: excerpt(stderr) } : {}),
+  };
+  if (args[0] === 'ls-remote' && /repository not found|does not appear to be a git repository/i.test(stderr)) {
+    return new DestinationError('destination_repository_missing', `El repositorio ${repository} no existe en GitHub o las credenciales de este equipo no lo ven. Créalo de nuevo o corrige el proyecto.`, details);
+  }
+  if (args[0] === 'ls-remote' && error?.code === 2 && !stderr.trim()) {
+    return new DestinationError('destination_remote_branch_missing', `La rama ${String(args.at(-1)).replace('refs/heads/', '')} no existe en origin. Súbela o corrige el proyecto.`, details);
+  }
+  return new DestinationError('destination_git_failed', 'Git no pudo verificar el destino; revisa conexión, permisos, origin y rama antes de continuar.', details);
+}
+
 // Inject Git in tests. Production only observes the configured existing remote;
 // it never fetches, changes refs, creates branches, or writes to GitHub.
 export async function verifyGitHubDestination(root, job, { git, inspect = inspectDestination, requireClean = true } = {}) {
@@ -72,13 +91,7 @@ export async function verifyGitHubDestination(root, job, { git, inspect = inspec
     try {
       const result = await promisify(execFile)('git', args, { cwd: observed.workspace, encoding: 'utf8', windowsHide: true, shell: false, timeout: 10_000, env, maxBuffer: 64_000 });
       return result.stdout.trim();
-    } catch (error) {
-      throw new DestinationError('destination_git_failed', 'Git no pudo verificar el destino; revisa conexión, permisos, origin y rama antes de continuar.', {
-        command: 'git ' + args[0], ...(Number.isInteger(error?.code) ? { exitCode: error.code } : {}),
-        ...(typeof error?.code === 'string' ? { reason: error.code } : {}), ...(error?.killed ? { timedOut: true } : {}),
-        ...(error?.stderr ? { stderr: excerpt(error.stderr) } : {}),
-      });
-    }
+    } catch (error) { throw destinationGitError(args, error, job.destination.repository); }
   });
   const origin = await run(['remote', 'get-url', 'origin']);
   const repository = githubRepository(origin);

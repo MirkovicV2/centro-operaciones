@@ -20,10 +20,20 @@ export function canonicalCriterion(text) {
 // Stable id derived from the canonical text, so contracts stored without ids keep working.
 export const criterionId = text => 'crit_' + createHash('sha256').update(canonicalCriterion(text)).digest('hex').slice(0, 16);
 export const acceptanceCriteriaIds = acceptance => (acceptance ?? []).map(criterion => ({ id: criterionId(criterion), criterion }));
+// A worker told to send non-ASCII as \uXXXX sometimes escapes twice, and escapes plain ASCII too: after JSON.parse its
+// text still carries a literal \u0027 where the criterion has an apostrophe (second real pilot: an approved review was
+// stopped for "omitting" a criterion it had quoted with its exact id). Undone on the worker's side only, for comparing.
+const unescapedUnicode = text => String(text ?? '').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+// Shell quoting can also eat the quotes themselves: a report passed between single quotes loses every apostrophe
+// (third real pilot: "`reverse(abc) === cba`" for "`reverse('abc') === 'cba'`"). That loss is accepted only when the
+// worker also gave the criterion's exact id, which is a hash of the original text; without the id the text must match.
+const withoutQuotes = text => canonicalCriterion(text).replace(/['"`´‘’“”]/g, '').replace(/\s+/g, ' ').trim();
 export function matchesCriterion(item, criterion) {
   if (!object(item) || typeof criterion !== 'string') return false;
-  return canonicalCriterion(item.criterion) === canonicalCriterion(criterion)
-    && (item.criterionId === undefined || item.criterionId === criterionId(criterion));
+  const wanted = canonicalCriterion(criterion), id = criterionId(criterion);
+  if (item.criterionId !== undefined && item.criterionId !== id) return false;
+  if (canonicalCriterion(item.criterion) === wanted || canonicalCriterion(unescapedUnicode(item.criterion)) === wanted) return true;
+  return item.criterionId === id && withoutQuotes(unescapedUnicode(item.criterion)) === withoutQuotes(criterion);
 }
 const nonempty = (value, max = 12000) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
 const strings = (value, limit = 50) => Array.isArray(value) && value.length <= limit && value.every(item => nonempty(item, 4000));

@@ -1,8 +1,9 @@
 // Model choice per stage, in three layers (the most specific wins):
 //   default  data/orca-launch-levels.json roles → level → agents[agent][level]
 //   project  data/orca-launch-levels.json projects[projectId].roles → level
-//   job      job.launch = { agent, roles: { <role>: { model?, effort? } } }, chosen when the job is created
-// A job choice names its agent because model names are agent-specific; for another agent it is ignored.
+//   job      job.launch, chosen when the job is created (forms in validateJobLaunch)
+// This file keeps the per-agent primitives. The agent of each stage and the full precedence
+// (general → empresa → proyecto → encargo) are resolved in pipeline-config.mjs.
 // The resolved choice is recorded on the stage, so the report shows what each stage was launched with.
 export const LAUNCH_ROLES = ['planificador', 'ux', 'desarrollador', 'qa', 'revisor'];
 export const LAUNCH_AGENTS = ['codex', 'claude'];
@@ -13,25 +14,44 @@ export class LaunchChoiceError extends Error {
   constructor(message) { super(message); this.code = 'launch_choice_invalid'; }
 }
 
+const ESCALATION_TEXT = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 500;
+
+// Two forms, both kept:
+//   legacy  { agent, roles: { <role>: { model?, effort? } } }   bound to that agent; ignored if the stage runs with another
+//   current { roles: { <role>: { agent?, model?, effort? } } }  a role may choose its own agent (a model always needs one)
+// A role may instead request a configured escalation: { escalada, motivo, alcance, resultado }.
 export function validateJobLaunch(value) {
   if (value === undefined || value === null) return undefined;
-  if (typeof value !== 'object' || Array.isArray(value) || !LAUNCH_AGENTS.includes(value.agent)) {
-    throw new LaunchChoiceError('launch necesita agent (codex o claude) y roles.');
+  if (typeof value !== 'object' || Array.isArray(value) || (value.agent !== undefined && !LAUNCH_AGENTS.includes(value.agent))
+    || Object.keys(value).some(key => !['agent', 'roles'].includes(key))) {
+    throw new LaunchChoiceError('launch admite agent (codex o claude) y roles.');
   }
   if (!value.roles || typeof value.roles !== 'object' || Array.isArray(value.roles) || !Object.keys(value.roles).length) {
-    throw new LaunchChoiceError('launch.roles debe elegir modelo y/o esfuerzo para al menos un rol.');
+    throw new LaunchChoiceError('launch.roles debe elegir agente, modelo y/o esfuerzo para al menos un rol.');
   }
   const roles = {};
   for (const [role, flags] of Object.entries(value.roles)) {
     if (!LAUNCH_ROLES.includes(role)) throw new LaunchChoiceError(`Rol desconocido ${role}; usa ${LAUNCH_ROLES.join(', ')}.`);
-    if (!flags || typeof flags !== 'object' || Array.isArray(flags) || (flags.model === undefined && flags.effort === undefined)
-      || (flags.model !== undefined && !flagValue(flags.model)) || (flags.effort !== undefined && !flagValue(flags.effort))
-      || Object.keys(flags).some(key => !['model', 'effort'].includes(key))) {
-      throw new LaunchChoiceError(`${role} necesita model y/o effort con caracteres [A-Za-z0-9._:-].`);
+    if (flags && typeof flags === 'object' && !Array.isArray(flags) && flags.escalada !== undefined) {
+      if (!/^[a-zA-Z0-9_-]{1,80}$/.test(flags.escalada) || Object.keys(flags).some(key => !['escalada', 'motivo', 'alcance', 'resultado'].includes(key))
+        || !['motivo', 'alcance', 'resultado'].every(key => ESCALATION_TEXT(flags[key]))) {
+        throw new LaunchChoiceError(`${role}: una escalada necesita escalada, motivo, alcance y resultado verificable (textos de hasta 500 caracteres).`);
+      }
+      roles[role] = { escalada: flags.escalada, motivo: flags.motivo.trim(), alcance: flags.alcance.trim(), resultado: flags.resultado.trim() };
+      continue;
     }
-    roles[role] = { ...(flags.model !== undefined ? { model: flags.model } : {}), ...(flags.effort !== undefined ? { effort: flags.effort } : {}) };
+    if (!flags || typeof flags !== 'object' || Array.isArray(flags) || !['agent', 'model', 'effort'].some(key => flags[key] !== undefined)
+      || (flags.model !== undefined && !flagValue(flags.model)) || (flags.effort !== undefined && !flagValue(flags.effort))
+      || Object.keys(flags).some(key => !['agent', 'model', 'effort'].includes(key))) {
+      throw new LaunchChoiceError(`${role} necesita agent, model y/o effort; model y effort con caracteres [A-Za-z0-9._:-].`);
+    }
+    if (flags.agent !== undefined && !LAUNCH_AGENTS.includes(flags.agent)) throw new LaunchChoiceError(`${role}: agent debe ser codex o claude.`);
+    if (flags.model !== undefined && flags.agent === undefined && value.agent === undefined) {
+      throw new LaunchChoiceError(`${role}: un model pertenece a un proveedor; indica agent (codex o claude) en el rol o en launch.`);
+    }
+    roles[role] = Object.fromEntries(['agent', 'model', 'effort'].filter(key => flags[key] !== undefined).map(key => [key, flags[key]]));
   }
-  return { agent: value.agent, roles };
+  return { ...(value.agent !== undefined ? { agent: value.agent } : {}), roles };
 }
 
 export function normalizeProjectLevels(value, levelNames, fail) {

@@ -1,8 +1,8 @@
 // 7: access for more than one person through Tailscale Serve. Pure functions; the
 // dashboard loads the file once and asks these on every request.
 export const ACCESS_ROLES = Object.freeze(['admin', 'ejecutar', 'revisar']);
-// POST routes only an admin may use: configuration, auto-run switches and project destinations.
-export const ADMIN_ONLY_POST_PATHS = Object.freeze([/^\/api\/config$/, /^\/api\/auto-run$/, /^\/api\/projects$/, /^\/api\/projects\/[a-zA-Z0-9_-]+\/update$/]);
+// POST routes only an admin may use: configuration, the pipeline split, auto-run switches and project destinations.
+export const ADMIN_ONLY_POST_PATHS = Object.freeze([/^\/api\/config$/, /^\/api\/pipeline$/, /^\/api\/quota$/, /^\/api\/auto-run$/, /^\/api\/projects$/, /^\/api\/projects\/[a-zA-Z0-9_-]+\/update$/, /^\/api\/projects\/[a-zA-Z0-9_-]+\/create-remote$/]);
 const HOSTNAME = /^(?:[a-z0-9-]+\.){2,}ts\.net$/;
 const LOGIN = /^[^\s@]{1,200}@[^\s@]{1,200}$|^[A-Za-z0-9._-]{1,200}$/;
 

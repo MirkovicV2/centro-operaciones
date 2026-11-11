@@ -129,8 +129,8 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
   const { runOrca } = await import('../orca-provider.mjs');
   const root = await rootWith(t, config());
   const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
-  const run = async (projectId, { changeDuringQa = false, priorQa, gateReturns = false } = {}) => {
-    const starts = [], updates = [], gates = [];
+  const run = async (projectId, { changeDuringQa = false, priorQa, gateReturns = false, preflightFails = false } = {}) => {
+    const starts = [], updates = [], gates = [], preflights = [];
     let snapshotReads = 0;
     const ctx = { root, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
     const command = async args => {
@@ -143,13 +143,19 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
     };
     const runWorkflowV2 = async (job, _ctx, entry, ws) => { gates.push({ job: job.id, entry, ws, snapshot: job.workflowV2Snapshot }); if (gateReturns) return; throw Object.assign(new Error('owner'), { code: 'workflow_v2_owner_pending' }); };
     const outcome = await runOrca({ id: `v2-${projectId}`, business: 'agency', kind: 'code', provider: 'orca', projectId, title: 'V2', prompt: 'Probar V2.', workspace, isolated: true, attempts: 1, ...(priorQa ? { workflow: { steps: [priorQa] } } : {}) },
-      ctx, { command, runWorkflowV2, captureSnapshot: async () => changeDuringQa && ++snapshotReads > 1 ? 'b'.repeat(64) : 'a'.repeat(64) }).then(() => 'succeeded', error => error.code);
-    return { starts, gates, outcome, updates };
+      ctx, { command, runWorkflowV2, captureSnapshot: async () => changeDuringQa && ++snapshotReads > 1 ? 'b'.repeat(64) : 'a'.repeat(64),
+        preflightV2: async entry => { preflights.push(entry.stateRoot); if (preflightFails) throw Object.assign(new Error('V2 no listo'), { code: 'workflow_v2_preflight_failed' }); } })
+      .then(() => 'succeeded', error => error.code);
+    return { starts, gates, outcome, updates, preflights };
   };
   const governed = await run('obi');
   assert.deepEqual(governed.starts, ['ux', 'developer', 'qa'], 'the Centro Revisión stage is not launched');
   assert.equal(governed.gates.length, 1);
+  assert.equal(governed.preflights.length, 1, 'V2 is checked once, before the first agent');
   assert.equal(governed.gates[0].ws, workspace);
+  const notReady = await run('obi', { preflightFails: true });
+  assert.equal(notReady.outcome, 'workflow_v2_preflight_failed');
+  assert.deepEqual(notReady.starts, [], 'no agent is launched when V2 is not ready');
   assert.equal(governed.outcome, 'workflow_v2_owner_pending');
   assert.equal(governed.gates[0].snapshot, 'a'.repeat(64));
   assert.equal(governed.updates.find(item => item.key === 'qa' && item.dispatchStatus === 'starting').workflowV2Snapshot, 'a'.repeat(64));
@@ -165,10 +171,42 @@ test('runOrca: a governed project runs V2 instead of the Centro Revisión; other
   const other = await run('forge');
   assert.deepEqual(other.starts, ['ux', 'developer', 'qa', 'reviewer']);
   assert.equal(other.gates.length, 0);
+  assert.equal(other.preflights.length, 0, 'a project without V2 is not checked');
   assert.equal(other.outcome, 'succeeded');
 });
 
 test('the shipped example is a valid configuration', async () => {
   const example = JSON.parse(await fs.readFile(new URL('../ejemplos/workflow-v2.example.json', import.meta.url), 'utf8'));
   assert.ok(normalizeWorkflowV2(example).projects['id-del-proyecto']);
+});
+
+test('runOrca with the decision on GitHub: a V2 recommendation goes straight to integration, which never merges', async t => {
+  const { runOrca } = await import('../orca-provider.mjs');
+  const root = await rootWith(t, config({ obi: { ...ENTRY, reviewerConfig: null, integrateAfterApproval: true, ownerDecision: 'github' } }));
+  const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  await fs.writeFile(path.join(root, 'data', 'auto-run.json'), JSON.stringify({ schema: 1, businesses: { agency: true, games: false }, history: [],
+    receipts: [{ id: 'r-gh', jobId: 'v2-github', business: 'agency', eligible: true, status: 'claimed' }] }));
+  const starts = [], updates = [];
+  const ctx = { root, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
+  const command = async args => {
+    if (args[0] === 'repo') return { repos: [{ path: workspace }] };
+    if (args[1] === 'run-create') return { runId: 'run_wfv2github' };
+    if (args[1] === 'worker-start') { const dispatchId = `ctx_v2github${starts.length + 1}`; starts.push(updates.at(-1).key); return { dispatchId, taskId: `task_${dispatchId.slice(4)}` }; }
+    if (args[1] === 'worker-show') return { state: 'succeeded', runId: 'run_wfv2github', taskId: `task_${args[3].slice(4)}` };
+    if (args[1] === 'inbox') { const key = starts.at(-1); return { messages: [{ type: 'worker_done', body: key === 'qa' ? 'Validación correcta.\nRESULTADO: APROBADO' : `${key} completado`, payload: JSON.stringify({ dispatchId: `ctx_v2github${starts.length}` }) }] }; }
+    if (args[1] === 'worker-release') return {};
+    throw new Error(`Unexpected command: ${args.join(' ')}`);
+  };
+  const A = 'a'.repeat(64), C = 'c'.repeat(64);
+  const integrations = [];
+  const outcome = await runOrca({ id: 'v2-github', business: 'agency', kind: 'code', provider: 'orca', projectId: 'obi', title: 'V2', prompt: 'Probar V2.', workspace, isolated: true, attempts: 1,
+    branch: 'feature', destination: { repository: 'o/r', baseBranch: 'main', workspace, branch: 'feature' }, autoIntent: { eligible: true, receiptId: 'r-gh' } }, ctx, {
+    command, captureSnapshot: async () => A, verifyDestination: async () => ({}), preflightV2: async () => {},
+    runWorkflowV2: async current => ({ task: `${current.id}-aaaaaaaaaaaa`, identity: 'id-1', evidenceId: 'ev-1', candidate: C, qaSnapshot: A }),
+    integrate: async (current, _ctx, options) => { integrations.push({ snapshot: current.integrationSnapshot, ownerMerges: options.ownerMerges, bound: options.previous?.workflowV2Approval?.task }); return { phase: 'complete', mergedBy: 'owner' }; },
+  }).then(() => 'succeeded', error => `${error.code}: ${error.message}`);
+  assert.equal(outcome, 'succeeded');
+  assert.deepEqual(starts, ['ux', 'developer', 'qa'], 'no Centro Revisión');
+  assert.deepEqual(integrations, [{ snapshot: A, ownerMerges: true, bound: 'v2-github-aaaaaaaaaaaa' }]);
+  assert.match(updates.find(update => update.key === 'integration' && update.status === 'running').summary, /La decisión es tuya: fusionarla/);
 });

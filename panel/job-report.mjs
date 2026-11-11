@@ -11,7 +11,7 @@ const isSha = value => /^[a-f0-9]{40}$/i.test(value ?? '');
 const clip = (value, limit = 600) => String(value ?? '').slice(0, limit);
 
 // What the Centro launched the stage with. Older stages only recorded the agent and level: the model is unknown.
-const sources = { encargo: 'elegido en el encargo', proyecto: 'por defecto del proyecto', 'por defecto': 'por defecto' };
+const sources = { escalada: 'escalada pedida en el encargo', encargo: 'elegido en el encargo', proyecto: 'por defecto del proyecto', empresa: 'perfil de la empresa', general: 'perfil general', 'por defecto': 'por defecto' };
 function launchText(step) {
   const launch = step.launch;
   if (launch?.agent) {
@@ -25,11 +25,17 @@ function launchText(step) {
 function stageReport(job, key, label) {
   const step = job.workflow?.steps?.find(item => item.key === key);
   if (!step) return { key, label, status: 'not_started', level: 'unknown', facts: [] };
+  // Left out by the job's route: not a failure and not pending. The reason is the Centro's own record.
+  if (step.status === 'skipped' && step.routeOmitted) return { key, label, status: 'omitted', level: 'observed', facts: [{ label: 'Etapa omitida', value: clip(step.summary), level: 'observed' }] };
   const exact = Boolean(step.runId && step.taskId && step.dispatchId);
   const facts = [{ label: 'Estado', value: step.status, level: exact && ['succeeded', 'blocked', 'failed'].includes(step.status) ? 'observed' : 'unknown' }];
   if (exact) facts.push({ label: 'Dispatch', value: step.dispatchId, level: 'observed' });
   const launched = launchText(step);
   if (launched) facts.push({ label: 'Modelo', ...launched });
+  if (step.contracts?.length) facts.push({ label: 'Contratos de rol', value: clip(step.contracts.map(item => `${item.path} (${item.sha256.slice(0, 12)})`).join(', ')), level: 'observed' });
+  if (step.skills?.length) facts.push({ label: 'Skills suministradas', value: step.skills.map(skill => `${skill.id} (${skill.manifest.slice(0, 12)})`).join(', '), level: 'observed' });
+  if (step.skills?.length && step.skillsConsulted) facts.push({ label: 'Skills consultadas', value: step.skillsConsulted.length ? step.skillsConsulted.join(', ') : 'Ninguna declarada', level: 'reported' });
+  for (const item of step.skillsOmitted ?? []) facts.push({ label: 'Skill no entregada', value: clip(`${item.id}: ${item.reason}`), level: 'observed' });
   const delivery = step.delivery;
   if (delivery?.summary) facts.push({ label: 'Resumen del agente', value: clip(delivery.summary), level: 'reported' });
   else if (step.summary) facts.push({ label: 'Resumen', value: clip(step.summary), level: 'reported' });

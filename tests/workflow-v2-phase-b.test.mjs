@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { bindWorkflowV2Approval, buildV2Task, normalizeWorkflowV2, priorV2Submission, resolveWorkflowV2Approval, runWorkflowV2Gate,
   v2CandidateTaskId, workflowV2Resumable } from '../workflow-v2-gate.mjs';
-import { confirmSubmission, createAutoRunner, readAutoRun, resumeWorkflowV2Receipt, retryAutoReceipt, setAutoRun } from '../auto-run.mjs';
+import { confirmSubmission, createAutoRunner, readAutoRun, readmitWorkflowV2Receipt, resumeWorkflowV2Receipt, retryAutoReceipt, setAutoRun } from '../auto-run.mjs';
 import { loadState } from '../queue.mjs';
 
 // U7 phase B: integrate only the candidate the owner approved in Workflow V2; a changed candidate needs
@@ -274,7 +274,12 @@ test('an eligible job waiting for the owner is resumed once, without the pre-dis
   assert.equal(receipt.retryAuthorizedAttempt, job.attempts);
   assert.equal(job.workflow.steps.find(step => step.key === 'reviewer').workflowV2.identity, 'id-1', 'the submission record survives the retry');
   await assert.rejects(resumeWorkflowV2Receipt(root, job.id, { confirm: true }), /no está esperando/, 'only once');
-  const second = createAutoRunner(root, { verify, worker: async (current, ctx) => {
+  // The approved candidate is uncommitted in the checkout: a clean-tree admission must not block it.
+  const dirtyVerify = async (_root, _job, { requireClean = true } = {}) => {
+    if (requireClean) throw Object.assign(new Error('Checkout no estaba limpio al admitir el job; se requiere revisión antes de ejecutar.'), { code: 'destination_dirty' });
+    return verify();
+  };
+  const second = createAutoRunner(root, { verify: dirtyVerify, worker: async (current, ctx) => {
     runs++;
     assert.equal(priorV2Submission(current, A).task, 'v2b-auto-aaaaaaaaaaaa');
     // Same sequence resolveWorkflowV2Approval reports; the queue enforces the transitions.
@@ -289,4 +294,183 @@ test('an eligible job waiting for the owner is resumed once, without the pre-dis
   assert.equal(finished.state, 'succeeded', JSON.stringify(finished.error));
   assert.equal((await loadState(root)).jobs.find(item => item.id === sent.job.id).state, 'succeeded');
   await second.tick(); assert.equal(runs, 2, 'nothing runs again');
+});
+
+test('a V2 resume blocked at admission by the dirty candidate is readmitted once and integrates', async t => {
+  const root = await tempRoot(t, 'wfv2-b-readmit-');
+  await setAutoRun(root, 'agency', true, { confirm: true });
+  const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const sent = await confirmSubmission(root, 'receipt-v2r', { id: 'v2r-auto', business: 'agency', kind: 'code', title: 'V2', provider: 'orca', projectId: 'obi',
+    prompt: 'Objetivo: probar V2. Criterio: el candidato aprobado se integra.', workspace, isolated: true, branch: 'feature',
+    destination: { checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', baseBranch: 'main' },
+    autoIntent: { receiptId: 'receipt-v2r', eligible: true } });
+  const observed = { checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', origin: 'https://github.com/o/r.git',
+    sha: 'a'.repeat(40), remoteSha: 'a'.repeat(40), baseBranch: 'main', baseSha: 'b'.repeat(40), verified: true };
+  let dirty = false;
+  const verify = async (_root, _job, { requireClean = true } = {}) => {
+    if (dirty && requireClean) throw Object.assign(new Error('Checkout no estaba limpio al admitir el job; se requiere revisión antes de ejecutar.'), { code: 'destination_dirty' });
+    return observed;
+  };
+  await createAutoRunner(root, { verify, worker: async (job, ctx) => {
+    for (const key of ['ux', 'developer']) await ctx.reportStage({ key, status: 'succeeded', summary: `${key} listo` });
+    await ctx.reportStage({ key: 'qa', status: 'succeeded', summary: 'RESULTADO: APROBADO', workflowV2Snapshot: A });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', error: 'workflow_v2_owner_pending', summary: 'Decide en V2.', workflowV2: submitted({ task: 'v2r-auto-aaaaaaaaaaaa' }) });
+    throw Object.assign(new Error('Decide tú en V2.'), { code: 'workflow_v2_owner_pending', uncertain: false });
+  } }).tick();
+  dirty = true;
+  await resumeWorkflowV2Receipt(root, sent.job.id, { confirm: true });
+  // Reproduce the receipt a previous version left: blocked at admission, job still queued.
+  const auto = JSON.parse(await fs.readFile(path.join(root, 'data', 'auto-run.json'), 'utf8'));
+  delete auto.receipts[0].workflowV2Resume; auto.receipts[0].status = 'blocked';
+  await fs.writeFile(path.join(root, 'data', 'auto-run.json'), JSON.stringify(auto));
+  let ran = 0;
+  const runner = createAutoRunner(root, { verify, worker: async (current, ctx) => {
+    ran++;
+    await ctx.reportStage({ key: 'reviewer', status: 'running', summary: 'Comprobando la aprobación.' });
+    await ctx.reportStage({ key: 'reviewer', status: 'succeeded', summary: 'Aprobado en V2.', workflowV2: submitted({ task: 'v2r-auto-aaaaaaaaaaaa', outcome: 'approved' }) });
+    await ctx.reportStage({ key: 'integration', status: 'succeeded', summary: 'Integrado.' });
+    return { text: 'integrado' };
+  } });
+  await runner.tick();
+  assert.equal(ran, 0, 'a blocked receipt stops the lane until reviewed');
+  await assert.rejects(readmitWorkflowV2Receipt(root, sent.job.id), /Confirma/);
+  await readmitWorkflowV2Receipt(root, sent.job.id, { confirm: true });
+  await assert.rejects(readmitWorkflowV2Receipt(root, sent.job.id, { confirm: true }), /no es una reanudación/, 'only once');
+  await runner.tick();
+  assert.equal(ran, 1);
+  assert.equal((await loadState(root)).jobs.find(item => item.id === sent.job.id).state, 'succeeded');
+});
+
+test('a project can name its virtualenv for V2 checks; it reaches submit as --python-env', async () => {
+  assert.equal(normalizeWorkflowV2(config()).projects.obi.pythonEnv, null);
+  assert.throws(() => normalizeWorkflowV2(config({ pythonEnv: 'relative/venv' })), { code: 'workflow_v2_config_invalid' });
+  const entry = { ...entryB(), pythonEnv: '/home/x/hf/.venv' };
+  const seen = [];
+  const run = async argv => { seen.push(argv); return { code: 0, stderr: '', timedOut: false, stdout: JSON.stringify({ task: argv[argv.indexOf('submit') + 1], status: 'pendiente_owner',
+    identity: 'id-1', evidence_id: 'ev-1', reviews: [], steps: [{ unit: 'U1', candidate: C }] }) }; };
+  const job = { id: 'v2b-1', kind: 'code', projectId: 'obi', title: 'x', workflowV2Snapshot: A, workflow: { steps: [{ key: 'reviewer' }] } };
+  await runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, entry, '/tmp/ws', { run }).catch(() => {});
+  assert.deepEqual(seen[0].slice(seen[0].indexOf('--python-env'), seen[0].indexOf('--python-env') + 2), ['--python-env', '/home/x/hf/.venv']);
+  const without = [];
+  await runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, entryB(), '/tmp/ws', { run: async argv => { without.push(argv); return run(argv); } }).catch(() => {});
+  assert.equal(without[0].includes('--python-env'), false);
+});
+
+test('a candidate V2 blocked before producing evidence is submitted again after the owner unblocks it, without launching any agent', async t => {
+  const { workflowV2Resubmittable } = await import('../workflow-v2-gate.mjs');
+  const { root, workspace } = await governedRoot(t);
+  const blocked = { status: 'blocked', error: 'workflow_v2_blocked', workflowV2: { task: TASK, outcome: 'blocked', status: 'bloqueado', qaSnapshot: A, candidate: A, identity: 'id-1', evidenceId: null, reviews: [],
+    blockedReason: "evidence blocked: a check needs the project's Python environment and none was given" } };
+  const job = { ...stopped(workspace, blocked), state: 'needs_attention' };
+  assert.equal(workflowV2Resubmittable(job), true); assert.equal(workflowV2Resumable(job), true);
+  // Never once V2 produced evidence or a review, nor for another kind of stop.
+  assert.equal(workflowV2Resubmittable({ ...stopped(workspace, { ...blocked, workflowV2: { ...blocked.workflowV2, evidenceId: 'ev-1' } }), state: 'needs_attention' }), false);
+  assert.equal(workflowV2Resubmittable({ ...stopped(workspace, { ...blocked, workflowV2: { ...blocked.workflowV2, reviews: [{ recommendation: 'REJECT' }] } }), state: 'needs_attention' }), false);
+  assert.equal(workflowV2Resubmittable({ ...stopped(workspace, { ...blocked, error: 'workflow_v2_rejected' }), state: 'needs_attention' }), false);
+  const run = await resume(root, { ...job, state: 'queued' });
+  assert.equal(run.submits.length, 1, 'the same candidate goes back to V2 once');
+  assert.equal(run.starts.length, 0, 'no Orca stage starts again');
+  assert.equal(run.outcome.code, 'workflow_v2_owner_pending');
+});
+
+test('an eligible job V2 blocked before evidence is resumed once from the panel, keeping every stage', async t => {
+  const root = await tempRoot(t, 'wfv2-b-unblock-');
+  await setAutoRun(root, 'agency', true, { confirm: true });
+  const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const sent = await confirmSubmission(root, 'receipt-v2u', { id: 'v2u-auto', business: 'agency', kind: 'code', title: 'V2', provider: 'orca', projectId: 'obi',
+    prompt: 'Objetivo: probar V2. Criterio: el candidato aprobado se integra.', workspace, isolated: true, branch: 'feature',
+    destination: { checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', baseBranch: 'main' }, autoIntent: { receiptId: 'receipt-v2u', eligible: true } });
+  const verify = async () => ({ checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', origin: 'https://github.com/o/r.git',
+    sha: 'a'.repeat(40), remoteSha: 'a'.repeat(40), baseBranch: 'main', baseSha: 'b'.repeat(40), verified: true });
+  const first = createAutoRunner(root, { verify, worker: async (job, ctx) => {
+    for (const key of ['ux', 'developer']) await ctx.reportStage({ key, status: 'succeeded', summary: `${key} listo` });
+    await ctx.reportStage({ key: 'qa', status: 'succeeded', summary: 'RESULTADO: APROBADO', workflowV2Snapshot: A });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', error: 'workflow_v2_blocked', summary: 'V2 bloqueado.',
+      workflowV2: { task: 'v2u-auto-aaaaaaaaaaaa', outcome: 'blocked', qaSnapshot: A, candidate: A, identity: 'id-1', evidenceId: null, reviews: [] } });
+    throw Object.assign(new Error('V2 bloqueado.'), { code: 'workflow_v2_blocked', uncertain: false });
+  } });
+  await first.tick();
+  let job = (await loadState(root)).jobs.find(item => item.id === sent.job.id);
+  assert.equal(job.state, 'needs_attention');
+  await resumeWorkflowV2Receipt(root, job.id, { confirm: true });
+  job = (await loadState(root)).jobs.find(item => item.id === sent.job.id);
+  assert.equal((await readAutoRun(root)).receipts[0].status, 'pending');
+  assert.deepEqual(job.workflow.steps.filter(step => ['ux', 'developer', 'qa'].includes(step.key)).map(step => step.status), ['succeeded', 'succeeded', 'succeeded']);
+  await assert.rejects(resumeWorkflowV2Receipt(root, job.id, { confirm: true }), /no está esperando/, 'only once');
+  // The unsubmitted candidate is still uncommitted in the checkout: admission must not require a clean tree
+  // (Encargo 2 of home-finance stayed queued with its receipt blocked as destination_dirty).
+  let dirty = true, ran = 0;
+  const dirtyVerify = async (_root, _job, { requireClean = true } = {}) => {
+    if (dirty && requireClean) throw Object.assign(new Error('Checkout no estaba limpio al admitir el job; se requiere revisión antes de ejecutar.'), { code: 'destination_dirty' });
+    return verify();
+  };
+  const worker = async (current, ctx) => {
+    ran++;
+    assert.deepEqual(current.workflow.steps.filter(step => ['ux', 'developer', 'qa'].includes(step.key)).map(step => step.status), ['succeeded', 'succeeded', 'succeeded']);
+    await ctx.reportStage({ key: 'reviewer', status: 'running', summary: 'Workflow V2: enviando el candidato.' });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', error: 'workflow_v2_owner_pending', summary: 'Decide en V2.', workflowV2: submitted({ task: 'v2u-auto-aaaaaaaaaaaa' }) });
+    throw Object.assign(new Error('Decide tú en V2.'), { code: 'workflow_v2_owner_pending', uncertain: false });
+  };
+  // Reproduce what the previous version left: admission refused, job still queued, receipt blocked.
+  const auto = JSON.parse(await fs.readFile(path.join(root, 'data', 'auto-run.json'), 'utf8'));
+  delete auto.receipts[0].workflowV2Resume; auto.receipts[0].status = 'blocked'; auto.receipts[0].blockCode = 'destination_dirty';
+  await fs.writeFile(path.join(root, 'data', 'auto-run.json'), JSON.stringify(auto));
+  await readmitWorkflowV2Receipt(root, job.id, { confirm: true });
+  await createAutoRunner(root, { verify: dirtyVerify, worker }).tick();
+  assert.equal(ran, 1, 'the resubmission is admitted over the dirty candidate');
+  job = (await loadState(root)).jobs.find(item => item.id === sent.job.id);
+  assert.equal(job.state, 'needs_attention');
+  assert.equal(job.workflow.steps.find(step => step.key === 'reviewer').error, 'workflow_v2_owner_pending');
+});
+
+test('an operator retry waits for a ledger lock held by a background tick instead of failing at once', async t => {
+  const { acquireLock, releaseLock } = await import('../queue.mjs');
+  const root = await tempRoot(t, 'wfv2-b-lockwait-');
+  await setAutoRun(root, 'agency', true, { confirm: true });
+  const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const sent = await confirmSubmission(root, 'receipt-v2l', { id: 'v2l-auto', business: 'agency', kind: 'code', title: 'V2', provider: 'orca', projectId: 'obi',
+    prompt: 'Objetivo: probar V2. Criterio: el candidato aprobado se integra.', workspace, isolated: true, branch: 'feature',
+    destination: { checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', baseBranch: 'main' }, autoIntent: { receiptId: 'receipt-v2l', eligible: true } });
+  const verify = async () => ({ checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', origin: 'https://github.com/o/r.git',
+    sha: 'a'.repeat(40), remoteSha: 'a'.repeat(40), baseBranch: 'main', baseSha: 'b'.repeat(40), verified: true });
+  await createAutoRunner(root, { verify, worker: async (job, ctx) => {
+    for (const key of ['ux', 'developer']) await ctx.reportStage({ key, status: 'succeeded', summary: `${key} listo` });
+    await ctx.reportStage({ key: 'qa', status: 'succeeded', summary: 'RESULTADO: APROBADO', workflowV2Snapshot: A });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', error: 'workflow_v2_blocked', summary: 'V2 bloqueado.',
+      workflowV2: { task: 'v2l-auto-aaaaaaaaaaaa', outcome: 'blocked', qaSnapshot: A, candidate: A, identity: 'id-1', evidenceId: null, reviews: [] } });
+    throw Object.assign(new Error('V2 bloqueado.'), { code: 'workflow_v2_blocked', uncertain: false });
+  } }).tick();
+  const held = await acquireLock(root);
+  setTimeout(() => { void releaseLock(held); }, 300);
+  const job = await resumeWorkflowV2Receipt(root, sent.job.id, { confirm: true });
+  assert.equal(job.state, 'queued');
+  assert.equal((await readAutoRun(root)).receipts[0].status, 'pending');
+});
+
+test('decision on GitHub: a V2 recommendation to accept opens the integration, anything else still stops', async () => {
+  const github = () => ({ ...normalizeWorkflowV2(config({ integrateAfterApproval: true, ownerDecision: 'github' })).projects.obi, engineeringSystem: '/srv/engineering-system', python: 'python3' });
+  assert.equal(entryB().ownerDecision, 'v2', 'the V2 approval stays the default');
+  assert.throws(() => normalizeWorkflowV2(config({ ownerDecision: 'github' })), /necesita integrateAfterApproval/);
+  assert.throws(() => normalizeWorkflowV2(config({ integrateAfterApproval: true, ownerDecision: 'slack' })), /ownerDecision/);
+  const job = { id: 'v2b-1', kind: 'code', projectId: 'obi', title: 'x', workflowV2Snapshot: A, workflow: { steps: [{ key: 'reviewer' }, { key: 'integration' }] } };
+  const submit = (status, recommendation) => async argv => ({ code: 0, stderr: '', timedOut: false, stdout: JSON.stringify({ task: argv[argv.indexOf('submit') + 1], status, tier: 'STANDARD',
+    identity: 'id-1', evidence_id: 'ev-1', reviews: recommendation ? [{ role: 'unit', recommendation }] : [], steps: [{ unit: 'U1', candidate: C }] }) });
+  const updates = [];
+  const binding = await runWorkflowV2Gate(job, { ...ctxWith(updates), captureSnapshot: async () => A }, github(), '/tmp/ws', { run: submit('pendiente_owner', 'ACCEPT') });
+  assert.deepEqual(binding, { task: TASK, identity: 'id-1', evidenceId: 'ev-1', candidate: C, qaSnapshot: A });
+  assert.equal(updates.at(-1).status, 'succeeded'); assert.match(updates.at(-1).summary, /Tu decisión es la PR.*no la fusiona/s);
+  assert.equal(updates.at(-1).workflowV2.decision, 'github');
+  // A rejection, a block or a review without recommendation stop as before.
+  for (const [status, recommendation, code] of [['revision', 'REJECT', 'workflow_v2_rejected'], ['bloqueado', null, 'workflow_v2_blocked'], ['pendiente_owner', null, 'workflow_v2_owner_pending']]) {
+    const error = await runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, github(), '/tmp/ws', { run: submit(status, recommendation) }).catch(failure => failure);
+    assert.equal(error.code, code, status);
+  }
+  // The same submission read again after a restart gives the same binding; another identity does not.
+  const resolved = await resolveWorkflowV2Approval(job, ctxWith([]), github(), submitted({ outcome: 'recommended' }),
+    { run: statusRun({ task: TASK, status: 'pendiente_owner', identity: 'id-1', evidence_id: 'ev-1', reviews: [{ role: 'unit', recommendation: 'ACCEPT' }] }) });
+  assert.deepEqual(resolved, { task: TASK, identity: 'id-1', evidenceId: 'ev-1', candidate: C, qaSnapshot: A });
+  await assert.rejects(resolveWorkflowV2Approval(job, ctxWith([]), github(), submitted(),
+    { run: statusRun({ task: TASK, status: 'pendiente_owner', identity: 'id-2', evidence_id: 'ev-1', reviews: [{ role: 'unit', recommendation: 'ACCEPT' }] }) }), { code: 'workflow_v2_owner_pending' });
+  // With the default, the same summary still waits for the owner's V2 approval.
+  await assert.rejects(runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, entryB(), '/tmp/ws', { run: submit('pendiente_owner', 'ACCEPT') }), { code: 'workflow_v2_owner_pending' });
 });

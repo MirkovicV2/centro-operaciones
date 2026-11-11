@@ -239,7 +239,9 @@ test('native success without positive exit stays blocked and does not read compl
 test('completed work waits for delayed native release then consumes the same delivery once', async t => {
   const f = await fixture(t);
   let polls = 0, waits = 0;
+  const released = [];
   const command = async args => {
+    if (args[1] === 'worker-release') { released.push(args); throw new Error('release_pending'); }
     if (args[1] === 'worker-show' && ++polls < 4) {
       f.calls.push(args);
       const value = nativeStatus();
@@ -257,4 +259,22 @@ test('completed work waits for delayed native release then consumes the same del
   assert.equal(f.calls.filter(args => args[1] === 'inbox').length, 1);
   assert.equal(f.updates.filter(update => update.dispatchStatus === 'awaiting_exit').length, 1);
   assert.equal(f.calls.some(args => ['send', 'worker-stop'].includes(args[1])), false);
+  // Release is asked for once, as soon as the delivery is in; a release Orca cannot complete still ends in the confirmed exit.
+  assert.deepEqual(released, [['orchestration', 'worker-release', '--dispatch', identity.dispatchId]]);
+});
+
+test('a live worker stopped at an approval dialog is reported as waiting for the person, and cleared when it moves on', async t => {
+  const f = await fixture(t);
+  let polls = 0, clock = 1_000_000, screens = 0;
+  const command = async args => {
+    if (args[0] === 'terminal' && args[1] === 'read') { screens++; assert.deepEqual(args.slice(2), ['--terminal', terminal, '--screen']);
+      return { screen: screens === 1 ? 'Allow this read outside the working directories?\n❯ 1. Yes, and keep allowing\nEsc to cancel' : '✻ Working… (esc to interrupt)' }; }
+    if (args[1] === 'worker-show' && ++polls < 4) return nativeStatus({ state: 'running', exited: false });
+    return f.command(args);
+  };
+  await runOrca(f.job, f.ctx, { command, polling: { now: () => clock, wait: async () => { clock += 31_000; } } });
+  const waits = f.updates.filter(update => 'waitingOn' in update);
+  assert.deepEqual(waits.map(update => [update.status, update.waitingOn]), [['running', 'approval'], ['running', null]]);
+  assert.match(waits[0].summary, /espera una respuesta tuya en su terminal de Orca/); assert.ok(waits[0].waitingSince);
+  assert.equal(screens, 2, 'one look per half minute while live, none once settled');
 });

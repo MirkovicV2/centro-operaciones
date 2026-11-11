@@ -32,6 +32,7 @@
         <div class="nav-caption" aria-hidden="true">Recursos</div>
         <a class="nav-link" href="#conocimiento"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 6c-2-2-5-2-9-2v15c4 0 7 0 9 2 2-2 5-2 9-2V4c-4 0-7 0-9 2zm0 0v15"/></svg></span> Conocimiento</a>
         <a class="nav-link" href="#dominios"><span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18m-9-9c-4 4-4 14 0 18 4-4 4-14 0-18z"/></svg></span> Dominios IONOS</a>
+        <a class="nav-link" href="#ajustes"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 12h4m4 0h8M4 17h12m4 0h0"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="17" r="2"/></svg></span> Ajustes</a>
       </nav>
       <div class="sidebar-bottom">
         <div class="connection-dot"><span id="panel-dot"></span><span id="panel-state">Panel local</span></div>
@@ -171,6 +172,10 @@
             <label class="wide">Título<input name="title" maxlength="160" required placeholder="Resultado concreto que quieres obtener"></label>
             <label class="wide">Objetivo e instrucciones<textarea name="prompt" maxlength="10000" rows="4" required placeholder="Qué resultado necesitas y el contexto relevante"></textarea></label>
             <label class="wide">Criterio de éxito<textarea name="successCriteria" maxlength="1800" rows="2" required placeholder="Qué podremos comprobar para darlo por terminado"></textarea></label>
+            <details class="wide job-launch" id="job-launch"><summary>Reparto de este encargo: <span id="job-launch-summary">según el perfil</span></summary>
+              <p class="microcopy">Con qué se lanzaría cada etapa. Cambia solo lo que quieras fijar para este encargo; el resto sigue el perfil.</p>
+              <div class="pipeline-rows" id="job-launch-rows"></div>
+            </details>
           </div>
           <div class="form-footer"><span>Esta orientación no elige agente. El coordinador confirma la ruta; hasta entonces no hay job ni dispatch.</span><button class="button primary" type="submit">Enviar al coordinador</button></div>
         </form>
@@ -212,6 +217,8 @@
             <p class="microcopy"><span id="idea-checkout">Sin checkout válido</span> · <a href="#proyectos">Configurar checkout</a></p>
             <fieldset class="idea-focus"><legend>Foco del trabajo</legend><label><input type="radio" name="focus" value="" checked> Sin clasificar</label><label><input type="radio" name="focus" value="ux"> Diseño UX: Interfaz, interacción y experiencia</label><label><input type="radio" name="focus" value="code"> Código: Lógica, integración y comportamiento técnico</label><label><input type="radio" name="focus" value="mixed"> Mixto: Experiencia y comportamiento técnico</label></fieldset><label>Etiquetas temáticas (separadas por comas)<input name="tags" maxlength="124" placeholder="Hasta cinco, 24 caracteres cada una"></label><p>El foco orienta el brief; desarrollo conserva UX → Desarrollo → QA → Revisión.</p>
             <label>Idea o indicación<textarea name="text" rows="5" maxlength="6000" required placeholder="Escribe una idea, preferencia o dirección para el siguiente trabajo…"></textarea></label>
+            <label>Referencias (.zip, opcional)<input type="file" id="idea-refs" accept=".zip,application/zip"></label>
+            <p class="microcopy">Capturas y ejemplos de estilo (png, jpg, webp, gif, css, md, txt, json) hasta 40 MB. Añade un LEEME.md que diga qué tomar de cada una. El coordinador las ve y las reciben solas Diseño, Desarrollo, QA y Revisión.</p>
             <div class="idea-actions">
             <button class="button primary full" type="submit">Guardar y enviar al coordinador</button>
             <button class="button secondary full" type="button" id="save-idea-only">Solo guardar la idea</button>
@@ -250,6 +257,45 @@
         <div class="section-heading section-heading-spaced"><div><div class="eyebrow">AGENCIA DIGITAL</div><h2>Dominios IONOS</h2><p class="section-copy">Inventario manual. Los avisos de renovación salen por Telegram mientras el bot esté activo.</p></div><a id="open-obsidian" class="button secondary" href="obsidian://open">Abrir Obsidian</a></div>
         <div id="domains-list" class="domains-list"></div>
         <div class="tasks-panel"><div class="panel-heading"><div><div class="eyebrow">SECRETARIA</div><h3>Pendientes y recordatorios</h3></div></div><div id="assistant-tasks" class="assistant-tasks"></div></div>
+      </section>
+
+      <section class="page-section" id="ajustes" hidden>
+        <div class="section-heading section-heading-spaced">
+          <div><div class="eyebrow">PIPELINE · REPARTO</div><h2>Agentes y modelos por etapa</h2><p class="section-copy">Elige con qué agente, modelo y esfuerzo se lanza cada etapa. Se aplica a los encargos nuevos y a las etapas que aún no han empezado; las ya lanzadas conservan lo que usaron. La integración con GitHub la ejecuta el motor, sin modelo.</p></div>
+          <button class="button secondary" type="button" id="pipeline-reload">↻ Recargar</button>
+        </div>
+        <div class="queue-guide" id="pipeline-status" role="status" aria-live="polite">Cargando el reparto…</div>
+        <form class="form-card pipeline-form" id="pipeline-form" novalidate>
+          <div class="form-title"><div><h3>Reparto por ámbito</h3></div></div>
+          <label class="pipeline-scope">Ámbito que editas<select id="pipeline-scope" name="scope"></select></label>
+          <p class="microcopy" id="pipeline-scope-hint">Gana el ámbito más específico, campo a campo: general → empresa → proyecto → encargo.</p>
+          <div class="pipeline-rows" id="pipeline-rows"></div>
+          <datalist id="pipeline-efforts"><option value="low"></option><option value="medium"></option><option value="high"></option></datalist>
+          <div class="form-footer"><span id="pipeline-dirty">Sin cambios</span><div class="button-row"><button type="button" class="button secondary" id="pipeline-load-example">Cargar perfil mixto de ejemplo</button><button type="button" class="button secondary" id="pipeline-disable">Volver al agente único</button><button type="submit" class="button primary" id="pipeline-save">Guardar reparto</button></div></div>
+        </form>
+        <div class="form-card pipeline-effective"><div class="form-title"><div><h3>Reparto guardado</h3></div></div><p class="microcopy">Con qué se lanzaría hoy un encargo, según lo guardado en esta instalación.</p><div id="pipeline-effective" class="pipeline-effective-grid"></div></div>
+        <form class="form-card quota-form" id="quota-form" novalidate>
+          <div class="form-title"><div><h3>Cuota y suscripciones</h3></div></div>
+          <p class="microcopy">El Centro no puede consultar el saldo de una suscripción: usa lo que anotes aquí desde la pantalla de uso de cada proveedor, y lo marca como incierto cuando la observación caduca. Nunca compra, recarga ni cambia a facturación por API.</p>
+          <div class="queue-guide" id="quota-status" role="status" aria-live="polite">Cargando la cuota…</div>
+          <ul class="quota-warnings" id="quota-warnings"></ul>
+          <div class="pipeline-rows" id="quota-providers"></div>
+          <fieldset class="pipeline-row quota-policy"><legend>Política</legend>
+            <label for="quota-reserve">Reserva personal (%)<input id="quota-reserve" name="reservaPersonalPorcentaje" type="number" min="10" max="90" step="1" inputmode="numeric"></label>
+            <label for="quota-warn">Avisar desde (%)<input id="quota-warn" name="avisoPorcentaje" type="number" min="1" max="100" step="1" inputmode="numeric"></label>
+            <label for="quota-stale">Una observación de «disponible» vale (horas)<input id="quota-stale" name="caducidadObservacionHoras" type="number" min="1" max="168" step="1" inputmode="numeric"></label>
+            <label for="quota-nodata">Sin observación reciente<select id="quota-nodata" name="sinDatos"><option value="admitir">Lanzar y avisar</option><option value="esperar">Esperar</option></select></label>
+            <label for="quota-exhausted">Al llegar a la reserva<select id="quota-exhausted" name="alAgotar"><option value="esperar">Esperar</option><option value="sustituir">Sustituir por el otro proveedor</option></select></label>
+            <p class="pipeline-row-note">Una observación que deja al proveedor en la reserva vale hasta su reinicio, pasen las horas que pasen. La sustitución solo usa un proveedor con suscripción y con una observación reciente por debajo de la reserva: si la del sustituto ha caducado, la etapa espera. La reserva mínima es del 10 %.</p>
+          </fieldset>
+          <div class="form-footer"><span id="quota-dirty">Sin cambios</span><div class="button-row"><button type="submit" class="button primary" id="quota-save">Guardar cuota</button></div></div>
+        </form>
+        <div class="form-card team-card"><div class="form-title"><div><h3>Equipos</h3></div></div>
+          <p class="microcopy">Qué PC es esta instalación, qué puede hacer cada uno y si reserva la rama de un proyecto antes de trabajar en ella. Se configura en <code>data/equipo.json</code> (este PC) y <code>equipos/equipos.json</code> (compartido).</p>
+          <div class="queue-guide" id="team-status" role="status">Cargando los equipos…</div>
+          <dl class="pipeline-effective-list" id="team-list"></dl>
+        </div>
+        <div class="form-card"><div class="form-title"><div><h3>Escaladas disponibles</h3></div></div><p class="microcopy">Un encargo puede pedir una escalada para un rol indicando motivo, alcance y resultado verificable. Se definen en <code>data/pipeline.json</code>.</p><ul id="pipeline-escalations" class="pipeline-escalations"></ul></div>
       </section>
 
       <footer class="footer"><span>Centro de Operaciones · local</span><span>Contextos separados por empresa · checkouts aislados · activación explícita por empresa</span></footer>

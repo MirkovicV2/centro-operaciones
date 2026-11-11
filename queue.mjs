@@ -1,5 +1,9 @@
 import { workflowV2Resumable } from './workflow-v2-gate.mjs';
-import { validateJobLaunch } from './launch-choice.mjs';
+import { validateJobLaunch, LAUNCH_AGENTS } from './launch-choice.mjs';
+import { validateSkillChoice } from './skills-registry.mjs';
+import { admissionHold } from './admission-gate.mjs';
+import { validateRequires } from './team.mjs';
+import { validateJobRoute, routeOmission, routeOmits, routeWithStage, stageSatisfied } from './job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -27,10 +31,15 @@ const WORKFLOW_STAGES = [
 ];
 const ANALYSIS_STAGE = [{ key: 'planner', label: 'Planificación', profile: 'planificador' }];
 const GAME_STAGE_LABELS = { ux: 'Diseño de videojuegos', developer: 'Desarrollo de videojuegos (Godot)' };
-function workflowFor(kind, provider, business, eligible = false) {
+function workflowFor(kind, provider, business, eligible = false, route = null) {
   if (provider !== 'orca') return null;
   const stages = kind === 'analysis' ? ANALYSIS_STAGE : [...WORKFLOW_STAGES, ...(eligible ? [{ key: 'integration', label: 'Integración GitHub', profile: null, executor: 'deterministic' }] : [])];
-  return { version: 1, name: kind === 'analysis' ? 'analysis-v1' : 'ui-quality-v1', status: 'queued', currentStage: null, updatedAt: stamp(), steps: stages.map(stage => ({ ...stage, label: (business === 'games' ? GAME_STAGE_LABELS[stage.key] : null) || stage.label, profile: stage.profile && kind === 'code' && ['agency', 'games'].includes(business) ? `${stage.profile}_${business}` : stage.profile, status: 'queued' })) };
+  return { version: 1, name: kind === 'analysis' ? 'analysis-v1' : 'ui-quality-v1', status: 'queued', currentStage: null, updatedAt: stamp(), steps: stages.map(stage => ({ ...stage, label: (business === 'games' ? GAME_STAGE_LABELS[stage.key] : null) || stage.label, profile: stage.profile && kind === 'code' && ['agency', 'games'].includes(business) ? `${stage.profile}_${business}` : stage.profile, status: 'queued' })).map(step => omittedStep({ route }, step)) };
+}
+// A stage the route leaves out stays in the workflow as skipped, with the reason shown in the panel.
+function omittedStep(job, step) {
+  const reason = routeOmission(job, step.key);
+  return reason ? { key: step.key, label: step.label, ...(step.profile ? { profile: step.profile } : {}), status: 'skipped', routeOmitted: true, summary: reason } : step;
 }
 export class QueueError extends Error {
   constructor(message, code = 'queue_error') { super(message); this.code = code; }
@@ -57,32 +66,154 @@ const applyEvent = (state, event) => {
   state.revision = event.revision;
 };
 
-async function readLedger(root, repair = false) {
-  let raw;
-  try { raw = await fs.readFile(ledger(root), 'utf8'); }
-  catch (e) {
-    if (e.code !== 'ENOENT') throw e;
-    try { await fs.access(path.join(dir(root), 'state.json')); } catch (err) { if (err.code === 'ENOENT') { const fresh = emptyState(); ledgerHeads.set(fresh, LEDGER_GENESIS); return fresh; } throw err; }
-    throw new QueueError('Falta el registro de eventos, pero existe una instantánea. Revisión manual necesaria.', 'ledger_missing');
-  }
-  const state = emptyState();
-  const complete = raw.lastIndexOf('\n') + 1;
+// Reading and checking the whole ledger on every load made each panel refresh cost seconds once the file
+// grew to tens of MB. Each process now remembers the state it built and how far into the file it got:
+// - same size and timestamps: the remembered state is returned;
+// - the file grew: only the new lines are read, after checking that the last line already read is still
+//   there byte for byte, and they must chain from it as always;
+// - anything else (shorter, rewritten in place, first load, or more than LEDGER_FULL_VERIFY_MS since the
+//   last complete check): the whole file is read and checked exactly as before.
+// So an edit that keeps the last line and makes the file longer is detected at the next complete check
+// (at most LEDGER_FULL_VERIFY_MS later, or at once in any new process) instead of on the next load.
+const LEDGER_FULL_VERIFY_MS = 60_000;
+// A file seen within this time of its own last change could be rewritten again with the same size and the
+// same timestamps, so such a sighting is never trusted as «unchanged»: the next load checks the file whole.
+const LEDGER_RACY_MS = 50;
+const ledgerCache = new Map();
+const ledgerFullReads = new Map();
+
+function applyLedgerLines(state, lines, head) {
   let previous = null;
-  for (const line of raw.slice(0, complete).split('\n').filter(Boolean)) {
+  for (const line of lines) {
     let event;
     try { event = JSON.parse(line); } catch { throw new QueueError('Registro de eventos dañado. Revisión manual necesaria.', 'ledger_corrupt'); }
     // D: every event the Centro writes names the hash of the exact previous line, so altering, removing or
     // reordering any line before it is detected. Lines without `prev` (history before D, or a manual append at
     // the end) stay valid; the next Centro write chains over them.
-    if (event.prev !== undefined && event.prev !== (previous ? lineHash(previous) : LEDGER_GENESIS)) {
+    if (event.prev !== undefined && event.prev !== (previous === null ? head : lineHash(previous))) {
       throw new QueueError('El registro de eventos no encadena con la línea anterior: se alteró, se borró o se reordenó una entrada. Revisión manual necesaria.', 'ledger_chain_broken');
     }
     applyEvent(state, event);
     previous = line;
   }
-  ledgerHeads.set(state, previous ? lineHash(previous) : LEDGER_GENESIS);
+  return previous === null ? head : lineHash(previous);
+}
+
+// Byte range of the last non-empty complete line in buffer[0, complete), or null.
+function lastLedgerLine(buffer, complete) {
+  let end = complete;
+  while (end > 0) {
+    const newline = end - 1;
+    const start = newline === 0 ? 0 : buffer.lastIndexOf(0x0a, newline - 1) + 1;
+    if (start < newline) return { start, end };
+    end = newline;
+  }
+  return null;
+}
+
+const sameLedgerFile = (cached, stat) => cached.stable && stat.size === cached.fileSize && stat.mtimeMs === cached.mtimeMs && stat.ctimeMs === cached.ctimeMs
+  && cached.observedAt - Math.max(cached.mtimeMs, cached.ctimeMs) >= LEDGER_RACY_MS;
+
+async function readWholeLedger(root) {
+  const file = ledger(root);
+  const handle = await fs.open(file, 'r');
+  let buffer, stat;
+  try { buffer = await handle.readFile(); stat = await handle.stat(); } finally { await handle.close(); }
+  const observedAt = Date.now();
+  const state = emptyState();
+  const complete = buffer.lastIndexOf(0x0a) + 1;
+  const head = applyLedgerLines(state, buffer.toString('utf8', 0, complete).split('\n').filter(Boolean), LEDGER_GENESIS);
+  const record = {
+    stateJson: JSON.stringify(state), head, offset: complete, tail: lastLedgerLine(buffer, complete),
+    fileSize: buffer.length, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, observedAt, stable: stat.size === buffer.length, verifiedAt: observedAt,
+  };
+  ledgerCache.set(file, record);
+  return record;
+}
+
+// Reads what was appended since `cached`. Returns null when the file no longer continues what was read.
+async function extendLedger(root, cached) {
+  const file = ledger(root);
+  const from = cached.tail ? cached.tail.start : cached.offset;
+  const handle = await fs.open(file, 'r');
+  let chunk, stat;
+  try {
+    const { size } = await handle.stat();
+    if (size < cached.offset) return null;
+    chunk = Buffer.allocUnsafe(size - from);
+    let read = 0;
+    while (read < chunk.length) {
+      const { bytesRead } = await handle.read(chunk, read, chunk.length - read, from + read);
+      if (!bytesRead) break;
+      read += bytesRead;
+    }
+    chunk = chunk.subarray(0, read);
+    stat = await handle.stat();
+  } finally { await handle.close(); }
+  const known = cached.offset - from;
+  if (chunk.length < known) return null;
+  if (cached.tail) {
+    const tail = chunk.toString('utf8', 0, known).split('\n').filter(Boolean);
+    if (tail.length !== 1 || chunk[known - 1] !== 0x0a || lineHash(tail[0]) !== cached.head) return null;
+  }
+  const added = chunk.subarray(known);
+  const complete = added.lastIndexOf(0x0a) + 1;
+  const lines = added.toString('utf8', 0, complete).split('\n').filter(Boolean);
+  const position = { fileSize: from + chunk.length, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, observedAt: Date.now(), stable: stat.size === from + chunk.length };
+  if (!lines.length) {
+    const record = { ...cached, offset: cached.offset + complete, ...position };
+    if (ledgerCache.get(file) === cached) ledgerCache.set(file, record);
+    return record;
+  }
+  const state = JSON.parse(cached.stateJson);
+  const head = applyLedgerLines(state, lines, cached.head);
+  const last = lastLedgerLine(added, complete);
+  const record = {
+    stateJson: JSON.stringify(state), head, offset: cached.offset + complete,
+    tail: { start: cached.offset + last.start, end: cached.offset + last.end },
+    ...position, verifiedAt: cached.verifiedAt,
+  };
+  if (ledgerCache.get(file) === cached) ledgerCache.set(file, record);
+  return record;
+}
+
+async function currentLedger(root) {
+  const file = ledger(root);
+  const cached = ledgerCache.get(file);
+  if (cached && Math.abs(Date.now() - cached.verifiedAt) < LEDGER_FULL_VERIFY_MS) {
+    const stat = await fs.stat(file);
+    if (sameLedgerFile(cached, stat)) return cached;
+    // Same size but touched: something rewrote the file without appending. Check it whole.
+    if (stat.size > cached.fileSize || !cached.stable) {
+      const extended = await extendLedger(root, cached);
+      if (extended) return extended;
+    }
+  }
+  // One complete read at a time per ledger: loads that arrive meanwhile wait for it and share it.
+  let reading = ledgerFullReads.get(file);
+  if (!reading) {
+    reading = readWholeLedger(root).finally(() => { if (ledgerFullReads.get(file) === reading) ledgerFullReads.delete(file); });
+    ledgerFullReads.set(file, reading);
+  }
+  return reading;
+}
+
+async function readLedger(root, repair = false) {
+  let record;
+  try { record = await currentLedger(root); }
+  catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+    ledgerCache.delete(ledger(root));
+    try { await fs.access(path.join(dir(root), 'state.json')); } catch (err) { if (err.code === 'ENOENT') { const fresh = emptyState(); ledgerHeads.set(fresh, LEDGER_GENESIS); return fresh; } throw err; }
+    throw new QueueError('Falta el registro de eventos, pero existe una instantánea. Revisión manual necesaria.', 'ledger_missing');
+  }
+  const state = JSON.parse(record.stateJson);
+  ledgerHeads.set(state, record.head);
   // A torn final write was never committed. Only the lock owner may trim it.
-  if (repair && complete < raw.length) await fs.truncate(ledger(root), Buffer.byteLength(raw.slice(0, complete)));
+  if (repair && record.offset < record.fileSize) {
+    await fs.truncate(ledger(root), record.offset);
+    if (ledgerCache.get(ledger(root)) === record) ledgerCache.set(ledger(root), { ...record, stable: false });
+  }
   // D: the snapshot is written after each append, so it can never be ahead of the ledger. If it is, committed
   // events were cut from the end of the ledger. Checked by the lock owner before any new write.
   if (repair) {
@@ -161,7 +292,12 @@ async function acquireLockFile(root, lockName, lockPath) {
       }
       if (!Number.isInteger(owner.pid) || owner.pid <= 0 || !owner.token) throw new QueueError('Bloqueo inválido: revisión manual necesaria.', 'lock_uncertain');
       if (owner.unsafe) throw new QueueError('No se pudo confirmar la parada de un proceso anterior; revisa procesos y bloqueo manualmente.', 'lock_uncertain');
-      if (alive(owner.pid)) throw new QueueError('Ya hay un ejecutor u otra operación de escritura en marcha.', 'locked');
+      if (alive(owner.pid)) {
+        const busy = new QueueError('Ya hay un ejecutor u otra operación de escritura en marcha.', 'locked');
+        // Lets a caller tell a short write of its own process from another executor.
+        busy.lockName = lockName; busy.ownerPid = owner.pid;
+        throw busy;
+      }
       // Serialize reclamation: two stale-lock readers must never unlink a new owner's lock.
       const recoveryPath = path.join(dir(root), lockName + '.recovery.lock');
       let recovery;
@@ -199,18 +335,22 @@ export async function releaseLock(lock) {
   }
 }
 
-export async function acquireLedgerLock(root, waitMs) {
+// sameProcessWaitMs: how long to wait when the ledger lock belongs to this same process. Callers that
+// opt in (the dashboard probe) wait for a write of their own process instead of reporting another executor.
+export async function acquireLedgerLock(root, waitMs, { sameProcessWaitMs = waitMs } = {}) {
   const started = performance.now();
   for (;;) {
     try { return await acquireLock(root); }
     catch (error) {
       const elapsed = performance.now() - started;
-      if (elapsed >= waitMs || error.code !== 'locked' && !(error.initializing && elapsed < 100)) throw error;
+      const limit = error.ownerPid === process.pid ? Math.max(waitMs, sameProcessWaitMs) : waitMs;
+      if (elapsed >= limit || error.code !== 'locked' && !(error.initializing && elapsed < 100)) throw error;
       await wait(25);
     }
   }
 }
 
+const OPERATOR_LOCK_WAIT_MS = 10_000;
 async function mutate(root, action, waitMs = 0) {
   root = path.resolve(root);
   const lock = await acquireLedgerLock(root, waitMs);
@@ -220,7 +360,7 @@ async function mutate(root, action, waitMs = 0) {
 // Unscoped CLI execution keeps its existing exclusive semantics. An automatic
 // lane owns only its company lock while it waits for Orca. Both modes take the
 // shared lock first on entry so a legacy runner cannot overlap a scoped one.
-async function withExecutors(root, business, action) {
+async function withExecutors(root, business, action, { sameProcessWaitMs } = {}) {
   if (!business) {
     return mutate(root, async (state, lock) => {
       const lanes = [];
@@ -232,7 +372,7 @@ async function withExecutors(root, business, action) {
       }
     });
   }
-  const sharedLock = await acquireLedgerLock(root, 2000);
+  const sharedLock = await acquireLedgerLock(root, 2000, { sameProcessWaitMs });
   let lock;
   try {
     try { lock = await acquireLock(root, business); }
@@ -279,6 +419,9 @@ export function validateSpec(spec) {
   if (!['orca', 'auto', 'codex', 'api'].includes(spec.provider ?? 'orca')) throw new QueueError('provider debe ser orca, auto, codex o api.');
   if (spec.kind === 'code' && (!spec.workspace || !spec.isolated)) throw new QueueError('Los trabajos de código requieren workspace y confirmación isolated.');
   try { validateJobLaunch(spec.launch); } catch (error) { throw new QueueError(error.message, 'launch_choice_invalid'); }
+  try { validateJobRoute(spec.route, spec.kind); } catch (error) { throw new QueueError(error.message, 'job_route_invalid'); }
+  try { validateSkillChoice(spec.skills); } catch (error) { throw new QueueError(error.message, 'skill_choice_invalid'); }
+  try { validateRequires(spec.requires); } catch (error) { throw new QueueError(error.message, 'job_requires_invalid'); }
 }
 
 export async function addJob(root, spec) {
@@ -291,8 +434,9 @@ export async function addJob(root, spec) {
     if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) throw new QueueError('Identificador inválido.');
     if (state.jobs.some(job => job.id === id)) throw new QueueError('Este identificador ya existe; no se añadirá dos veces.', 'duplicate');
     const provider = spec.provider ?? 'orca';
-    const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true);
-    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
+    const route = provider === 'orca' ? validateJobRoute(spec.route, spec.kind) : undefined;
+    const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true, route);
+    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), ...(route ? { route } : {}), ...(spec.skills ? { skills: validateSkillChoice(spec.skills) } : {}), ...(spec.requires ? { requires: validateRequires(spec.requires) } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
       ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0,
       ...(currentActor() ? { actor: currentActor() } : {}) };
     job.contract = contract;
@@ -922,8 +1066,15 @@ export function qualityCorrection(job) {
   const rounds = (job.livenessRecoveryHistory || []).filter(item => item.qualityAction?.type === 'correction');
   const criteria = findings.map(item => item.criterion).sort();
   const previous = rounds.at(-1)?.qualityAction.findings.map(item => item.criterion).sort();
-  return findings.length && rounds.length < 5 && (!previous || recoveryFingerprint(previous) !== recoveryFingerprint(criteria))
-    ? { findings, round: rounds.length + 1 } : null;
+  // The same failed criteria as the previous round only mean "no progress" when the blocked candidate was
+  // already corrected before. A different candidate is new work that can fail the same criterion differently.
+  const candidate = block?.delivery?.candidate;
+  const corrected = new Set((job.workflowHistory || []).flatMap(workflow => workflow?.steps || [])
+    .filter(item => ['qa', 'reviewer'].includes(item.key) && item.status === 'blocked' && item.delivery?.candidate)
+    .map(item => item.delivery.candidate));
+  const repeated = previous && recoveryFingerprint(previous) === recoveryFingerprint(criteria)
+    && (!/^[a-f0-9]{64}$/.test(candidate || '') || corrected.has(candidate));
+  return findings.length && rounds.length < 5 && !repeated ? { findings, round: rounds.length + 1 } : null;
 }
 
 export function assertQualityAction(job, action) {
@@ -941,7 +1092,7 @@ export function integrationValidationSteps(job, scope = 'integration', qualityAc
   const block = scope === 'qa' ? settledQaRevalidation(job, qualityAction)
     : scope === 'reviewer' && qualityAction ? settledReviewerRevalidation(job) : null;
   if (scope !== 'integration' && !block) throw new QueueError('La etapa de calidad no acredita un cierre bloqueado.', 'integration_recovery_invalid');
-  const keys = scope === 'qa' ? ['ux', 'developer', 'qa'] : ['ux', 'developer', 'qa', 'reviewer'];
+  const keys = (scope === 'qa' ? ['ux', 'developer', 'qa'] : ['ux', 'developer', 'qa', 'reviewer']).filter(stage => !routeOmits(job, stage));
   const steps = keys.map(stage => {
     const step = job?.workflow?.steps?.find(item => item.key === stage);
     if (!(step && (step.status === 'succeeded' || step === block)) || step.runId !== job.workflow.runId || !IDENTIFIERS.taskId.test(step.taskId || '')
@@ -1252,7 +1403,7 @@ export function stoppedDeveloperCheckpoint(job) {
   const stage = workflow?.steps?.find(step => step.key === 'developer');
   const ux = workflow?.steps?.find(step => step.key === 'ux');
   if (job?.provider !== 'orca' || job.error?.code !== 'timeout' || executionTimeoutMs(job) !== null
-    || workflow?.currentStage !== 'developer' || ux?.status !== 'succeeded'
+    || workflow?.currentStage !== 'developer' || !(ux && stageSatisfied(ux))
     || stage?.status !== 'running' || stage.dispatchStatus !== 'active' || stage.attempt !== job.attempts
     || stage.runId !== workflow.runId || !IDENTIFIERS.runId.test(stage.runId ?? '')
     || !IDENTIFIERS.taskId.test(stage.taskId ?? '') || !IDENTIFIERS.dispatchId.test(stage.dispatchId ?? '')
@@ -1279,8 +1430,13 @@ export async function increaseJobAttemptLimit(root, id, maxAttempts) {
   }, 2000);
 }
 
-export async function retryJob(root, id, { confirm = false, stoppedDeveloperRecovery } = {}) {
+// substitute: relaunch the failed stage with the other provider. Only after its previous worker is confirmed finished;
+// its effects and report are kept and the new assignment is a new Task that follows the previous one.
+export async function retryJob(root, id, { confirm = false, stoppedDeveloperRecovery, substitute, reason } = {}) {
   if (!confirm) throw new QueueError('Revisa los resultados/efectos previos y usa --confirm-reviewed para reintentar.');
+  // A person pressing Reintentar must not lose to the panel's own background ticks, which take the ledger lock every
+  // second and a half and read the whole ledger while they hold it (second real home-finance job: refused twice).
+  // Waiting is safe: the action below re-reads the state under the lock and validates it again.
   return mutate(root, async state => {
     const previous = state.jobs.find(j => j.id === id);
     if (!previous || previous.state !== 'needs_attention') throw new QueueError('Solo se pueden reabrir trabajos needs_attention.');
@@ -1310,6 +1466,18 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
       (activeStep.status === 'blocked' && !['interrupted', 'orca_empty_result'].includes(activeStep.error)
         && ['rejected', 'failed', 'cancelled', 'abandoned', 'completed'].includes(activeStep.dispatchStatus))
     );
+    let substitution = null;
+    if (substitute !== undefined) {
+      const from = activeStep?.orcaAgent ?? activeStep?.launch?.agent ?? 'codex';
+      if (!LAUNCH_AGENTS.includes(substitute)) throw new QueueError(`El proveedor sustituto debe ser ${LAUNCH_AGENTS.join(' o ')}.`, 'substitution_invalid');
+      if (recovery || !activeStep || !safelyRetryableStage || !['ux', 'developer', 'qa', 'reviewer', 'planner'].includes(activeStep.key)) throw new QueueError('Solo se sustituye el proveedor de una etapa de agente que falló de forma confirmada.', 'substitution_invalid');
+      if (substitute === from) throw new QueueError(`La etapa ya se lanzó con ${from}; para repetirla con el mismo proveedor usa el reintento normal.`, 'substitution_invalid');
+      // "Confirmed finished": Orca reported the worker's final state, or it rejected the launch and no worker exists.
+      if (!(activeStep.dispatchSettled === true || activeStep.dispatchStatus === 'rejected')) throw new QueueError('No consta que el trabajador anterior haya terminado. Comprueba su dispatch en Orca antes de sustituir el proveedor.', 'substitution_unconfirmed');
+      if (typeof reason !== 'string' || reason.trim().length < 4 || reason.length > 500) throw new QueueError('Indica el motivo de la sustitución (4–500 caracteres).', 'substitution_invalid');
+      substitution = { from, to: substitute, reason: reason.trim(), at: stamp(), ...(currentActor() ? { actor: currentActor() } : {}),
+        ...(activeStep.dispatchId ? { previousDispatchId: activeStep.dispatchId } : {}), ...(activeStep.artifact ? { previousArtifact: activeStep.artifact } : {}) };
+    }
     const workflowHistory = workflow
       ? [...(previous.workflowHistory ?? []), { ...workflow, attempt: previous.attempts, savedAt: stamp() }]
       : previous.workflowHistory;
@@ -1322,12 +1490,13 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
         ...workflow,
         status: 'queued',
         currentStage: activeStep.key,
-        steps: workflow.steps.map((step, index) => index < resetAt
+        steps: workflow.steps.map((step, index) => index < resetAt || step.routeOmitted
           ? step
           : { key: step.key, label: step.label, profile: step.profile, status: 'queued',
-            ...(index === resetAt && IDENTIFIERS.taskId.test(step.taskId ?? '') && IDENTIFIERS.dispatchId.test(step.dispatchId ?? '') && (recovery || ['failed', 'cancelled', 'abandoned'].includes(step.dispatchStatus))
+            ...(index === resetAt && substitution ? { substitution, ...(IDENTIFIERS.taskId.test(step.taskId ?? '') ? { predecessorTaskId: step.taskId, supersedesDispatchId: step.dispatchId } : {}) }
+              : index === resetAt && IDENTIFIERS.taskId.test(step.taskId ?? '') && IDENTIFIERS.dispatchId.test(step.dispatchId ?? '') && (recovery || ['failed', 'cancelled', 'abandoned'].includes(step.dispatchStatus))
               ? { retryOf: { taskId: step.taskId, dispatchId: step.dispatchId, dispatchStatus: recovery ? 'stopped' : step.dispatchStatus,
-                ...(recovery ? { recoveryId: recovery.id } : {}), ...(step.orcaAgent ? { orcaAgent: step.orcaAgent } : {}),
+                ...(recovery ? { recoveryId: recovery.id } : {}), ...(step.orcaAgent ? { orcaAgent: step.orcaAgent } : {}), ...(step.launch?.agent ? { launch: step.launch } : {}), ...(step.skills?.length ? { skills: step.skills } : {}),
                 taskInputAttempt: step.taskInputAttempt ?? step.attempt ?? previous.attempts } }
               : {}),
           }),
@@ -1343,6 +1512,30 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
     };
     const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - amount), estimatedSpentUsd: state.budget.estimatedSpentUsd + amount };
     await commit(root, state, 'operator_retry', { jobs: [job], budget }, { jobId: id });
+    return job;
+  }, OPERATOR_LOCK_WAIT_MS);
+}
+
+// Scope changed: the coordinator puts back a stage the route had left out (today only Diseño).
+// Allowed only while Desarrollo has no assignment at all: a developer already briefed without a design
+// cannot be handed one silently, so that case goes through the coordinator's answer or a new job.
+export async function addJobStage(root, id, { stage, reason } = {}) {
+  return mutate(root, async state => {
+    const previous = state.jobs.find(job => job.id === id);
+    if (!previous) throw new QueueError('No existe ese trabajo.', 'job_not_found');
+    if (previous.kind !== 'code' || previous.provider !== 'orca' || !previous.workflow) throw new QueueError('Solo los trabajos de código del pipeline Orca tienen ruta.', 'job_route_invalid');
+    if (!['queued', 'retry_wait', 'needs_attention'].includes(previous.state)) throw new QueueError('La ruta solo cambia con el trabajo en cola o pendiente de revisión, nunca en marcha ni terminado.', 'job_route_locked');
+    const developer = previous.workflow.steps.find(step => step.key === 'developer');
+    if (!developer || developer.status !== 'queued' || developer.dispatchId || developer.taskId || developer.retryOf) {
+      throw new QueueError('Desarrollo ya tiene una asignación sin esa etapa. Resuelve la duda de diseño mediante el coordinador o crea un encargo con la ruta completa.', 'job_route_locked');
+    }
+    let route;
+    try { route = routeWithStage(previous.route, stage, { reason, actor: currentActor() }); }
+    catch (error) { throw new QueueError(error.message, error.code); }
+    const template = workflowFor(previous.kind, previous.provider, previous.business, false, route).steps.find(step => step.key === stage);
+    const job = { ...previous, route, workflow: { ...previous.workflow, updatedAt: stamp(),
+      steps: previous.workflow.steps.map(step => step.key === stage ? { ...template, addedByScopeChange: route.added.at(-1) } : step) } };
+    await commit(root, state, 'job_stage_added', { jobs: [job] }, { jobId: id, stage, reason: route.added.at(-1).reason });
     return job;
   });
 }
@@ -1371,7 +1564,7 @@ export async function resumeJobWithDecisions(root, id, { continuation, prompt } 
     }
     const workflow = {
       ...previous.workflow, status: 'queued', updatedAt: stamp(),
-      steps: previous.workflow.steps.map((item, i) => i < index ? item : {
+      steps: previous.workflow.steps.map((item, i) => i < index || item.routeOmitted ? item : {
         key: item.key, label: item.label, profile: item.profile, status: 'queued',
         ...(i === index ? { predecessorTaskId: stage.taskId, supersedesDispatchId: stage.dispatchId } : {}),
       }),
@@ -1409,6 +1602,30 @@ export async function cancelQueuedJob(root, id, { confirm = false } = {}) {
     const job = { ...previous, state: 'cancelled', reservedUsd: 0, cancelledAt: stamp() };
     const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - (previous.reservedUsd ?? 0)) };
     await commit(root, state, 'operator_cancelled', { jobs: [job], budget }, { jobId: id });
+    return job;
+  });
+}
+
+// The owner merged the PR by hand (e.g. a repository without CI) while the integration waited
+// for checks. The caller has already confirmed on GitHub that the PR with the approved commit is
+// merged; this only records the job as delivered. Nothing is dispatched or repeated.
+export async function settleOwnerMergedJob(root, id, integration, { confirm = false } = {}) {
+  if (!confirm) throw new QueueError('Confirma que la PR está fusionada con el commit aprobado; usa --confirm-reviewed.');
+  if (integration?.phase !== 'complete' || integration.mergedBy !== 'owner' || !/^[a-f0-9]{40,64}$/i.test(integration.mergeSha || ''))
+    throw new QueueError('Falta la integración reconciliada con el merge del owner.');
+  return mutate(root, async state => {
+    const previous = state.jobs.find(j => j.id === id);
+    if (!previous || previous.kind !== 'code' || !['needs_attention', 'queued'].includes(previous.state))
+      throw new QueueError('Solo se reconcilia un trabajo de código parado en la integración.');
+    const at = stamp();
+    const workflow = previous.workflow ? { ...previous.workflow, status: 'succeeded', currentStage: null, completedAt: at, updatedAt: at,
+      steps: previous.workflow.steps.map(step => step.key === 'integration'
+        ? { ...step, status: 'succeeded', error: null, summary: `PR #${integration.prNumber} fusionada por el owner · Merge ${integration.mergeSha}`, updatedAt: at }
+        : step) } : previous.workflow;
+    const job = { ...previous, state: 'succeeded', error: null, workflow, reservedUsd: 0, finishedAt: at,
+      result: { ...(previous.result || {}), provider: 'owner-merge-reconciled', integration, text: previous.result?.text || `Integrado: PR #${integration.prNumber} fusionada por el owner.` } };
+    const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - (previous.reservedUsd ?? 0)) };
+    await commit(root, state, 'owner_merge_reconciled', { jobs: [job], budget }, { jobId: id, prNumber: integration.prNumber, mergeSha: integration.mergeSha });
     return job;
   });
 }
@@ -1508,19 +1725,44 @@ export async function recoverRunning(root, state, business) {
 }
 
 // The panel and CLI share this recovery path; a busy or uncertain lock is never displaced.
-export async function recoverDashboardQueue(root, { business } = {}) {
+// The panel asks on every refresh and the automatic executor on every tick, all in one process. Those
+// questions used to meet each other's locks and report «Ya hay un ejecutor» with nothing running, and the
+// ledger stayed locked while it was read in full. So: one probe at a time per company (callers that arrive
+// meanwhile share its answer), a write of this same process is waited for, and the ledger is only locked
+// when there is an interrupted job to record. A lock held by another process, or a company lock held by a
+// running executor, is reported exactly as before.
+const DASHBOARD_PROBE_SAME_PROCESS_WAIT_MS = 30_000;
+const dashboardProbes = new Map();
+export function recoverDashboardQueue(root, { business } = {}) {
+  const key = `${path.resolve(root)}\n${business ?? ''}`;
+  const pending = dashboardProbes.get(key);
+  if (pending) return pending;
+  const probe = probeDashboardQueue(root, business).finally(() => { if (dashboardProbes.get(key) === probe) dashboardProbes.delete(key); });
+  dashboardProbes.set(key, probe);
+  return probe;
+}
+
+async function probeDashboardQueue(root, business) {
   try {
-    return await withExecutors(root, business, withState => withState(async state => {
-      await recoverRunning(root, state, business);
-      return { available: true };
-    }));
+    return await withExecutors(root, business, async withState => {
+      if (business) {
+        // The company lock is held here, so no executor can start one of its jobs: a read without the
+        // ledger lock is enough to know whether an interrupted job is waiting to be recorded.
+        const { jobs } = await loadState(root);
+        if (!jobs.some(job => job.state === 'running' && job.business === business)) return { available: true };
+      }
+      return withState(async state => {
+        await recoverRunning(root, state, business);
+        return { available: true };
+      });
+    }, { sameProcessWaitMs: DASHBOARD_PROBE_SAME_PROCESS_WAIT_MS });
   } catch (error) {
     if (['locked', 'lock_uncertain'].includes(error.code)) return { available: false, reason: error.message };
     throw error;
   }
 }
 
-export async function runQueue(root, { execute = false, worker, now, clock = Date.now, maxJobs = 5, jobId, business, beforeStart } = {}) {
+export async function runQueue(root, { execute = false, worker, now, clock = Date.now, maxJobs = 5, jobId, business, beforeStart, hold = admissionHold } = {}) {
   root = path.resolve(root);
   if (typeof clock !== 'function') throw new QueueError('clock debe ser una función.');
   if (business !== undefined && !QUEUE_BUSINESSES.includes(business)) throw new QueueError('Empresa inválida.');
@@ -1558,6 +1800,15 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
         if (revisedContract) assertContractRevisionCheckpoint(selectedJob, selectedJob.contractRevision);
         if (sameAttempt) assertLivenessResume(selectedJob, selectedJob.livenessResume);
         else if (selectedJob.attempts >= selectedJob.maxAttempts) throw new QueueError('Se alcanzó el máximo de intentos.', 'attempt_limit');
+        // Reasons to wait that are nobody's failure (quota in the personal reserve, another PC owns the job).
+        // Checked before the receipt admission so no recovery marker is consumed; the attempt is not counted.
+        const held = hold ? await hold(selectedJob, { root, now: clock(), jobs: state.jobs }) : null;
+        if (held && !held.admit) {
+          const waiting = { ...held, since: selectedJob.waiting?.since ?? stamp() };
+          const same = selectedJob.waiting && ['code', 'provider', 'state', 'until', 'message'].every(key => selectedJob.waiting[key] === waiting[key]);
+          if (!same) await commit(root, state, 'job_waiting', { jobs: [{ ...selectedJob, waiting }] }, { jobId: selectedJob.id, code: waiting.code, ...(waiting.provider ? { provider: waiting.provider } : {}) });
+          return { held: true };
+        }
         // Auto-run admission runs under the existing exclusive queue lock.
         // A declined admission never changes the job or consumes an attempt.
         const admission = beforeStart ? await beforeStart(selectedJob) : {};
@@ -1577,12 +1828,14 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
         const segmentStartedAt = stamp();
         const timeoutMs = executionTimeoutMs(selectedJob);
         const remainingTimeoutMs = timeoutMs === null ? null : timeoutMs - (sameAttempt ? elapsedAttemptMs(selectedJob) : 0);
-        const job = { ...selectedJob, ...admittedFields, state: 'running', attempts: selectedJob.attempts + (sameAttempt ? 0 : 1), startedAt: sameAttempt ? selectedJob.startedAt : segmentStartedAt, error: null,
+        const { waiting: _noLongerWaiting, ...readyJob } = selectedJob;
+        const job = { ...readyJob, ...(held?.admit ?? {}), ...admittedFields, state: 'running', attempts: selectedJob.attempts + (sameAttempt ? 0 : 1), startedAt: sameAttempt ? selectedJob.startedAt : segmentStartedAt, error: null,
           ...(sameAttempt ? { livenessResume: { ...selectedJob.livenessResume, phase: 'consumed', consumedAt: segmentStartedAt } } : {}) };
         const attemptStarted = Date.now();
         await commit(root, state, 'job_started', { jobs: [job] }, { jobId: job.id, attempt: job.attempts });
         return { job, sameAttempt, sameAttemptRecoveryId, segmentStartedAt, remainingTimeoutMs, attemptStarted, budget: state.budget };
       });
+      if (admitted?.held) continue; // this job waits; another one may still run
       if (!admitted) break;
       let { job, budget } = admitted;
       const { sameAttempt, sameAttemptRecoveryId, segmentStartedAt, remainingTimeoutMs, attemptStarted } = admitted;
@@ -1645,7 +1898,7 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
             skipped: ['skipped'],
           };
           if (!transitions[prior.status]?.includes(update.status)) throw new QueueError('Transición de etapa no permitida.', 'stage_transition_invalid');
-          if (['running', 'succeeded'].includes(update.status) && workflow.steps.slice(0, index).some(step => step.status !== 'succeeded')) {
+          if (['running', 'succeeded'].includes(update.status) && workflow.steps.slice(0, index).some(step => !stageSatisfied(step))) {
             throw new QueueError('Faltan etapas previas aprobadas.', 'stage_dependencies_unmet');
           }
           if (update.delivery) validateDelivery(update.delivery, {
@@ -1726,7 +1979,8 @@ export async function runQueue(root, { execute = false, worker, now, clock = Dat
           }
           // Automatic retries are only permitted for errors known to have rejected work.
           const retry = error.retryable === true && error.uncertain !== true && job.attempts < job.maxAttempts;
-          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), nextAttemptAt: retry ? new Date(clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null,
+          job = { ...job, state: retry ? 'retry_wait' : 'needs_attention', finishedAt: stamp(), // A provider that said when it will accept work again is retried then, not on the generic backoff.
+            nextAttemptAt: retry ? new Date(Number.isFinite(Date.parse(error.waitUntil ?? '')) && Date.parse(error.waitUntil) > clock() ? Date.parse(error.waitUntil) : clock() + Math.min(300_000, 30_000 * 2 ** (job.attempts - 1))).toISOString() : null,
             error: { code: error.code || 'worker_error', message: error.safeMessage || 'El ejecutor falló; revisa el trabajo y su resultado antes de continuar.', ...boundedErrorDetails(error.details) } };
           job = { ...job, ...(error.partialResult ? { result: error.partialResult } : {}),
             attemptHistory: [...(job.attemptHistory ?? []), { attempt: job.attempts, startedAt: segmentStartedAt, finishedAt: job.finishedAt, elapsedMs: Date.now() - attemptStarted, outcome: job.state, ...(sameAttempt ? { recoveryId: sameAttemptRecoveryId } : {}), promptChars: job.prompt.length, error: job.error.code,

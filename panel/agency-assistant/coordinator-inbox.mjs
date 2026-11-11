@@ -7,6 +7,8 @@ import { loadDashboardState, changeDashboardState, recordJobConfirmation } from 
 import { loadState } from '../queue.mjs';
 import { notifyCoordinatorRequest } from '../coordinator-bridge.mjs';
 import { withInboxLock } from './inbox-lock.mjs';
+import { validateJobLaunch } from '../../launch-choice.mjs';
+import { validateJobRoute } from '../../job-route.mjs';
 import { deliverCoordinatorNotice } from './coordinator-notice.mjs';
 import { assertCoordinatorQuestionsAnswered, coordinatorDecisions, coordinatorJobLink, checkCoordinatorAnswerNotices } from './coordinator-dialogue.mjs';
 
@@ -29,8 +31,11 @@ export function submitTaskToCoordinator(root, input, { notify = notifyCoordinato
   if (!/^[a-zA-Z0-9_-]{8,100}$/.test(operationId)) return Promise.reject(new Error('Falta una operación idempotente válida para la solicitud.'));
   if (!['agency', 'games'].includes(business)) return Promise.reject(new Error('Selecciona una empresa válida.'));
   if (title.length < 1 || title.length > 160 || text.length < 4 || text.length > 10_000 || successCriteria.length < 4 || successCriteria.length > 1800) return Promise.reject(new Error('Revisa título, objetivo y criterio de éxito antes de enviar al coordinador.'));
+  // Optional split chosen for this job in the panel; validated here so a bad choice never reaches the coordinator.
+  let launch;
+  try { launch = consultation ? undefined : validateJobLaunch(input.launch ?? undefined); } catch (error) { return Promise.reject(new Error(error.message)); }
   const inflightKey = `${root}:${business}:${operationId}`;
-  const signature = JSON.stringify({ business, title, text, successCriteria, projectId: input.projectId || null, intent, kind: requestedKind, confirmation: input.kind === 'code' ? confirmationValue(input.confirmation) : null });
+  const signature = JSON.stringify({ business, title, text, successCriteria, projectId: input.projectId || null, intent, kind: requestedKind, confirmation: input.kind === 'code' ? confirmationValue(input.confirmation) : null, ...(launch ? { launch } : {}) });
   if (pending.has(inflightKey)) return pending.get(inflightKey).signature === signature ? pending.get(inflightKey).promise : Promise.reject(new Error('Esta operación ya identifica otro encargo.'));
   const task = withInboxLock(root, `submission:${business}:${operationId}`, async () => {
     const inbox = await loadDashboardState(root);
@@ -39,7 +44,7 @@ export function submitTaskToCoordinator(root, input, { notify = notifyCoordinato
     if (projectId && !project) throw new Error('El proyecto no existe o pertenece a otra empresa.');
     const id = keyFor(`${business}:${operationId}`);
     let request = inbox.coordinatorRequests.find(item => item.id === id);
-    if (request && ((request.intent || 'task') !== intent || request.snapshot.title !== title || request.snapshot.text !== text || request.snapshot.successCriteria !== successCriteria || request.projectId !== (project?.id || null) || request.snapshot.requestedKind !== requestedKind || JSON.stringify(confirmationValue(request.snapshot.destinationConfirmation)) !== JSON.stringify(input.kind === 'code' ? confirmationValue(input.confirmation) : null))) throw new Error('Esta operación ya identifica otro encargo; conserva su ID para reintentar o crea una intención nueva.');
+    if (request && ((request.intent || 'task') !== intent || request.snapshot.title !== title || request.snapshot.text !== text || request.snapshot.successCriteria !== successCriteria || request.projectId !== (project?.id || null) || request.snapshot.requestedKind !== requestedKind || JSON.stringify(request.snapshot.launch ?? null) !== JSON.stringify(launch ?? null) || JSON.stringify(confirmationValue(request.snapshot.destinationConfirmation)) !== JSON.stringify(input.kind === 'code' ? confirmationValue(input.confirmation) : null))) throw new Error('Esta operación ya identifica otro encargo; conserva su ID para reintentar o crea una intención nueva.');
     if (!request) {
       request = {
         id, kind: 'task', intent, status: 'pending', notification: { status: 'pending' }, operationId,
@@ -48,6 +53,7 @@ export function submitTaskToCoordinator(root, input, { notify = notifyCoordinato
           schemaVersion: 1, version: 1, business, projectId: project?.id || null, projectName: project?.name || '', title, text, objective: text, successCriteria, decisions: [],
           intent, requestedKind,
           destinationConfirmation: input.kind === 'code' ? input.confirmation || null : null,
+          ...(launch ? { launch } : {}),
         },
       };
       request = await changeDashboardState(root, state => {
@@ -83,7 +89,7 @@ export function routeTaskFromCoordinator(root, requestId, kind, options = {}) {
   return promise;
 }
 
-async function routeTaskOnce(root, requestId, requestedKind, { reason = '', confirmation } = {}) {
+async function routeTaskOnce(root, requestId, requestedKind, { reason = '', confirmation, route: requestedRoute } = {}) {
   let kind = requestedKind;
   if (!['analysis', 'code'].includes(kind)) throw new Error('El coordinador debe elegir análisis o código.');
   const inbox = await loadDashboardState(root);
@@ -100,7 +106,10 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     kind = request.route.kind;
     reason = request.route.reason || '';
     confirmation = request.route.confirmation;
+    requestedRoute = request.route.pipelineRoute;
   }
+  // The coordinator's choice of stages (job-route.mjs). Validated before anything is saved; kept with the route checkpoint.
+  const pipelineRoute = kind === 'code' ? validateJobRoute(requestedRoute, kind) : undefined;
   if (request.notification?.status !== 'sent') throw new Error('El aviso al coordinador no está confirmado; no encolo la solicitud. Revisa primero su estado.');
   assertCoordinatorQuestionsAnswered(request, inbox.questions);
   const jobs = (await loadState(root)).jobs;
@@ -141,9 +150,10 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     `[COORDINATOR_REQUEST:${request.id}]`,
     `Empresa: ${request.business}`,
     `Proyecto: ${project?.name || 'Sin proyecto'}${project ? ` (${project.id})` : ''}`,
-    `Decisión del coordinador: ${kind === 'code' ? 'pipeline de código UX → Desarrollo → QA → Revisión' : 'Planificador para análisis sin editar código'}.`,
+    `Decisión del coordinador: ${kind !== 'code' ? 'Planificador para análisis sin editar código' : pipelineRoute?.omitted.length ? `pipeline de código Desarrollo → QA → Revisión (ruta ${pipelineRoute.label}; sin Diseño: ${pipelineRoute.reason})` : 'pipeline de código UX → Desarrollo → QA → Revisión'}.`,
     reason ? `Motivo de ruta: ${String(reason).trim().slice(0, 1000)}` : '',
     `Objetivo solicitado: ${snapshot.text}`,
+    snapshot.attachments?.length ? `Referencias adjuntas a la idea (las reciben solas Diseño, Desarrollo, QA y Revisión): ${snapshot.attachments.map(item => `${item.name} (${item.files} archivos)`).join('; ')}` : '',
     `Criterio de éxito: ${snapshot.successCriteria}`,
     `Decisiones confirmadas: ${JSON.stringify(decisions)}`,
     `Destino: ${kind === 'code' ? `${destination.checkout} · ${destination.branch} → ${destination.baseBranch}` : 'análisis'}`,
@@ -155,7 +165,7 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     if (current.route?.kind && current.route.kind !== kind) throw new Error('La decisión de ruta ya se guardó; no se permite cambiarla durante la recuperación.');
     if (current.status !== 'routing') {
       current.status = 'routing';
-      current.route = { kind, at: new Date().toISOString(), reason: String(reason).trim().slice(0, 1000), decisions, ...(kind === 'code' ? { confirmation: confirmation || snapshot.destinationConfirmation } : {}) };
+      current.route = { kind, at: new Date().toISOString(), reason: String(reason).trim().slice(0, 1000), decisions, ...(kind === 'code' ? { confirmation: confirmation || snapshot.destinationConfirmation } : {}), ...(pipelineRoute ? { pipelineRoute } : {}) };
       current.updatedAt = new Date().toISOString();
     }
     return current;
@@ -168,6 +178,9 @@ async function routeTaskOnce(root, requestId, requestedKind, { reason = '', conf
     kind, provider: 'orca', title, ...explicitContract,
     prompt, ...(coordinatorJobLink(request, project?.id || null) ? { coordination: coordinatorJobLink(request, project?.id || null) } : {}),
     ...(destination ? { workspace: destination.workspace, branch: destination.branch, destination, isolated: true } : {}),
+    // A receipt saved before this field existed keeps its exact spec (and so its fingerprint).
+    ...(snapshot.launch && (!savedReceipt || savedReceipt.spec.launch) ? { launch: snapshot.launch } : {}),
+    ...(savedReceipt ? (savedReceipt.spec.route ? { route: savedReceipt.spec.route } : {}) : pipelineRoute ? { route: pipelineRoute } : {}),
   });
   if (destination && submission.receipt) await recordJobConfirmation(root, jobId, request.business, destination);
   const updated = await changeDashboardState(root, state => {

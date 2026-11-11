@@ -2,6 +2,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseDelivery, deliveryApproved } from './workflow-contract.mjs';
 import { matchingCompletion, readStageReport, normalizeWorkerStatus, checkWorkerIdentity } from './orca-evidence.mjs';
+import { resolveDeliveryText } from './delivery-file.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const fail = message => Object.assign(new Error(message), { code: 'delivery_transport_unverified', uncertain: true });
@@ -42,7 +43,9 @@ export async function verifyUnicodeDeliveryTransport(root, job, step, { command,
   const originalReport = await readStageReport(root, step.artifact, identity);
   const inbox = await command(['orchestration', 'inbox', '--terminal', `run:${identity.runId}`, '--limit', '100', '--full']);
   const receipt = matchingCompletion(inbox.messages, identity, { strict: true });
-  if (!receipt?.messageId || receipt.text !== originalReport.text) throw fail('El recibo original no coincide con la evidencia guardada.');
+  // A delivery by file is stored expanded; the receipt holds the hash line that names those exact bytes.
+  const receiptText = receipt?.messageId ? await resolveDeliveryText(root, identity, receipt.text).catch(() => null) : null;
+  if (!receipt?.messageId || receiptText !== originalReport.text) throw fail('El recibo original no coincide con la evidencia guardada.');
   // 30 (D5): the stored report may validate under the current criteria rules (ids,
   // accents, case, spacing). Then nothing was lost in transport and no agent-specific
   // session archive is needed; the exact receipt and the saved artifact are the proof.

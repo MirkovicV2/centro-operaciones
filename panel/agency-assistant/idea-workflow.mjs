@@ -1,3 +1,4 @@
+import { validateJobRoute } from '../../job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -12,6 +13,7 @@ import { deliverCoordinatorNotice } from './coordinator-notice.mjs';
 import { assertCoordinatorQuestionsAnswered, coordinatorDecisions, coordinatorJobLink } from './coordinator-dialogue.mjs';
 
 import { withIdeaLock, ideaBusy, ideaBrief, classification } from './idea-model.mjs';
+import { ideaAttachments } from '../../references.mjs';
 const sends = new Map();
 const coordinatorSends = new Map();
 const coordinatorRoutes = new Map();
@@ -135,6 +137,8 @@ async function sendOnce(root, id, kind, projectId, confirmation) {
     ...explicitContract,
     ...(coordinatorRequest && coordinatorJobLink(coordinatorRequest, project.id) ? { coordination: coordinatorJobLink(coordinatorRequest, project.id) } : {}),
     ...(kind === 'code' ? { workspace: destination.workspace, branch: destination.branch, destination, isolated: true } : {}),
+    // The coordinator's choice of stages; a receipt saved earlier keeps its exact spec.
+    ...(savedReceipt ? (savedReceipt.spec.route ? { route: savedReceipt.spec.route } : {}) : kind === 'code' && confirmation.pipelineRoute ? { route: validateJobRoute(confirmation.pipelineRoute, kind) } : {}),
   };
   // Legacy recovery uses addJob with no auto receipt; activation cannot promote it.
   const submission = legacyPending ? { job: await addJob(root, submissionSpec).catch(error => { if (error.code === 'locked') return null; throw error; }) }
@@ -178,10 +182,11 @@ export function sendIdeaToCoordinator(root, id, { notify = notifyCoordinatorRequ
     let request = inbox.coordinatorRequests.find(item => item.id === requestId);
     if (!request) {
       const project = inbox.projects.find(item => item.id === idea.projectId && item.business === idea.business);
+      const attachments = (await ideaAttachments(root, idea.id).catch(() => [])).filter(item => item.status === 'ok');
       request = {
         id: requestId, kind: 'idea', ideaId: idea.id, ideaVersion: version, business: idea.business,
         status: 'pending', notification: { status: 'pending' }, createdAt: new Date().toISOString(),
-        snapshot: { schemaVersion: 1, business: idea.business, projectId: project?.id || null, projectName: project?.name || idea.projectName || '', version, focus: idea.focus || '', tags: [...(idea.tags || [])], title: idea.title, text: idea.text, objective: idea.text, successCriteria: 'Definir un resultado verificable y sus decisiones imprescindibles; confirmar criterios y destino antes de encolar código.', destinationConfirmation: null, decisions: [] },
+        snapshot: { schemaVersion: 1, business: idea.business, projectId: project?.id || null, projectName: project?.name || idea.projectName || '', version, focus: idea.focus || '', tags: [...(idea.tags || [])], title: idea.title, text: idea.text, objective: idea.text, successCriteria: 'Definir un resultado verificable y sus decisiones imprescindibles; confirmar criterios y destino antes de encolar código.', destinationConfirmation: null, decisions: [], ...(attachments.length ? { attachments } : {}) },
       };
       await changeDashboardState(root, state => { state.coordinatorRequests.push(request); });
     }
@@ -250,6 +255,7 @@ export function routeCoordinatorIdea(root, requestId, kind, confirmation = {}) {
       baseBranch: confirmation.baseBranch || '', objective: String(confirmation.objective || '').trim(),
       successCriteria: String(confirmation.successCriteria || '').trim(), version: request.ideaVersion,
       ...(Object.hasOwn(confirmation, 'productAcceptance') ? { productAcceptance: structuredClone(confirmation.productAcceptance) } : {}),
+      ...(confirmation.pipelineRoute ? { pipelineRoute: validateJobRoute(confirmation.pipelineRoute, kind) } : {}),
     } : { version: request.ideaVersion };
     await changeDashboardState(root, state => {
       const current = state.coordinatorRequests.find(item => item.id === requestId);

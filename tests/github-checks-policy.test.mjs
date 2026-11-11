@@ -34,7 +34,7 @@ async function fixture(t, { checks = [], mergeable = 'MERGEABLE' } = {}) {
     if (args[1] === 'create') { state.pr = { number: 4, url: 'https://github.com/owner/repo/pull/4', headRefOid: state.head, baseRefOid: base }; return ''; }
     if (args[1] === 'view') {
       if (state.merged) return JSON.stringify({ ...identity, ...state.pr, state: 'MERGED', mergedAt: '2026-11-10T00:00:00Z', mergeCommit: { oid: 'c'.repeat(40) }, headRefOid: state.head, baseRefOid: base });
-      state.views++; return JSON.stringify({ ...identity, ...state.pr, state: 'OPEN', mergeable: state.mergeable, statusCheckRollup: typeof state.checks === 'function' ? state.checks(state.views) : state.checks, headRefOid: state.head, baseRefOid: base });
+      state.views++; return JSON.stringify({ ...identity, ...state.pr, state: state.pr.state || 'OPEN', mergeable: state.mergeable, statusCheckRollup: typeof state.checks === 'function' ? state.checks(state.views) : state.checks, headRefOid: state.head, baseRefOid: base });
     }
     if (args[1] === 'merge') { state.merges++; state.merged = true; return ''; }
     throw new Error(`unexpected gh ${args.join(' ')}`);
@@ -85,4 +85,37 @@ test('a check that registers late is awaited and merged; pending checks are awai
   assert.equal(pending.waits.reduce((sum, ms) => sum + ms, 0), DEFAULT_CHECKS_TIMEOUT_MS);
   assert.equal(pending.state.records.at(-1).checkState, 'waiting'); assert.equal(pending.state.records.at(-1).waitTimedOut, true);
   assert.equal(pending.state.merges, 0);
+});
+
+test('a PR the owner merges by hand while the Centro waits for checks is recorded as integrated, without a second merge', async t => {
+  const f = await fixture(t);
+  // No CI: the owner merges during the wait.
+  f.options.wait = async ms => { f.advance(ms); f.state.merged = true; };
+  const record = await integrateGitHub(f.job, f.ctx, f.options);
+  assert.equal(record.phase, 'complete'); assert.equal(record.status, 'completed');
+  assert.equal(record.mergedBy, 'owner'); assert.equal(record.reconciled, true);
+  assert.equal(record.mergeSha, 'c'.repeat(40)); assert.equal(record.prNumber, 4);
+  assert.equal(f.state.merges, 0, 'the Centro never merges on top of the owner');
+});
+
+test('decision on GitHub: the Centro opens the PR and never merges it; the owner merge completes it and closing it rejects', async t => {
+  // No CI: no no_checks stop, the PR just waits for the owner.
+  const noCi = await fixture(t);
+  let polls = 0;
+  const record = await integrateGitHub(noCi.job, noCi.ctx, { ...noCi.options, ownerMerges: true, wait: async ms => { noCi.advance(ms); if (++polls === 60) noCi.state.merged = true; } });
+  assert.equal(record.phase, 'complete'); assert.equal(record.mergedBy, 'owner'); assert.equal(noCi.state.merges, 0, 'the Centro never merges');
+  assert.ok(polls >= 60, 'it kept waiting past the 10 minute no_checks grace');
+  assert.ok(noCi.state.records.some(item => item.checkState === 'awaiting_owner'));
+  assert.equal(noCi.state.records.some(item => item.checkState === 'no_checks'), false);
+  // Green CI is not a merge either.
+  const green = await fixture(t, { checks: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }] });
+  let greenPolls = 0;
+  await integrateGitHub(green.job, green.ctx, { ...green.options, ownerMerges: true, wait: async ms => { green.advance(ms); if (++greenPolls === 3) green.state.merged = true; } });
+  assert.equal(green.state.merges, 0);
+  // Closing the PR is the rejection.
+  const closed = await fixture(t);
+  let closedPolls = 0;
+  const error = await integrateGitHub(closed.job, closed.ctx, { ...closed.options, ownerMerges: true, wait: async ms => { closed.advance(ms); if (++closedPolls === 2) closed.state.pr.state = 'CLOSED'; } }).catch(failure => failure);
+  assert.equal(error.code, 'github_checks_blocked'); assert.match(error.message, /Cerraste la PR sin fusionarla/);
+  assert.equal(closed.state.merges, 0);
 });

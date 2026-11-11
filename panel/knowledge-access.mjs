@@ -5,6 +5,7 @@ import { loadState } from '../queue.mjs';
 import { loadDashboardState } from './agency-assistant/dashboard-state.mjs';
 import { workerHandoffContext } from './worker-decisions.mjs';
 import { projectMemory } from './project-memory.mjs';
+import { readSharedMemory, memoryContext } from '../project-knowledge.mjs';
 import { readDashboardConfig, noteMetadata, knowledgeSummary, selectCurrentKnowledgeNotes, safeMarkdownText } from './agency-assistant/knowledge.mjs';
 
 const businesses = { agency: 'Agencia', games: 'Videojuegos' };
@@ -269,9 +270,17 @@ async function consult(root, query, identity, jobs, projects) {
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const found = await collectNotes(root, identity.scope, jobs, projects);
   const memory = projectMemory(identity.scope, jobs, { jobId: identity.jobId });
+  // The team's shared memory (memoria/, versioned with the Centro) does not depend on the vault: accepted decisions and
+  // validated lessons reach the worker even while Obsidian cannot be read. A broken file is reported, not fatal.
+  let sharedMemory = null;
+  const project = projects.find(item => item.id === identity.scope.projectId);
+  if (project) {
+    try { sharedMemory = memoryContext(await readSharedMemory({ business: identity.scope.business, projectName: project.name }), { includeHistory: query.includeHistory, published: memory?.published ?? null }); }
+    catch (error) { if (!String(error.code ?? '').startsWith('project_memory')) throw error; found.warnings = [...found.warnings, `Memoria compartida no aplicada: ${error.message}`].slice(0, 12); }
+  }
   const result = found.connected ? sourcesFor(found.notes, query.query, found.vault, { memory, jobId: identity.jobId, includeHistory: query.includeHistory }) : { sources: [], deliveredChars: 0 };
   const receipt = { ...expected, business: identity.scope.business, projectId: identity.scope.projectId, createdAt: new Date().toISOString(),
-    connected: found.connected, notice, warnings: found.warnings, ...(memory ? { projectState: memory } : {}), ...result, citedSourceIds: [] };
+    connected: found.connected, notice, warnings: found.warnings, ...(memory ? { projectState: memory } : {}), ...(sharedMemory ? { sharedMemory } : {}), ...result, citedSourceIds: [] };
   receipt.evidenceSha256 = digest(JSON.stringify(receipt));
   // Publish once via an exclusive hard link: readers never see a partial JSON;
   // concurrent/replayed calls cannot replace the original delivered evidence.

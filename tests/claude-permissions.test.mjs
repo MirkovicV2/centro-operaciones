@@ -12,7 +12,7 @@ test('the permissions template allows what a worker needs and denies effects, ot
   const { allow, deny, defaultMode } = example.permissions;
   assert.equal(defaultMode, 'acceptEdits');
   for (const rule of ['Read(//<RAIZ>/data/dispatch-specs/**)', 'Read(//<RAIZ>/data/stage-reports/**)', 'Bash(sha256sum:*)', 'Bash(npm test:*)', 'Bash(git status:*)', 'Bash(git diff:*)',
-    'Bash(curl -sS -X POST http://127.0.0.1:<PUERTO>/api/jobs/*/context *)', 'Bash(<ORCA_CLI> orchestration send *--type worker_done*)', 'Bash(<ORCA_CLI> orchestration ask *)', 'Bash(<ORCA_CLI> orchestration dispatch-show *)']) {
+    'Bash(curl -sS -X POST http://127.0.0.1:<PUERTO>/api/jobs/*/context *)', 'Bash(<ORCA_CLI> orchestration send *--type worker_done*)', 'Bash(<ORCA_CLI> orchestration ask *)', 'Bash(<ORCA_CLI> orchestration dispatch-show *)', 'Bash(orca orchestration check:*)', 'Bash(<ORCA_CLI> orchestration check:*)']) {
     assert.ok(allow.includes(rule), rule);
   }
   for (const rule of ['Bash(git push:*)', 'Bash(git commit:*)', 'Bash(gh:*)', 'Bash(sudo:*)', 'Bash(rm:*)', 'Bash(curl https://*)', 'Bash(curl http://localhost*)', 'Bash(<ORCA_CLI> orchestration worker-start:*)', 'Edit(//<RAIZ>/data/**)']) {
@@ -64,16 +64,20 @@ test('the dispatch brief and the spec ask for one simple command per call and a 
   for (const spec of specs) assert.match(spec, /Ejecuta la consulta como un único comando curl, sin encadenarlo con otros comandos ni variables\./);
 });
 
-// 40: the COMMANDS line names Claude's Read tool, so a Codex brief (the default agent) keeps exactly
-// the lines it had before the Claude support: no COMMANDS line, no Read, no cat ban.
-test('a Codex brief keeps its original lines without the Claude-only COMMANDS line', async t => {
+// A Codex brief keeps its original lines and never receives Claude's COMMANDS line (Read tool, cat ban, permission
+// rules). It gets the equivalent for its own shell: how to verify the fingerprint (provider-adapter.mjs).
+test('a Codex brief keeps its original lines, without the Claude-only COMMANDS line and with its own verification line', async t => {
   for (const agent of [undefined, 'codex']) {
     const { briefs, specs } = await captureBriefs(t, agent);
     assert.equal(briefs.length, 4);
     for (const brief of briefs) {
       assert.doesNotMatch(brief, /COMANDOS:|\(Read\)|no con cat/);
       assert.deepEqual(brief.split('\n').map(line => line.split(':')[0]).slice(0, 4), ['ENCARGO COMPLETO INMUTABLE. Antes de actuar, lee íntegramente el archivo y verifica SHA256 de sus bytes. No ejecutes el encargo si no puedes leerlo completo o la huella difiere', 'SPEC_FILE', 'SPEC_SHA256', 'IDENTIDAD']);
-      assert.equal(brief.split('\n').length, 6);
+      const lines = brief.split('\n');
+      assert.equal(lines.length, 7);
+      assert.match(lines[5], /^VERIFICACIÓN: calcula la huella con literalmente: /);
+      assert.match(lines[5], /sin distinguir mayúsculas de minúsculas/);
+      assert.match(lines[6], /^No modifiques este archivo\./);
     }
     assert.equal(specs.length, 4);
   }

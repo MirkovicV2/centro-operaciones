@@ -160,3 +160,7 @@ Para código del panel, configura `propietario/repositorio` GitHub, rama base y 
 Consulta recibos, historial, etapa y dispatch en Trabajos. Tras revisar y resolver el job, se puede cerrar su recibo sin reejecutarlo. El reintento de un job sigue siendo manual; desde la raíz usa `node cli.mjs run --execute --id IDENTIFICADOR` para seleccionar exclusivamente ese job. Nunca uses un drenado general para resolver un recibo individual. La función requiere que el panel y el PC sigan abiertos; no instala servicios ni inicio automático.
 
 Regresiones sin consumo ni red: `node --test tests/auto-run.test.mjs` y `node workspaces/agency-assistant/tests/auto-run.browser.mjs`. El informe de desarrollo, limitaciones y pasos de activación tras QA y Revisión está en `AUTO_RUN_DEVELOPMENT.md`.
+
+## Perfil mixto Codex + Claude
+
+Reparto por etapa, rutas, skills, cuota, equipos y memoria compartida: empieza por `docs/ACTIVACION.md`. Todo es opcional y local a cada instalación; sin configurarlo el Centro funciona como antes.

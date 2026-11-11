@@ -5,6 +5,16 @@ const state = { business: ['agency', 'games'].includes(savedBusiness) ? savedBus
 const workflowStatusNames = { queued: 'Pendiente', running: 'En curso', succeeded: 'Completado', blocked: 'Bloqueado', failed: 'Falló', skipped: 'Omitido' };
 const statusNames = { queued: 'En cola', running: 'En marcha', retry_wait: 'Reintento programado', needs_attention: 'Requiere revisión', succeeded: 'Entregado localmente', cancelled: 'Cancelado' };
 const businessNames = { agency: 'Agencia', games: 'Videojuegos' };
+// Pipeline split (Ajustes and Nuevo trabajo). Declared here because showSection runs before the end of this file.
+const roleLabels = { planificador: 'Planificación', ux: 'Diseño', desarrollador: 'Desarrollo', qa: 'QA', revisor: 'Revisión' };
+const sourceLabels = { 'por defecto': 'por defecto', general: 'perfil general', empresa: 'perfil de la empresa', proyecto: 'proyecto', encargo: 'este encargo', escalada: 'escalada', 'sustitución': 'sustitución por cuota' };
+const launchLabel = launch => [launch.agent, launch.model || 'modelo por defecto', launch.effort ? `esfuerzo ${launch.effort}` : 'esfuerzo por defecto',
+  ...(launch.substitutedFrom ? [`en lugar de ${launch.substitutedFrom.agent}, que está en la reserva o agotado`] : []), ...(launch.quotaWait ? ['ahora no se lanzaría por cuota'] : [])].join(' · ');
+const pipelineState = { server: null, draft: null, dirty: false, loading: null };
+const emptyDraft = () => ({ general: { roles: {} }, empresas: {}, proyectos: {}, escaladas: {} });
+const cloneDraft = value => JSON.parse(JSON.stringify(value || emptyDraft()));
+const jobLaunchState = { preview: null, request: 0 };
+const quotaState = { server: null, dirty: false, loading: null };
 // Appearance: Claro | Oscuro | Sistema. "Sistema" follows the OS; a manual choice is kept in this browser.
 const THEME_KEY = 'operations-theme';
 function applyTheme(choice) {
@@ -123,6 +133,44 @@ function stableOperation(namespace, signature, retiredId) {
   return id;
 }
 
+// Creating a repository publishes to GitHub: the button needs a second, explicit click and says what it will do.
+function createRemoteButton(projectId, onDone) {
+  const button = el('button', 'button secondary', 'Crear el repositorio en GitHub'); button.type = 'button';
+  button.onclick = async () => {
+    if (button.dataset.armed !== 'true') { button.dataset.armed = 'true'; button.textContent = 'Confirmar: crear repositorio privado y subir las ramas'; return; }
+    button.disabled = true;
+    try { const made = await api(`/api/projects/${projectId}/create-remote`, { method: 'POST', body: JSON.stringify({ confirm: true }) }); notify(`Repositorio ${made.repository} creado (privado). Ramas subidas: ${made.pushed.join(', ')}.`); await onDone?.(made); }
+    catch (error) { notify(error.message, true); button.disabled = false; button.dataset.armed = 'false'; button.textContent = 'Crear el repositorio en GitHub'; }
+  };
+  return button;
+}
+
+// A replay of the same text keeps its operation, so an uncertain send is never duplicated. The exception is a request
+// that is already closed (withdrawn, or its job cancelled): sending the same text again is then a new request
+// (first pilot: resending after a cancelled job silently pointed at the old one).
+function closedOperation(namespace, signature) {
+  const previous = JSON.parse(localStorage.getItem(`operations-${namespace}`) || '{}')[signature];
+  const request = previous && (state.raw?.coordinatorRequests || []).find(item => item.operationId === previous);
+  if (!request) return undefined;
+  const job = request.jobId && [...(state.raw?.queue?.jobs || []), ...(state.raw?.jobs || [])].find(item => item.id === request.jobId && item.state);
+  return request.status === 'withdrawn' || job?.state === 'cancelled' ? previous : undefined;
+}
+
+// Workers told to escape non-ASCII sometimes escape twice, so a summary arrives as "Revisión". The stored evidence
+// keeps its exact bytes; only what the panel shows is decoded (summaries and report fields a person reads).
+const escapedUnicode = /\\u([0-9a-fA-F]{4})/g;
+const readable = text => typeof text === 'string' && text.includes('\\u') ? text.replace(escapedUnicode, (_, hex) => String.fromCharCode(parseInt(hex, 16))) : text;
+function readableStageText(raw) {
+  for (const job of raw?.jobs || []) for (const step of [...(job.workflow?.steps || []), ...(job.workflowHistory || []).flatMap(item => item.steps || [])]) {
+    step.summary = readable(step.summary);
+    const delivery = step.delivery;
+    if (!delivery) continue;
+    delivery.summary = readable(delivery.summary);
+    for (const item of [...(delivery.acceptance || []), ...(delivery.findings || [])]) { item.criterion = readable(item.criterion); item.summary = readable(item.summary); item.evidence = readable(item.evidence); }
+    if (Array.isArray(delivery.evidence)) delivery.evidence = delivery.evidence.map(readable);
+  }
+}
+
 function renderAutomation(raw) {
   const root = $('#automation-controls');
   if (!root) return;
@@ -164,6 +212,18 @@ function renderAutomation(raw) {
         catch (error) { notify(error.message, true); retry.disabled = false; }
       };
       row.append(retry);
+    }
+    if (receipt.status === 'blocked' && /^destination_/.test(receipt.blockCode || '') && !receipt.claimedAt) {
+      const facts = Object.entries(receipt.blockDetails || {}).map(([key, value]) => `${key}: ${value}`).join(' · ');
+      if (facts) row.append(el('p', 'receipt-details', facts));
+      const again = el('button', 'button secondary', 'Volver a comprobar el destino'); again.type = 'button';
+      again.onclick = async () => {
+        again.disabled = true;
+        try { await api(`/api/auto-run/${receipt.id}/retry-destination`, { method: 'POST', body: JSON.stringify({ confirm: true }) }); notify('Se vuelve a comprobar el destino antes de empezar.'); await refresh(); }
+        catch (error) { notify(error.message, true); again.disabled = false; }
+      };
+      row.append(again);
+      if (receipt.blockCode === 'destination_repository_missing' && receipt.spec?.projectId) row.append(createRemoteButton(receipt.spec.projectId, refresh));
     }
     if (['blocked', 'needs_attention'].includes(receipt.status)) {
       const review = el('button', 'button secondary', 'Cerrar recibo tras revisión'); review.type = 'button';
@@ -235,6 +295,34 @@ function attentionItems(data) {
       what: request.notification?.reason || 'No consta que el aviso llegara al coordinador.',
       why: 'Mientras no se confirme la entrega, el coordinador puede no haber visto la solicitud.',
       where: 'Se consulta la entrega en Orca desde la solicitud, en Trabajos.',
+      action: ['Ver la solicitud', () => { location.hash = '#trabajos'; document.getElementById('coordinator-inbox')?.scrollIntoView({ block: 'start' }); }], evidence: [],
+    });
+  }
+  // Nothing is broken here, but nothing moves until a person acts: a worker stopped at an approval dialog, and a notice the
+  // coordinator has not acted on (in the first pilot these two waits were 24 of the 63 minutes).
+  const minutes = since => Math.max(1, Math.round((Date.now() - Date.parse(since)) / 60_000));
+  for (const job of data.jobs.filter(item => item.state === 'running')) {
+    const step = job.workflow?.steps?.find(item => item.key === job.workflow?.currentStage);
+    if (step?.waitingOn !== 'approval') continue;
+    items.push({
+      id: `waiting-${job.id}-${step.key}`, kind: 'job', group: 'Esperando a una persona', label: 'Aprobación', tone: 'question',
+      title: job.title, context: `${job.projectName || businessNames[job.business]} · ${step.label}`, at: step.waitingSince || step.updatedAt,
+      what: `El trabajador de ${step.label} lleva ${minutes(step.waitingSince || step.updatedAt)} min parado en un diálogo de aprobación.`,
+      why: 'Claude Code o Codex pide permiso para algo que sus reglas no cubren. Hasta que contestes, la etapa no avanza y el Centro no puede contestar por ti.',
+      where: `En Orca, en la terminal del trabajador de ${job.projectName || 'este proyecto'}${step.displayName ? ` («${step.displayName}»)` : ''}.`,
+      action: ['Abrir el trabajo', () => openRun(job.id)], evidence: step.dispatchId ? [{ label: `Dispatch ${step.dispatchId}`, level: 'Registrado por el Centro' }] : [], job,
+    });
+  }
+  for (const request of (data.coordinatorRequests || []).filter(item => item.status === 'pending' && item.notification?.status === 'sent')) {
+    const nudge = request.notification.nudge, sentAt = request.notification.updatedAt || request.createdAt;
+    const dialog = nudge?.status === 'needs_person';
+    if (!dialog && Date.now() - Date.parse(sentAt) < 180_000) continue;
+    items.push({
+      id: `unanswered-${request.id}`, kind: 'request', group: 'Esperando a una persona', label: 'Coordinador', tone: 'question',
+      title: request.snapshot?.title || 'Solicitud del panel', context: request.projectName || request.snapshot?.projectName || 'Sin proyecto', at: sentAt,
+      what: dialog ? 'El coordinador tiene un diálogo de aprobación en pantalla y no puede leer la solicitud.' : `El aviso llegó hace ${minutes(sentAt)} min y el coordinador aún no ha decidido la ruta.`,
+      why: dialog ? 'El panel no escribe en una terminal que está preguntando algo: contestaría por ti.' : nudge?.status === 'delivered' ? `El panel ya le ha escrito ${nudge.attempts} ${nudge.attempts === 1 ? 'vez' : 'veces'} en su terminal.` : 'El correo de Orca no despierta a una sesión parada y el panel no ha podido escribirle.',
+      where: 'En Orca, en la sesión del coordinador de esta empresa.',
       action: ['Ver la solicitud', () => { location.hash = '#trabajos'; document.getElementById('coordinator-inbox')?.scrollIntoView({ block: 'start' }); }], evidence: [],
     });
   }
@@ -378,16 +466,37 @@ function renderRun(data) {
   }
   main.append(bar);
 
-  if (job.state === 'needs_attention') {
+  // Why the job is not moving, by kind: product, configuration, quota, provider, a decision or a test by a person.
+  if (job.diagnosis) {
+    const diagnosis = el('section', `run-diagnosis is-${job.diagnosis.category}`);
+    diagnosis.append(el('h3', '', job.diagnosis.waiting ? `En espera · ${job.diagnosis.label}` : job.diagnosis.label));
+    if (job.diagnosis.message) diagnosis.append(el('p', '', job.diagnosis.message));
+    if (job.diagnosis.until) diagnosis.append(el('p', 'microcopy', `Se volverá a intentar a partir de ${formatDate(job.diagnosis.until)}.`));
+    diagnosis.append(el('p', 'run-diagnosis-action', `Qué hacer: ${job.diagnosis.action}`));
+    main.append(diagnosis);
+  }
+  if (job.state === 'needs_attention' || readmissionBlocked(job, receipt)) {
     const callout = el('section', 'run-callout');
-    callout.append(el('h3', '', 'Este trabajo espera tu decisión'), el('p', '', job.error?.message || 'Revisa la etapa y sus informes antes de continuar.'));
+    callout.append(el('h3', '', 'Este trabajo espera tu decisión'), el('p', '', job.state === 'queued' ? `El ejecutor no pudo volver a admitirlo: ${receipt.reason}` : job.error?.message || 'Revisa la etapa y sus informes antes de continuar.'));
     if (data.executor?.reason) callout.append(el('p', 'microcopy', data.executor.reason));
     const actions = el('div', 'run-actions'); actions.append(...jobActionButtons(job, data, receipt));
     callout.append(actions);
     main.append(callout);
   }
+  const v2Task = job.workflow?.steps?.find(step => step.key === 'reviewer')?.workflowV2?.task;
+  if (v2Task && job.state === 'needs_attention') main.append(workflowV2Decision(job, data, receipt));
 
   main.append(el('h3', 'run-h3', 'Etapas'));
+  // The route and every stage it leaves out or added later, with the reason someone gave.
+  if (job.route) {
+    const route = el('div', 'run-route');
+    route.append(el('p', 'run-route-title', `Ruta: ${job.route.label}${job.route.reason ? ` · ${job.route.reason}` : ''}`));
+    const notes = el('ul', 'run-route-notes');
+    for (const item of job.route.omitted || []) notes.append(el('li', '', `${(job.workflow?.steps || []).find(step => step.key === item.stage)?.label || item.stage}: omitida. ${item.reason}`));
+    for (const item of job.route.added || []) notes.append(el('li', '', `${(job.workflow?.steps || []).find(step => step.key === item.stage)?.label || item.stage}: añadida por cambio de alcance. ${item.reason}`));
+    if (notes.children.length) route.append(notes);
+    main.append(route);
+  }
   const stages = el('ol', 'run-stages');
   for (const [index, step] of (job.workflow?.steps || []).filter(item => item.status !== 'skipped').entries()) {
     const li = el('li', `run-stage is-${step.status}`);
@@ -398,9 +507,20 @@ function renderRun(data) {
     const add = (k, v, level) => { const dd = el('dd'); if (level) dd.append(provenance(level)); dd.append(el('span', '', v)); if (level) dd.append(el('span', 'prov-text', levelText[level])); kv.append(el('dt', '', k), dd); };
     if (step.profile) add('Perfil', step.profile);
     if (step.launch) add('Modelo', [step.launch.agent, step.launch.model, step.launch.effort && `esfuerzo ${step.launch.effort}`].filter(Boolean).join(' · '), 'observed');
+    else if (job.plannedLaunch?.[step.key]) add('Modelo previsto', `${launchLabel(job.plannedLaunch[step.key])} · se fija al lanzar la etapa`);
+    if (step.waitingOn === 'approval') add('Esperándote', 'Hay un diálogo de aprobación en la terminal del trabajador, en Orca.');
+    if (step.mayAskToRead?.length) add('Puede pedir permiso', `El contrato cita archivos fuera de lo que este trabajador puede leer sin preguntar: ${step.mayAskToRead.join(', ')}. Añádelos a los permisos del checkout o registra la skill en el Centro.`);
     else add('Modelo', 'No registrado', 'unknown');
     if (step.authorization) add('Autorizado por', step.authorization.coordinatorName || 'coordinador', 'observed');
     if (step.dispatchId) add('Dispatch', step.dispatchId, 'observed');
+    if (step.contracts?.length) add('Contratos de rol', step.contracts.map(item => item.path).join(', '), 'observed');
+    // Supplied is the Centro's own record; consulted is what the worker stated in its delivery.
+    if (step.skills?.length) add('Skills suministradas', step.skills.map(skill => skill.id).join(', '), 'observed');
+    if (step.skills?.length && step.skillsConsulted) add('Skills consultadas', step.skillsConsulted.length ? step.skillsConsulted.join(', ') : 'Ninguna declarada', 'reported');
+    for (const item of step.skillsOmitted || []) add('Skill no entregada', `${item.id}: ${item.reason}`, 'observed');
+    if (step.team) add('Equipo', step.team.nombre || step.team.id, 'observed');
+    if (step.launch?.substitutedFrom) add('Proveedor sustituido', `En lugar de ${step.launch.substitutedFrom.agent} · ${step.launch.substitutedFrom.reason}`, 'observed');
+    if (step.quota) add('Cuota al lanzar', step.quota.state === 'incierta' ? `${step.quota.provider}: uso no conocido` : `${step.quota.provider}: ${step.quota.usadoPorcentaje} % usado (reserva ${step.quota.reserva} %)`, step.quota.state === 'incierta' ? 'unknown' : 'observed');
     body.append(kv);
     const summary = step.delivery?.summary || step.summary;
     if (summary) { const details = el('details', 'run-report'); details.dataset.panelDetail = `run-${job.id}-${step.key}`; details.append(el('summary', '', 'Informe de la etapa'), el('pre', 'workflow-stage-report', summary)); body.append(details); }
@@ -637,7 +757,8 @@ function renderJobs(data) {
         if (profileName !== step.profile) { const technical = el('details'); technical.dataset.panelDetail = `${card.id}-${step.key}-profile`; technical.append(el('summary', '', 'Identificador del perfil'), el('span', '', step.profile)); stage.append(technical); }
         if (step.authorization) stage.append(el('span', 'workflow-stage-profile', `Autorizado por ${step.authorization.coordinatorName}`));
         if (step.dispatchId) { const technical = el('details'); technical.dataset.panelDetail = `${card.id}-${step.key}-dispatch`; technical.append(el('summary', '', 'Detalle técnico'), el('span', 'workflow-stage-dispatch', `Dispatch: ${step.dispatchId} · ${step.dispatchStatus || 'sin estado confirmado'}`)); stage.append(technical); }
-        if (step.summary) {
+        if (step.routeOmitted) stage.append(el('span', 'workflow-stage-profile', step.summary));
+        else if (step.summary) {
           const details = document.createElement('details');
           details.dataset.panelDetail = `${card.id}-${step.key}-report`;
           details.append(el('summary', '', 'Ver informe de etapa'), el('pre', 'workflow-stage-report', step.summary));
@@ -688,7 +809,7 @@ function renderJobs(data) {
     if (job.state === 'needs_attention') {
       detail.append(el('p', '', `Etapa: ${job.workflow?.currentStage || 'sin confirmar'} · Intento ${job.attempts}/${job.maxAttempts}. ${data.executor?.reason || 'Revisa los dispatches y confirma que no queda un agente activo antes de decidir.'}`));
       detail.append(...jobActionButtons(job, data, receipt));
-    }
+    } else if (readmissionBlocked(job, receipt)) detail.append(...jobActionButtons(job, data, receipt));
     card.append(detail);
     if (job.autoIntent) detail.append(el('p', '', `Recibo: ${job.autoIntent.receiptId} · ${job.autoIntent.eligible ? 'Elegible al confirmar' : 'Manual al confirmar'}`));
     if (receipt?.reason) detail.append(el('p', '', `Estado del recibo: ${receipt.status} · ${receipt.reason}`));
@@ -699,6 +820,69 @@ function renderJobs(data) {
   }
   if (!list.children.length) list.append(el('div', 'empty-state', 'No hay trabajos abiertos en esta vista. Los cerrados est?n en Historial.'));
   restoreDetails();
+}
+
+// The owner's decision in Workflow V2, without the terminal guesswork: the live V2 state, the
+// reviewer's recommendation, the exact command for this state and the files of the candidate.
+// The verdict itself stays in V2 (typed confirmation); the panel only integrates once V2 shows it approved.
+function workflowV2Decision(job, data, receipt) {
+  const section = el('section', 'run-v2');
+  section.append(el('h3', '', 'Tu decisión en Workflow V2'), el('p', 'microcopy', 'Consultando Workflow V2…'));
+  api(`/api/jobs/${encodeURIComponent(job.id)}/workflow-v2`).then(({ live, candidate }) => {
+    section.replaceChildren(el('h3', '', 'Tu decisión en Workflow V2'));
+    if (!live) { section.append(el('p', 'microcopy', 'Este trabajo ya no está gobernado por Workflow V2.')); return; }
+    if (!live.available) { section.append(el('p', '', live.error)); return; }
+    section.append(el('p', 'run-v2-status', `Estado en V2: ${live.status}${live.tier ? ` · nivel ${live.tier}` : ''}`));
+    for (const review of live.reviews) {
+      section.append(el('p', '', `Revisión «${review.role}»: recomienda ${review.recommendation === 'ACCEPT' ? 'aceptar' : review.recommendation === 'REJECT' ? 'rechazar' : review.recommendation || 'sin dato'}${review.isolation ? ` · aislamiento ${review.isolation.toLowerCase()}` : ''}.`));
+    }
+    if (live.blockedReason) section.append(el('p', '', `Motivo del bloqueo: ${live.blockedReason}`));
+    section.append(el('p', 'run-v2-next', live.next.text));
+    if (live.next.command) {
+      const row = el('div', 'run-v2-command');
+      const code = el('code', '', live.next.command);
+      const copy = el('button', 'button secondary', 'Copiar'); copy.type = 'button';
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(live.next.command); notify('Comando copiado. Pégalo en la terminal: V2 te pedirá confirmarlo.'); }
+        catch { notify('No se pudo copiar; selecciona el comando a mano.', true); }
+      };
+      row.append(code, copy);
+      section.append(row);
+    }
+    if (live.next.action === 'integrate' || live.next.action === 'retry') {
+      const go = el('button', 'button', live.next.action === 'integrate' ? 'Integrar este candidato' : 'Reenviar a Workflow V2'); go.type = 'button';
+      go.disabled = !data.executor?.available;
+      go.onclick = async () => {
+        go.disabled = true;
+        try {
+          await api(`/api/jobs/${encodeURIComponent(job.id)}/retry`, { method: 'POST', body: JSON.stringify({ confirmReviewed: true, noDispatchConfirmed: false }) });
+          notify(live.next.action === 'integrate' ? 'Integrando solo el candidato aprobado.' : 'Reenviando el mismo candidato a Workflow V2.');
+          await refresh();
+        } catch (error) { notify(error.message, true); go.disabled = false; }
+      };
+      section.append(go);
+    }
+    if (candidate?.files?.length) {
+      const binaries = candidate.files.filter(file => file.binary && file.change === 'nuevo');
+      const details = el('details', 'run-v2-files');
+      details.dataset.panelDetail = `${job.id}-v2-files`;
+      details.append(el('summary', '', `Archivos del candidato: ${candidate.total}${binaries.length ? ` · ${binaries.length} binarios nuevos` : ''}`));
+      if (binaries.length) details.append(el('p', 'microcopy', 'Los binarios nuevos entran tal cual en la integración. Si alguno es un artefacto generado (capturas de un script, por ejemplo), recházalo o ignóralo en el proyecto antes de la próxima vuelta: tocar el checkout ahora invalida la aprobación.'));
+      const list = el('ul');
+      for (const file of candidate.files) list.append(el('li', file.binary && file.change === 'nuevo' ? 'is-binary' : '', `${file.change} · ${file.path}${file.binary ? ' (binario)' : ''}`));
+      if (candidate.total > candidate.files.length) list.append(el('li', 'microcopy', `… y ${candidate.total - candidate.files.length} más.`));
+      details.append(list);
+      section.append(details);
+    } else if (candidate?.error) section.append(el('p', 'microcopy', `No se pudieron listar los archivos: ${candidate.error}`));
+  }).catch(error => { section.replaceChildren(el('h3', '', 'Tu decisión en Workflow V2'), el('p', '', error.message)); });
+  return section;
+}
+
+// A retried job whose new attempt the executor refused at admission: still queued, receipt blocked.
+// The only way out is the same «Reintentar», which readmits it; without this the card offered no action.
+function readmissionBlocked(job, receipt) {
+  return job.state === 'queued' && job.autoIntent?.eligible && receipt?.status === 'blocked' && job.attempts > 0
+    && receipt.retryAuthorizedAttempt === job.attempts;
 }
 
 // Retry / resolve for a job that needs review. Shared by the job card and the job page, so each action has one implementation.
@@ -712,7 +896,7 @@ function jobActionButtons(job, data, receipt) {
     && job.error?.code === 'delivery_incomplete' && job.workflow?.currentStage === 'qa' && qa?.dispatchSettled
     && ['blocked', 'failed'].includes(qa.delivery?.outcome) && qa.delivery.scope === 'complete' && qa.resultMessageId;
   const retryLabel = revalidate ? 'Revalidar QA' : interruptedDevelopment ? 'Retomar Desarrollo' : 'Reintentar después de revisar';
-  for (const [action, label] of [['retry', retryLabel], ['resolve', 'Cerrar trabajo']]) {
+  for (const [action, label] of [['retry', retryLabel], ...(job.state === 'queued' ? [] : [['resolve', 'Cerrar trabajo']])]) {
     const button = el('button', 'button secondary', label);
     button.disabled = !data.executor?.available || (action === 'retry' && !revalidate && job.attempts >= job.maxAttempts);
     button.title = !data.executor?.available ? data.executor?.reason : action === 'retry' && !revalidate && job.attempts >= job.maxAttempts ? 'Máximo de intentos alcanzado' : '';
@@ -834,6 +1018,9 @@ function renderProjects(data) {
 
     if (project.nextAction) card.append(el('p', 'project-next', project.nextAction));
     card.append(el('div', 'project-activity', `${project.jobCount || 0} trabajos · ${project.openJobCount || 0} abiertos`));
+    // Shared memory of the team for this project: what is in force, what is being evaluated and what is only history.
+    if (project.sharedMemory) card.append(el('div', 'project-activity project-memory', project.sharedMemory.error ? `Memoria compartida no aplicada: ${project.sharedMemory.error}`
+      : `Memoria compartida: ${project.sharedMemory.vigentes} vigentes · ${project.sharedMemory.enEvaluacion} en evaluación · ${project.sharedMemory.historial} en historial${project.sharedMemory.decisiones.length ? ` · Decisión vigente: ${project.sharedMemory.decisiones.join('; ')}` : ''}`));
     const latest = project.recentJobs || [];
     if (latest.length) {
       const jobList = el('div', 'project-recent-jobs');
@@ -1192,6 +1379,7 @@ function renderIdeas(data) {
       card.append(button);
     };
     if (idea.status !== 'trash') addAction('Editar', () => editIdea(idea), busy);
+    if (idea.status !== 'trash') addAction('Adjuntar referencias (.zip)', () => attachRefsToIdea(idea, Boolean(coordinatorRequest)));
     if (!['trash', 'archived'].includes(idea.status) && coordinatorRequest?.status !== 'routed') addAction(coordinatorRequest ? 'Revisar aviso al coordinador' : 'Enviar al coordinador', async () => {
       const result = await api(`/api/ideas/${encodeURIComponent(idea.id)}/coordinator`, { method: 'POST', body: '{}' });
       notify(result.message, ['unknown', 'needs_attention'].includes(result.request?.notification?.status));
@@ -1364,6 +1552,7 @@ async function refreshGraph() {
 async function refresh() {
   try {
     const raw = await api('/api/state');
+    readableStageText(raw);
     state.raw = raw;
     const data = scopeData(raw);
     state.data = data;
@@ -1388,6 +1577,7 @@ async function refresh() {
     renderTelegramMessages(data);
     renderDomains(data);
     renderAssistantTasks(data);
+    if (pipelineState.server) renderPipelineScopes(); // only the list of projects; the rows being edited are never rebuilt here
   } catch (error) {
     $('#ideas-list').setAttribute('aria-busy', 'false');
     $('#ideas-load-error').hidden = false;
@@ -1447,15 +1637,16 @@ $('#job-form').addEventListener('submit', async event => {
   const project = state.data?.projects.find(item => item.id === values.projectId);
   let confirmation;
   if (values.kind === 'code') { confirmation = await confirmDestination(project, values.prompt, values.successCriteria); if (!confirmation) return; }
-  const signature = JSON.stringify({ business: state.business, values, confirmation });
-  const operationId = stableOperation('submissions', signature);
-  const payload = { operationId, confirmation, business: state.business, projectId: values.projectId, projectName: project?.name, kind: values.kind, title: values.title, prompt: confirmation ? confirmation.objective : values.prompt, successCriteria: confirmation ? confirmation.successCriteria : values.successCriteria, provider: 'orca', workspace: values.workspace, isolated };
+  const signature = JSON.stringify({ business: state.business, values, confirmation, launch: jobLaunchChoice() });
+  const operationId = stableOperation('submissions', signature, closedOperation('submissions', signature));
+  const payload = { operationId, confirmation, business: state.business, projectId: values.projectId, projectName: project?.name, kind: values.kind, title: values.title, prompt: confirmation ? confirmation.objective : values.prompt, successCriteria: confirmation ? confirmation.successCriteria : values.successCriteria, provider: 'orca', workspace: values.workspace, isolated, ...(jobLaunchChoice() ? { launch: jobLaunchChoice() } : {}) };
   const accepted = confirmation || await confirmIdeaAction('Enviar solicitud al coordinador', `${businessNames[state.business]} · ${values.title}. Se guarda una solicitud para que el coordinador decida entre análisis o desarrollo. Todavía no se crea un trabajo ni se inicia un agente.`, 'Enviar al coordinador');
   if (!accepted) return;
   try {
     const request = await api('/api/jobs', { method: 'POST', body: JSON.stringify(payload) });
     form.reset(); form.hidden = true;
     delete form.dataset.operationId;
+    void refreshJobLaunch();
     notify(request.message || 'Solicitud enviada al coordinador; todavía no hay job ni dispatch.');
     await refresh();
   } catch (error) { notify(`${error.message} Consulta la solicitud del coordinador antes de repetir; se conserva el identificador.`, true); }
@@ -1468,6 +1659,41 @@ function ideaCheckoutHint() {
   $('#idea-checkout').textContent = valid ? `${project.checkout} · Rama: ${project.branch || 'pendiente de confirmar'}` : 'Sin destino de desarrollo comprobado; puedes guardar la idea';
 }
 $('#idea-project').addEventListener('change', ideaCheckoutHint);
+
+async function postIdeaZip(ideaId, file) {
+  if (!/\.zip$/i.test(file.name)) throw new Error('Las referencias deben ser un .zip.');
+  if (file.size > 40_000_000) throw new Error('El .zip supera los 40 MB.');
+  const response = await fetch(`/api/ideas/${encodeURIComponent(ideaId)}/attachments?name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'content-type': 'application/zip' }, body: file });
+  const value = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(value.error || 'No se pudieron adjuntar las referencias.');
+  return value.attachments ?? [];
+}
+
+async function uploadIdeaRefs(ideaId) {
+  const file = $('#idea-refs').files?.[0];
+  if (!file) return 0;
+  $('#idea-send-status').textContent = 'Subiendo referencias…';
+  return (await postIdeaZip(ideaId, file)).length;
+}
+
+// Adjuntar a una idea ya guardada: el selector de archivos se abre dentro del clic, y la subida no cambia la idea (ni su versión).
+function attachRefsToIdea(idea, alreadyWithCoordinator) {
+  return new Promise((resolve, reject) => {
+    const input = el('input'); input.type = 'file'; input.accept = '.zip,application/zip';
+    input.addEventListener('cancel', () => resolve(null));
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      try {
+        notify('Subiendo referencias…');
+        const attachments = await postIdeaZip(idea.id, file);
+        notify(`Referencias de «${idea.title}»: ${attachments.map(item => `${item.name} (${item.files} archivos)`).join(', ')}.${alreadyWithCoordinator ? ' El coordinador ya tiene la idea y no verá este aviso, pero las etapas que aún no hayan empezado las recibirán.' : ''}`);
+        resolve(attachments);
+      } catch (error) { reject(error); }
+    });
+    input.click();
+  });
+}
 
 async function captureIdea(sendToCoordinator) {
   const form = $('#idea-form');
@@ -1492,6 +1718,7 @@ async function captureIdea(sendToCoordinator) {
       idea = await save();
     }
     $('#idea-send-status').textContent = idea.notePath ? 'Guardada en Obsidian y localmente' : 'Guardada localmente';
+    if (await uploadIdeaRefs(idea.id)) $('#idea-send-status').textContent += ' · Referencias adjuntas';
     if (sendToCoordinator) {
       $('#idea-send-status').textContent += ' · Avisando al coordinador…';
       const result = await api(`/api/ideas/${encodeURIComponent(idea.id)}/coordinator`, { method: 'POST', body: '{}' });
@@ -1560,7 +1787,7 @@ function applyBusinessContext() {
 function showSection() {
   const [id = 'inicio', runId] = (location.hash.slice(1) || 'inicio').split('/');
   if (id === 'trabajo') { state.runId = decodeURIComponent(runId || ''); if (state.data) renderRun(state.data); }
-  const selected = ['inicio', 'trabajo', 'atencion', 'historial', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios'].includes(id) ? id : 'inicio';
+  const selected = ['inicio', 'trabajo', 'atencion', 'historial', 'peticiones', 'proyectos', 'trabajos', 'ideas', 'conocimiento', 'dominios', 'ajustes'].includes(id) ? id : 'inicio';
   if (state.visibleSection === selected) return;
   state.visibleSection = selected;
   const navSection = selected === 'trabajo' ? 'trabajos' : selected;
@@ -1573,6 +1800,7 @@ function showSection() {
     if (link.right > strip.right) nav.scrollLeft += link.right - strip.right;
   }
   if (selected === 'conocimiento') void refreshGraph();
+  if (selected === 'ajustes') { void loadPipeline(); void loadQuota(); void loadTeam(); }
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function updateHistoryProjects(projects) {
@@ -1795,7 +2023,32 @@ function confirmDestination(project, objective = '', successCriteria = '') {
     const submit = event => { event.preventDefault(); value = { projectId: project.id, checkout: project.checkout, branch: project.branch, baseBranch: project.baseBranch || '', objective: form.elements.objective.value.trim(), successCriteria: form.elements.successCriteria.value.trim() }; dialog.close(); };
     form.addEventListener('submit', submit); dialog.addEventListener('close', finish, { once: true });
     $('#cancel-destination').onclick = () => dialog.close(); dialog.showModal(); $('#cancel-destination').focus();
+    checkDestinationRemote(dialog, form, project);
   });
+}
+
+// Asks the panel whether the remote is really there before the request leaves: a missing repository or branch is
+// cheaper to learn here than as a blocked receipt after the coordinator has routed. An unavailable check never blocks.
+function checkDestinationRemote(dialog, form, project) {
+  const send = form.querySelector('button[type="submit"]');
+  let note = dialog.querySelector('.destination-check');
+  if (!note) { note = el('p', 'destination-check'); note.setAttribute('role', 'status'); $('#destination-context').after(note); }
+  dialog.querySelector('.destination-create')?.remove();
+  const unknown = 'No se pudo comprobar el remoto ahora; se comprobará al admitir el trabajo.';
+  const look = () => {
+    note.classList.remove('pipeline-error'); note.textContent = 'Comprobando el repositorio remoto…'; if (send) send.disabled = false;
+    api(`/api/projects/${project.id}/destination-check`).then(check => {
+      if (!dialog.open) return;
+      if (check.ok === true) { note.textContent = `Remoto comprobado: ${check.repository} · ${check.branch}.`; return; }
+      if (check.ok !== false) { note.textContent = unknown; return; }
+      note.classList.add('pipeline-error'); if (send) send.disabled = true;
+      note.textContent = `No se puede enviar todavía. ${check.reason}${check.details?.stderr ? ` Git dijo: ${check.details.stderr}` : ''}`;
+      if (check.code === 'destination_repository_missing' && !dialog.querySelector('.destination-create')) {
+        const create = createRemoteButton(project.id, () => { create.remove(); look(); }); create.classList.add('destination-create'); note.after(create);
+      }
+    }).catch(() => { if (dialog.open) note.textContent = unknown; });
+  };
+  look();
 }
 
 for (const key of ['project', 'focus', 'tag', 'status', 'order']) $(`#ideas-${key}`).addEventListener('change', event => {
@@ -1804,3 +2057,282 @@ for (const key of ['project', 'focus', 'tag', 'status', 'order']) $(`#ideas-${ke
   event.target.blur(); if (state.data) renderIdeas(state.data); event.target.focus();
 });
 $('#ideas-reset').addEventListener('click', () => { saveIdeaPreferences(IdeaView.defaults()); $('#ideas-count').focus(); if (state.data) renderIdeas(state.data); });
+
+
+// ---- Reparto del pipeline: agente, modelo y esfuerzo por etapa (docs/PIPELINE_CONFIG.md) ----
+// Neither form is rebuilt by the periodic refresh: typed values, focus and open selects survive it.
+function scopeRoles(draft, scope, create = false) {
+  if (scope === 'general') return draft.general.roles;
+  const [kind, id] = scope.split(':'), holder = kind === 'empresa' ? draft.empresas : draft.proyectos;
+  if (!holder[id] && create) holder[id] = { roles: {} };
+  return holder[id]?.roles || {};
+}
+function pruneDraft(draft) {
+  for (const holder of [draft.empresas, draft.proyectos]) for (const id of Object.keys(holder)) if (!Object.keys(holder[id].roles).length) delete holder[id];
+  return draft;
+}
+// One row per role: agent, level or model/effort. An empty control means "inherit from the less specific scope".
+function launchRow(role, entry, { idPrefix, inheritText, onChange, levels }) {
+  const row = el('fieldset', 'pipeline-row'); row.dataset.role = role;
+  row.append(el('legend', '', roleLabels[role]));
+  const field = (label, node) => { const wrapper = el('label', '', label); node.id = `${idPrefix}-${role}-${node.dataset.field}`; wrapper.htmlFor = node.id; wrapper.append(node); return wrapper; };
+  const agent = el('select'); agent.dataset.field = 'agent';
+  for (const [value, text] of [['', inheritText], ['codex', 'Codex'], ['claude', 'Claude']]) agent.add(new Option(text, value));
+  agent.value = entry?.agent || '';
+  const model = el('input'); model.dataset.field = 'model'; model.maxLength = 100; model.placeholder = 'Heredado'; model.autocomplete = 'off'; model.spellcheck = false; model.value = entry?.model || '';
+  const effort = el('input'); effort.dataset.field = 'effort'; effort.maxLength = 100; effort.placeholder = 'Heredado'; effort.autocomplete = 'off'; effort.spellcheck = false; effort.setAttribute('list', 'pipeline-efforts'); effort.value = entry?.effort || '';
+  row.append(field('Agente', agent));
+  let level;
+  if (levels) {
+    level = el('select'); level.dataset.field = 'level';
+    for (const [value, text] of [['', 'Sin nivel'], ...levels.map(name => [name, name])]) level.add(new Option(text, value));
+    level.value = entry?.level || '';
+    row.append(field('Nivel', level));
+  }
+  row.append(field('Modelo', model), field('Esfuerzo', effort));
+  const note = el('p', 'pipeline-row-note'); note.dataset.note = role; row.append(note);
+  const sync = () => { if (level) { model.disabled = effort.disabled = Boolean(level.value); if (level.value) { model.value = ''; effort.value = ''; } } };
+  sync();
+  for (const control of [agent, level, model, effort].filter(Boolean)) control.addEventListener(control.tagName === 'SELECT' ? 'change' : 'input', () => { sync(); onChange(); });
+  return row;
+}
+function readRow(row) {
+  const value = field => row.querySelector(`[data-field="${field}"]`)?.value.trim() || '';
+  const entry = {};
+  for (const field of ['agent', 'level', 'model', 'effort']) if (value(field)) entry[field] = value(field);
+  return entry;
+}
+function renderPipelineScope() {
+  const scope = $('#pipeline-scope').value || 'general';
+  const roles = scopeRoles(pipelineState.draft, scope);
+  $('#pipeline-rows').replaceChildren(...pipelineState.server.roles.map(role => launchRow(role, roles[role], { idPrefix: 'pipeline', inheritText: 'Heredar', levels: pipelineState.server.levelNames, onChange: collectPipelineScope })));
+  $('#pipeline-scope-hint').textContent = scope === 'general' ? 'General: base para las dos empresas. Sin elegir agente, la etapa usa el agente por defecto de esta instalación (' + pipelineState.server.defaultAgent + ').'
+    : scope.startsWith('empresa:') ? 'Empresa: concreta el reparto general solo en los campos que rellenes.' : 'Proyecto: concreta el reparto de su empresa solo en los campos que rellenes.';
+}
+function collectPipelineScope() {
+  const scope = $('#pipeline-scope').dataset.current || 'general';
+  const roles = scopeRoles(pipelineState.draft, scope, true);
+  for (const row of $('#pipeline-rows').querySelectorAll('.pipeline-row')) {
+    const entry = readRow(row);
+    if (Object.keys(entry).length) roles[row.dataset.role] = entry; else delete roles[row.dataset.role];
+  }
+  pruneDraft(pipelineState.draft);
+  setPipelineDirty(JSON.stringify(pipelineState.draft) !== JSON.stringify(cloneDraft(pipelineState.server.pipeline)));
+}
+function setPipelineDirty(dirty) {
+  pipelineState.dirty = dirty;
+  $('#pipeline-dirty').textContent = dirty ? 'Cambios sin guardar' : 'Sin cambios';
+  $('#pipeline-save').disabled = !dirty;
+}
+function renderPipelineScopes() {
+  const select = $('#pipeline-scope'), current = select.dataset.current || 'general';
+  const projects = (state.raw?.projects || []).filter(project => project.status !== 'completed');
+  const known = new Set(projects.map(project => project.id));
+  const options = [['general', 'General'], ['empresa:agency', 'Empresa · Agencia'], ['empresa:games', 'Empresa · Videojuegos'],
+    ...projects.map(project => [`proyecto:${project.id}`, `Proyecto · ${project.name} (${businessNames[project.business] || project.business})`]),
+    ...Object.keys(pipelineState.draft.proyectos).filter(id => !known.has(id)).map(id => [`proyecto:${id}`, `Proyecto · ${id}`])];
+  const signature = JSON.stringify(options);
+  if (select.dataset.options === signature) return; // unchanged: leave an open dropdown alone
+  select.dataset.options = signature;
+  select.replaceChildren(...options.map(([value, text]) => new Option(text, value)));
+  select.value = options.some(([value]) => value === current) ? current : 'general';
+  select.dataset.current = select.value;
+}
+async function renderPipelineEffective() {
+  const grid = $('#pipeline-effective'), scope = $('#pipeline-scope').dataset.current || 'general';
+  const projectId = scope.startsWith('proyecto:') ? scope.slice(9) : '';
+  const project = (state.raw?.projects || []).find(item => item.id === projectId);
+  const targets = project ? [[project.business, projectId, `${project.name}`]] : [['agency', '', 'Agencia'], ['games', '', 'Videojuegos']];
+  const blocks = [];
+  for (const [business, id, title] of targets) {
+    const block = el('div', 'pipeline-effective-block'); block.append(el('h4', '', title));
+    const list = el('dl', 'pipeline-effective-list');
+    for (const kind of ['analysis', 'code']) {
+      try {
+        const preview = await api(`/api/launch-preview?business=${business}&kind=${kind}${id ? `&projectId=${encodeURIComponent(id)}` : ''}`);
+        for (const stage of preview.stages) list.append(el('dt', '', stage.label), el('dd', '', `${launchLabel(stage)} (${sourceLabels[stage.source] || stage.source})`));
+      } catch (error) { list.append(el('dt', '', kind === 'code' ? 'Código' : 'Análisis'), el('dd', 'pipeline-error', error.message)); }
+    }
+    list.append(el('dt', '', 'Integración'), el('dd', '', 'Motor del Centro (GitHub), sin modelo'));
+    block.append(list); blocks.push(block);
+  }
+  grid.replaceChildren(...blocks);
+}
+function renderPipelineEscalations() {
+  const escalations = Object.entries(pipelineState.draft.escaladas);
+  $('#pipeline-escalations').replaceChildren(...(escalations.length ? escalations.map(([id, item]) => el('li', '', `${id}: ${launchLabel(item)} · roles ${item.roles.map(role => roleLabels[role]).join(', ')}${item.uso ? ` · ${item.uso}` : ''}`)) : [el('li', '', 'Ninguna definida.')]));
+}
+function renderPipeline(server) {
+  pipelineState.server = server;
+  pipelineState.draft = cloneDraft(server.pipeline);
+  const status = $('#pipeline-status');
+  status.classList.toggle('pipeline-error', Boolean(server.error));
+  status.textContent = server.error ? `El archivo guardado no es válido y no se aplica: ${server.error} Corrígelo aquí y guarda, o edita data/pipeline.json.`
+    : server.configured ? 'Perfil por etapas activo en esta instalación.' : `Sin perfil por etapas: todas las etapas se lanzan con ${server.defaultAgent} y los niveles por rol, como hasta ahora. Carga el ejemplo o rellena un ámbito y guarda para activarlo.`;
+  $('#pipeline-disable').hidden = !server.configured;
+  renderPipelineScopes(); renderPipelineScope(); setPipelineDirty(false);
+  renderPipelineEscalations();
+  void renderPipelineEffective();
+}
+function loadPipeline(force = false) {
+  if (pipelineState.dirty && !force) return pipelineState.loading || Promise.resolve();
+  if (pipelineState.server && !force) { renderPipelineScopes(); return Promise.resolve(); }
+  pipelineState.loading ||= api('/api/pipeline').then(renderPipeline)
+    .catch(error => { $('#pipeline-status').textContent = `No se pudo cargar el reparto: ${error.message}`; $('#pipeline-status').classList.add('pipeline-error'); })
+    .finally(() => { pipelineState.loading = null; });
+  return pipelineState.loading;
+}
+$('#pipeline-scope').addEventListener('change', event => { event.target.dataset.current = event.target.value; renderPipelineScope(); void renderPipelineEffective(); });
+$('#pipeline-reload').addEventListener('click', async () => {
+  if (pipelineState.dirty && !await confirmIdeaAction('Descartar cambios sin guardar', 'Se recargará el reparto guardado y se perderán los cambios de este formulario.', 'Descartar y recargar')) return;
+  await loadPipeline(true);
+});
+$('#pipeline-load-example').addEventListener('click', () => {
+  if (!pipelineState.server) return;
+  const example = pipelineState.server.example;
+  pipelineState.draft = cloneDraft({ general: example.general, empresas: example.empresas || {}, proyectos: { ...pipelineState.draft.proyectos }, escaladas: example.escaladas || {} });
+  renderPipelineScope(); renderPipelineEscalations(); setPipelineDirty(true);
+  notify('Perfil mixto cargado en el formulario. No se aplica hasta que pulses Guardar reparto.');
+});
+$('#pipeline-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!pipelineState.dirty) return;
+  const button = $('#pipeline-save'); button.disabled = true;
+  try {
+    const scope = $('#pipeline-scope').dataset.current;
+    renderPipeline(await api('/api/pipeline', { method: 'POST', body: JSON.stringify({ pipeline: pipelineState.draft }) }));
+    $('#pipeline-scope').dataset.current = scope; renderPipelineScopes(); renderPipelineScope();
+    notify('Reparto guardado. Se aplica a las etapas que aún no se han lanzado.');
+    void refreshJobLaunch();
+  } catch (error) {
+    $('#pipeline-status').textContent = `No se guardó: ${error.message}`; $('#pipeline-status').classList.add('pipeline-error');
+    notify(error.message, true); button.disabled = false;
+  }
+});
+$('#pipeline-disable').addEventListener('click', async () => {
+  if (!await confirmIdeaAction('Volver al agente único', 'Se aparta data/pipeline.json (queda una copia) y todas las etapas nuevas vuelven a lanzarse con el agente por defecto. Las etapas ya lanzadas no cambian.', 'Volver al agente único')) return;
+  try { renderPipeline(await api('/api/pipeline', { method: 'POST', body: JSON.stringify({ disable: true, confirm: true }) })); notify('Perfil por etapas desactivado.'); void refreshJobLaunch(); }
+  catch (error) { notify(error.message, true); }
+});
+window.addEventListener('beforeunload', event => { if (pipelineState.dirty) event.preventDefault(); });
+
+// Nuevo trabajo: preview of the split and optional per-job choices.
+function jobLaunchChoice() {
+  const roles = {};
+  for (const row of $('#job-launch-rows').querySelectorAll('.pipeline-row')) {
+    const entry = readRow(row);
+    // A model belongs to one provider: without an explicit agent it is bound to the one the stage would use.
+    if (entry.model && !entry.agent) entry.agent = jobLaunchState.preview?.[row.dataset.role]?.agent;
+    if (Object.keys(entry).length) roles[row.dataset.role] = entry;
+  }
+  return Object.keys(roles).length ? { roles } : null;
+}
+async function refreshJobLaunch() {
+  if ($('#job-form').hidden || !$('#job-launch').open) return; // the preview is only requested when someone opens it
+  const rows = $('#job-launch-rows');
+  if (!rows.children.length) rows.replaceChildren(...Object.keys(roleLabels).map(role => launchRow(role, null, { idPrefix: 'job-launch', inheritText: 'Según el perfil', onChange: () => void refreshJobLaunch() })));
+  const launch = jobLaunchChoice(), projectId = $('#job-project').value, request = ++jobLaunchState.request;
+  $('#job-launch-summary').textContent = launch ? `${Object.keys(launch.roles).length} etapa(s) fijadas para este encargo` : 'según el perfil';
+  const stages = {};
+  let failure = '';
+  for (const kind of ['analysis', 'code']) {
+    try {
+      const preview = await api(`/api/launch-preview?business=${state.business}&kind=${kind}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}${launch ? `&launch=${encodeURIComponent(JSON.stringify(launch))}` : ''}`);
+      for (const stage of preview.stages) stages[stage.role] = stage;
+    } catch (error) { failure = error.message; }
+  }
+  if (request !== jobLaunchState.request) return;
+  jobLaunchState.preview = stages;
+  for (const row of rows.querySelectorAll('.pipeline-row')) {
+    const stage = stages[row.dataset.role], note = row.querySelector('.pipeline-row-note');
+    note.classList.toggle('pipeline-error', !stage);
+    note.textContent = stage ? `Se lanzaría con ${launchLabel(stage)} (${sourceLabels[stage.source] || stage.source})${row.dataset.role === 'planificador' ? ' · solo si la ruta es análisis' : ''}` : failure || 'Sin vista previa.';
+  }
+}
+$('#job-project').addEventListener('change', () => void refreshJobLaunch());
+$('#job-launch').addEventListener('toggle', () => void refreshJobLaunch());
+$('#job-form').addEventListener('reset', () => setTimeout(() => void refreshJobLaunch(), 0));
+
+
+// ---- Cuota y suscripciones (docs/CUOTA.md). Like the split form, it is never rebuilt by the periodic refresh. ----
+const quotaStateNames = { disponible: 'Disponible', reserva: 'En la reserva personal', agotada: 'Agotada', incierta: 'Uso no conocido' };
+const localDateTime = value => { if (!value) return ''; const date = new Date(value); if (Number.isNaN(date.getTime())) return ''; const pad = number => String(number).padStart(2, '0'); return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`; };
+function quotaProviderRow(agent, provider, status) {
+  const row = el('fieldset', 'pipeline-row quota-provider'); row.dataset.provider = agent;
+  row.append(el('legend', '', agent === 'claude' ? 'Claude' : 'Codex'));
+  const field = (label, node, name) => { const wrapper = el('label', '', label); node.id = `quota-${agent}-${name}`; node.dataset.field = name; wrapper.htmlFor = node.id; wrapper.append(node); return wrapper; };
+  const auth = el('select'); for (const [value, text] of [['desconocida', 'Sin comprobar'], ['suscripcion', 'Suscripción'], ['api', 'API (coste adicional)']]) auth.add(new Option(text, value));
+  auth.value = provider.autenticacion || 'desconocida';
+  const used = el('input'); used.type = 'number'; used.min = '0'; used.max = '100'; used.step = '1'; used.inputMode = 'numeric'; used.placeholder = 'Sin anotar';
+  const reset = el('input'); reset.type = 'datetime-local'; reset.value = localDateTime(provider.reiniciaEn);
+  const exhausted = el('input'); exhausted.type = 'checkbox'; exhausted.checked = status.state === 'agotada';
+  const exhaustedLabel = el('label', 'quota-check'); exhausted.id = `quota-${agent}-exhausted`; exhausted.dataset.field = 'exhausted'; exhaustedLabel.htmlFor = exhausted.id; exhaustedLabel.append(exhausted, document.createTextNode(' Ya no acepta trabajo hasta el reinicio'));
+  row.append(field('Autenticación en Orca', auth, 'autenticacion'), field('Uso observado ahora (%)', used, 'usadoPorcentaje'), field('Se reinicia', reset, 'reiniciaEn'), exhaustedLabel);
+  const note = el('p', 'pipeline-row-note', `${quotaStateNames[status.state] || status.state}. ${status.reason || status.aviso || (status.usadoPorcentaje !== undefined ? `Uso observado ${status.usadoPorcentaje} % el ${formatDate(status.observadoEn)}.` : '')}`);
+  note.classList.toggle('pipeline-error', ['reserva', 'agotada'].includes(status.state));
+  row.append(note);
+  for (const control of [auth, used, reset, exhausted]) control.addEventListener(control.tagName === 'INPUT' && control.type !== 'checkbox' ? 'input' : 'change', () => setQuotaDirty(true));
+  return row;
+}
+function setQuotaDirty(dirty) { quotaState.dirty = dirty; $('#quota-dirty').textContent = dirty ? 'Cambios sin guardar' : 'Sin cambios'; $('#quota-save').disabled = !dirty; }
+function renderQuota(server) {
+  quotaState.server = server;
+  const status = $('#quota-status'), blocked = server.agents.filter(agent => ['reserva', 'agotada'].includes(server.status[agent].state));
+  status.classList.toggle('pipeline-error', Boolean(server.error) || blocked.length > 0);
+  status.textContent = server.error ? `El archivo guardado no es válido: ${server.error} Mientras tanto no se lanza trabajo.`
+    : !server.configured ? 'Sin política de cuota en esta instalación: las etapas se lanzan sin comprobar el uso. Anota la autenticación y el uso de cada proveedor y guarda para activarla.'
+    : blocked.length ? `No se lanzan etapas con ${blocked.join(' ni ')}: ${blocked.map(agent => server.status[agent].reason).join(' ')}`
+    : `Reserva personal del ${server.quota.reservaPersonalPorcentaje} % activa.`;
+  $('#quota-warnings').replaceChildren(...server.warnings.map(text => el('li', '', text)));
+  $('#quota-providers').replaceChildren(...server.agents.map(agent => quotaProviderRow(agent, server.quota.proveedores[agent] || {}, server.status[agent])));
+  for (const name of ['reservaPersonalPorcentaje', 'avisoPorcentaje', 'caducidadObservacionHoras', 'sinDatos', 'alAgotar']) $('#quota-form').elements[name].value = server.quota[name];
+  setQuotaDirty(false);
+}
+function loadQuota(force = false) {
+  if ((quotaState.dirty || quotaState.server) && !force) return Promise.resolve();
+  quotaState.loading ||= api('/api/quota').then(renderQuota)
+    .catch(error => { $('#quota-status').textContent = `No se pudo cargar la cuota: ${error.message}`; $('#quota-status').classList.add('pipeline-error'); })
+    .finally(() => { quotaState.loading = null; });
+  return quotaState.loading;
+}
+for (const control of $('#quota-form').querySelectorAll('.quota-policy input, .quota-policy select')) control.addEventListener(control.tagName === 'SELECT' ? 'change' : 'input', () => setQuotaDirty(true));
+$('#quota-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!quotaState.dirty || !quotaState.server) return;
+  const form = event.currentTarget, button = $('#quota-save'); button.disabled = true;
+  try {
+    const number = name => Number(form.elements[name].value);
+    const substitute = form.elements.alAgotar.value === 'sustituir';
+    let server = await api('/api/quota', { method: 'POST', body: JSON.stringify({ policy: { reservaPersonalPorcentaje: number('reservaPersonalPorcentaje'), avisoPorcentaje: number('avisoPorcentaje'),
+      caducidadObservacionHoras: number('caducidadObservacionHoras'), sinDatos: form.elements.sinDatos.value, alAgotar: form.elements.alAgotar.value, sustituciones: substitute ? { claude: 'codex', codex: 'claude' } : {} } }) });
+    for (const row of $('#quota-providers').querySelectorAll('.quota-provider')) {
+      const value = name => row.querySelector(`[data-field="${name}"]`).value, agent = row.dataset.provider, before = quotaState.server.quota.proveedores[agent] || {};
+      const reset = value('reiniciaEn') ? new Date(value('reiniciaEn')).toISOString() : '';
+      const exhausted = row.querySelector('[data-field="exhausted"]').checked;
+      if (exhausted && !reset) throw new Error(`Para marcar ${agent} como agotado, indica cuándo se reinicia.`);
+      const observation = { provider: agent, autenticacion: value('autenticacion'), reiniciaEn: reset,
+        ...(value('usadoPorcentaje') !== '' ? { usadoPorcentaje: Number(value('usadoPorcentaje')) } : {}),
+        ...(exhausted ? { agotadaHasta: reset } : quotaState.server.status[agent].state === 'agotada' ? { agotadaHasta: '' } : {}) };
+      const changed = observation.autenticacion !== (before.autenticacion || 'desconocida') || reset !== (before.reiniciaEn ? new Date(before.reiniciaEn).toISOString() : '') || 'usadoPorcentaje' in observation || 'agotadaHasta' in observation;
+      if (changed) server = await api('/api/quota', { method: 'POST', body: JSON.stringify({ observation }) });
+    }
+    renderQuota(server);
+    notify('Cuota guardada. Se aplica a las etapas que aún no se han lanzado.');
+  } catch (error) { $('#quota-status').textContent = `No se guardó: ${error.message}`; $('#quota-status').classList.add('pipeline-error'); notify(error.message, true); button.disabled = false; }
+});
+window.addEventListener('beforeunload', event => { if (quotaState.dirty) event.preventDefault(); });
+
+
+// ---- Equipos (docs/EQUIPOS.md): read-only view of who this PC is and what each PC can do. ----
+async function loadTeam() {
+  const status = $('#team-status'), list = $('#team-list');
+  try {
+    const team = await api('/api/team');
+    status.classList.toggle('pipeline-error', Boolean(team.error));
+    status.textContent = team.error ? `La configuración de equipos no es válida: ${team.error} Mientras tanto no se despacha.`
+      : !team.configured ? `Este PC no está identificado (falta data/equipo.json): sus encargos se anotan como «${team.nombre}», sin comprobar recursos ni reservar ramas.`
+      : `Este PC es ${team.nombre}. Trabajos a la vez: ${team.concurrencia}. Reserva de ramas: ${team.reservas.activas ? `activa (caduca a los ${team.reservas.caducidadMinutos} min sin renovar)` : 'desactivada'}.`;
+    list.replaceChildren(...Object.entries(team.equipos || {}).flatMap(([id, item]) => [el('dt', '', `${item.nombre}${id === team.id && team.configured ? ' (este PC)' : ''}`),
+      el('dd', '', `${item.sistema} · ${item.recursos.length ? item.recursos.map(resource => team.resourceNames[resource] || resource).join(', ') : 'sin recursos declarados'}`)]));
+  } catch (error) { status.textContent = `No se pudieron cargar los equipos: ${error.message}`; status.classList.add('pipeline-error'); }
+}

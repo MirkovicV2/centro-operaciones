@@ -4,13 +4,15 @@ import { randomUUID, createHash } from 'node:crypto';
 import { QUEUE_BUSINESSES, addJob, loadState, runQueue, recoverDashboardQueue, retryJob, validateSpec, acquireLock, acquireLedgerLock, releaseLock, queueKnownLivenessResume, elapsedAttemptMs, executionTimeExhausted, isEffectFreeLivenessPreflight, isSameAttemptRecoveryMode, deliveryTransportError, assertDeliveryTransportProof, recoveryFingerprint, integrationValidationSteps, assertIntegrationValidationProof, queueIntegrationValidationResume, assertCommittedIntegrationRecord, assertIntegrationReconcileProof, queueIntegrationReconcileResume } from './queue.mjs';
 import { verifyGitHubDestination } from './project-destination.mjs';
 import { sameRepository } from './repository-name.mjs';
-import { captureIntegrationSnapshot } from './github-integration.mjs';
+import { captureIntegrationSnapshot, pullRequestIdentityFields, sameRepositoryPullRequest } from './github-integration.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { inspectCommittedIntegration, inspectEffectFreeIntegration, effectFreeIntegrationRecord } from './integration-recovery.mjs';
 import { replaceLocalFile } from './atomic-file.mjs';
 import { assertQualityAction, queueContractRevisionRetry, recoverableChecksTimeout, uxReturnSource, developerDecisionSource, stageDecisionSource, isPartialStageResume, settledOrcaObservation, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
-import { currentActor } from './queue.mjs';
+import { currentActor, settleOwnerMergedJob } from './queue.mjs';
 import { createContractRevision, assertContractRevisionCheckpoint, assertContractRevisionProof, contractRevisionHash, originalContractRevisionJob } from './contract-revision.mjs';
-import { workflowV2Resumable } from './workflow-v2-gate.mjs';
+import { workflowV2Resumable, workflowV2Readmissible } from './workflow-v2-gate.mjs';
 
 const location = root => path.join(path.resolve(root), 'data', 'auto-run.json');
 const empty = () => ({ schema: 1, businesses: { agency: false, games: false }, receipts: [], history: [], integrations: {} });
@@ -251,6 +253,9 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
                   assertRecoveryDestination(destination, observed);
                 }
                 // Recovery observes the original baseline; it does not approve a new one.
+              } else if (receipt.workflowV2Resume?.attempt === job.attempts && workflowV2Readmissible(job)) {
+                // The approved candidate is still uncommitted: same baseline (branch, SHAs), dirty tree allowed.
+                assertRecoveryDestination(receipt.workflowV2Resume.destination, await verify(root, admittedJob, { requireClean: false }));
               } else destination = await verify(root, admittedJob);
               lockPath = path.join(destination.workspace, '.git', 'centro-executor.lock');
               try { checkoutLock = await fs.open(lockPath, 'wx'); }
@@ -320,6 +325,8 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
         await update(receipt.id, admitted ? 'needs_attention' : 'blocked', {
           reason: error.message,
           ...(error.code === 'checkout_locked' && !admitted ? { blockCode: error.code } : {}),
+          // Why the destination check failed, so the person does not have to rerun Git by hand to find out.
+          ...(/^destination_[a-z_]+$/.test(error.code || '') && !admitted ? { blockCode: error.code, ...(blockDetails(error.details) ? { blockDetails: blockDetails(error.details) } : {}) } : {}),
         });
       } finally {
         if (checkoutLock) { await checkoutLock.close(); if (!uncertain) await fs.unlink(lockPath); }
@@ -373,6 +380,35 @@ export async function authorizeDecisionResume(root, jobId) {
     receipt.decisionRevision = revision; receipt.updatedAt = now();
     receipt.reason = 'Todas las decisiones recibidas; continúa el mismo encargo dentro de sus límites.';
     audit(state, 'decisions_resume_authorized', { receiptId: receipt.id, jobId, revision, attempt: job.attempts, dispatchId: stage.dispatchId });
+    return receipt;
+  });
+}
+
+// Bounded copy of a destination error's details (already redacted at the source): short scalars only.
+function blockDetails(details) {
+  if (!details || typeof details !== 'object') return null;
+  const kept = Object.entries(details).filter(([key, value]) => /^[A-Za-z]{2,24}$/.test(key) && ['string', 'number', 'boolean'].includes(typeof value)).slice(0, 8)
+    .map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 400) : value]);
+  return kept.length ? Object.fromEntries(kept) : null;
+}
+
+// The destination check failed before anything was admitted or dispatched (repository missing, branch not pushed,
+// no network). Once the person has fixed it, re-arm the same receipt: the runner repeats the full check before starting.
+export async function retryDestinationAdmission(root, id, { confirm = false } = {}) {
+  if (!confirm) throw new Error('Confirma que has corregido el destino.');
+  return change(root, async state => {
+    const receipt = state.receipts.find(item => item.id === id);
+    const job = (await loadState(root)).jobs.find(item => item.id === receipt?.jobId);
+    if (receipt?.status !== 'blocked' || !receipt.eligible || receipt.claimedAt || !/^destination_[a-z_]+$/.test(receipt.blockCode || '')
+      || job?.kind !== 'code' || job.state !== 'queued' || job.attempts !== 0 || job.startedAt || job.result || job.orphanRisk
+      || job.autoIntent?.receiptId !== id || job.workflow?.status !== 'queued' || job.workflow.currentStage != null
+      || !job.workflow.steps?.length || job.workflow.steps.some(step => !['queued', 'skipped'].includes(step.status) || step.runId || step.taskId || step.dispatchId)) {
+      throw new Error('El recibo no acredita un fallo de destino anterior al primer intento.');
+    }
+    const previous = receipt.blockCode;
+    receipt.status = 'pending'; receipt.updatedAt = now(); receipt.reason = 'Destino corregido; se vuelve a comprobar antes de empezar.';
+    delete receipt.blockCode; delete receipt.blockDetails;
+    audit(state, 'destination_retry', { receiptId: id, jobId: job.id, previous });
     return receipt;
   });
 }
@@ -1067,6 +1103,7 @@ export async function resumeWorkflowV2Receipt(root, jobId, { confirm = false } =
       const receipt = state.receipts.find(item => item.id === candidate.receiptId);
       if (!receipt || receipt.status !== 'retrying') throw new Error('El recibo cambió durante la reanudación; requiere revisión.');
       receipt.status = 'pending'; receipt.retryAuthorizedAttempt = job.attempts; receipt.updatedAt = now();
+      receipt.workflowV2Resume = { attempt: job.attempts, destination: receipt.destination };
       audit(state, 'retry_authorized', { receiptId: receipt.id, jobId, attempt: job.attempts, workflowV2: true });
     });
     return job;
@@ -1077,6 +1114,61 @@ export async function resumeWorkflowV2Receipt(root, jobId, { confirm = false } =
     });
     throw error;
   }
+}
+
+// Recovery for a V2 resume that a previous version blocked at admission because the approved
+// candidate made the checkout dirty. Nothing ran: the job is still queued for the same attempt.
+export async function readmitWorkflowV2Receipt(root, jobId, { confirm = false } = {}) {
+  if (!confirm) throw new Error('Confirma que aprobaste este candidato en Workflow V2 antes de readmitirlo.');
+  return change(root, async state => {
+    const receipt = state.receipts.find(item => item.jobId === jobId);
+    const job = (await loadState(root)).jobs.find(item => item.id === jobId);
+    if (!receipt || receipt.status !== 'blocked' || !receipt.eligible || !job || job.autoIntent?.receiptId !== receipt.id
+      || receipt.retryAuthorizedAttempt !== job.attempts || !workflowV2Readmissible(job) || !receipt.destination) {
+      throw new Error('Este recibo no es una reanudación de Workflow V2 bloqueada en la admisión; revisa su estado.');
+    }
+    receipt.status = 'pending'; receipt.updatedAt = now();
+    receipt.workflowV2Resume = { attempt: job.attempts, destination: receipt.destination };
+    audit(state, 'retry_authorized', { receiptId: receipt.id, jobId, attempt: job.attempts, workflowV2: true, readmitted: true });
+    return receipt;
+  });
+}
+
+const runGh = async (args, cwd) => (await promisify(execFile)('gh', args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 1 << 20 })).stdout;
+const OWNER_MERGE_PHASES = new Set(['pr_confirmed', 'checks_pending', 'merge_intent']);
+
+// The owner merged the integration PR by hand while the Centro waited for checks (repositories
+// without CI end there). Confirms on GitHub that exactly that PR, with exactly the recorded commit,
+// is merged into the confirmed base, then records the integration and the job as delivered.
+// Read-only towards GitHub: it never pushes, merges or dispatches anything.
+export async function reconcileOwnerMergedIntegration(root, jobId, { confirm = false, gh = runGh } = {}) {
+  if (!confirm) throw new Error('Confirma que fusionaste tú la PR de este trabajo.');
+  root = path.resolve(root);
+  const job = (await loadState(root)).jobs.find(item => item.id === jobId);
+  const saved = await readAutoRun(root);
+  const receipt = saved.receipts.find(item => item.jobId === jobId);
+  const record = receipt ? saved.integrations?.[receipt.id] : null;
+  if (!job || job.kind !== 'code' || !['needs_attention', 'queued'].includes(job.state) || !receipt?.eligible || job.autoIntent?.receiptId !== receipt.id
+    || !['blocked', 'needs_attention'].includes(receipt.status) || !record || !OWNER_MERGE_PHASES.has(record.phase)
+    || !Number.isInteger(record.prNumber) || !/^[a-f0-9]{40}$/i.test(record.commitSha || '') || record.sourceBranch !== job.branch) {
+    throw new Error('Este trabajo no tiene una PR de integración esperando checks o merge; revisa su estado.');
+  }
+  const repo = String(record.repository || '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '');
+  const pr = JSON.parse(await gh(['pr', 'view', String(record.prNumber), '--repo', repo, '--json', `${pullRequestIdentityFields},mergedAt,mergeCommit`], job.workspace));
+  if (!sameRepositoryPullRequest(pr, repo, record.sourceBranch, record.baseBranch) || pr.number !== record.prNumber || pr.headRefOid !== record.commitSha) {
+    throw new Error('La PR observada no coincide con la PR y el commit registrados; no se reconcilia.');
+  }
+  if (pr.state !== 'MERGED' || !pr.mergedAt || !/^[a-f0-9]{40,64}$/i.test(pr.mergeCommit?.oid || '')) throw new Error(`La PR #${record.prNumber} no está fusionada; no hay nada que reconciliar.`);
+  const integration = await persistIntegration(root, { ...record, phase: 'complete', status: 'completed', needsAttention: false, error: null,
+    mergeSha: pr.mergeCommit.oid, mergedAt: pr.mergedAt, reconciled: true, mergedBy: 'owner', updatedAt: now() });
+  const settled = await settleOwnerMergedJob(root, jobId, integration, { confirm: true });
+  await change(root, state => {
+    const current = state.receipts.find(item => item.id === receipt.id);
+    current.status = 'completed'; current.reason = integratedReason; current.updatedAt = now();
+    delete current.workflowV2Resume;
+    audit(state, 'owner_merge_reconciled', { receiptId: receipt.id, jobId, prNumber: record.prNumber, mergeSha: pr.mergeCommit.oid });
+  });
+  return settled;
 }
 
 export async function retryAutoReceipt(root, jobId, { confirm = false, noDispatchConfirmed = false } = {}) {

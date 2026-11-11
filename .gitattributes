@@ -5,3 +5,6 @@
 *.toml text eol=lf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+# Skill files are fingerprinted byte by byte: the same bytes on Windows and Ubuntu.
+skills/** text eol=lf
+.codex/skills/** text eol=lf

@@ -15,12 +15,12 @@ const write = async (dir, scope, stage, text) => { await fs.mkdir(path.join(dir,
 
 test('layers apply global, then business, then project; missing or empty layers are skipped', async t => {
   const dir = await root(t);
-  assert.deepEqual(await readStageContracts(dir, { business: 'agency', projectId: 'web', stage: 'reviewer' }), []);
+  assert.deepEqual(await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: 'web', stage: 'reviewer' }), []);
   await write(dir, 'global', 'reviewer', 'Revisa accesibilidad.\n');
   await write(dir, 'empresa-agency', 'reviewer', '');
   await write(dir, 'proyecto-web', 'reviewer', 'Comprueba el formulario de contacto.');
   await write(dir, 'proyecto-otro', 'reviewer', 'No debe aparecer.');
-  const found = await readStageContracts(dir, { business: 'agency', projectId: 'web', stage: 'reviewer' });
+  const found = await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: 'web', stage: 'reviewer' });
   assert.deepEqual(found.map(item => [item.scope, item.path, item.text]), [
     ['global', 'data/contracts/global/reviewer.md', 'Revisa accesibilidad.'],
     ['proyecto-web', 'data/contracts/proyecto-web/reviewer.md', 'Comprueba el formulario de contacto.']]);
@@ -28,8 +28,8 @@ test('layers apply global, then business, then project; missing or empty layers 
   const brief = contractsBrief(found);
   assert.match(brief, /No cambian permisos, publicación, el contrato de entrega/);
   assert.ok(brief.indexOf('global') < brief.indexOf('proyecto web'));
-  assert.deepEqual(await readStageContracts(dir, { business: 'agency', projectId: '../web', stage: 'reviewer' }).then(items => items.map(item => item.scope)), ['global'], 'an unsafe project id is never a path');
-  assert.deepEqual(await readStageContracts(dir, { business: 'agency', projectId: 'web', stage: 'integration' }), []);
+  assert.deepEqual(await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: '../web', stage: 'reviewer' }).then(items => items.map(item => item.scope)), ['global'], 'an unsafe project id is never a path');
+  assert.deepEqual(await readStageContracts(dir, { sharedRoot: dir, business: 'agency', projectId: 'web', stage: 'integration' }), []);
 });
 
 test('oversized files and links fail closed with an actionable error', async t => {
@@ -58,7 +58,7 @@ test('a worker brief carries its stage contracts with provenance; without files 
   const workspace = path.join(dir, 'workspaces', 'game'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
   const run = async id => {
     const briefs = [], specs = [], updates = [];
-    const ctx = { root: dir, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
+    const ctx = { root: dir, sharedContractsRoot: dir, signal: new AbortController().signal, async reportStage(update) { updates.push(update); }, registerCleanup() {} };
     const command = async args => {
       if (args[0] === 'repo') return { repos: [{ path: workspace }] };
       if (args[1] === 'run-create') return { runId: 'run_contract01' };
@@ -81,4 +81,22 @@ test('a worker brief carries its stage contracts with provenance; without files 
   assert.ok(after.slice(0, 3).every(spec => !spec.includes('CONTRATOS DE ROL DEL CENTRO')), 'only the reviewer stage has a contract');
   assert.match(after[3], /CONTRATO proyecto web · data\/contracts\/proyecto-web\/reviewer\.md · sha256 [a-f0-9]{64}\nComprueba el formulario de contacto\./);
   assert.ok(after[3].indexOf('CONTRATOS DE ROL DEL CENTRO') < after[3].indexOf('CONTRATO DE ENTREGA v1'), 'the Centro rules come after the contract');
+});
+
+test('paths a contract tells a Claude worker to read are flagged when its checkout does not allow them', async t => {
+  const { unreadableReferences } = await import('../project-contracts.mjs');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'refs-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspaces', 'sandbox'), home = path.join(root, 'home');
+  await fs.mkdir(path.join(workspace, '.claude'), { recursive: true });
+  const contracts = [{ text: 'Funcionalidad nueva: `~/dev/es-skills/tdd-slice/SKILL.md` (síguela). Fallos: `~/dev/es-skills/debug/SKILL.md`. Mira `' + workspace + '/README.md` y `' + path.join(root, 'data', 'dispatch-specs', 'j', 'x.txt') + '`. No escribas en `~/second_brain` ni en ~/dev/otra/NOTA.md.' }];
+  const refs = options => unreadableReferences(contracts, { workspace, root, home, ...options });
+  assert.deepEqual(await refs(), ['~/dev/es-skills/debug/SKILL.md', '~/dev/es-skills/tdd-slice/SKILL.md'], 'the checkout, the dispatch specs, folders and unquoted prose are not flagged');
+  const absoluteHome = process.platform === 'win32' ? home.replaceAll('\\', '/').replace(/^([A-Za-z]):\//, (_, drive) => '//' + drive.toLowerCase() + '/') : '/' + home;
+  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: [`Read(${absoluteHome}/dev/es-skills/tdd-slice/**)`, 'Bash(npm test:*)'] } }));
+  assert.deepEqual(await refs(), ['~/dev/es-skills/debug/SKILL.md']);
+  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Read(~/dev/es-skills/**)'] } }));
+  assert.deepEqual(await refs(), []);
+  await fs.writeFile(path.join(workspace, '.claude', 'settings.local.json'), '{ no es json');
+  assert.equal((await refs()).length, 2);
+  assert.deepEqual(await unreadableReferences([{ text: 'Sin rutas.' }], { workspace, root, home }), []);
 });

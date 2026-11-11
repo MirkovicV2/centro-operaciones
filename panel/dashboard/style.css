@@ -1088,6 +1088,15 @@ dialog::backdrop { background: rgba(20,20,24,.32); }
 .run-callout { margin: 16px 0 0; padding: 14px 16px; border-radius: 12px; background: var(--amber-wash); border: 1px solid var(--amber-line); }
 .run-callout h3 { margin: 0; font-size: 14px; font-weight: 620; }
 .run-callout p { margin: 4px 0 0; font-size: 13.5px; color: var(--muted); }
+.run-v2 { margin: 12px 0 0; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line); border-left: 3px solid var(--accent-line); overflow-wrap: anywhere; }
+.run-v2 h3 { margin: 0 0 6px; font-size: 14px; font-weight: 620; }
+.run-v2 p { margin: 4px 0 0; font-size: 13.5px; }
+.run-v2-next { color: var(--text); font-weight: 560; }
+.run-v2-command { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+.run-v2-command code { flex: 1; padding: 8px 10px; border-radius: 8px; background: var(--wash, rgba(127,127,127,.12)); font-size: 12.5px; user-select: all; }
+.run-v2 > .button { margin-top: 8px; }
+.run-v2-files ul { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; max-height: 260px; overflow: auto; }
+.run-v2-files li.is-binary { color: var(--amber, #c98a00); }
 .run-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .run-actions .button { min-height: 32px; padding: 0 12px; font-size: 13px; }
 .run-h3 { margin: 30px 0 4px; font-size: 13.5px; font-weight: 620; color: var(--text); }
@@ -1301,3 +1310,54 @@ button.history-row { cursor: pointer; } button.history-row:hover { background: v
 .questions-panel h3, .vault-recent h3, .form-card h3 { font-size: 15px; font-weight: 620; }
 .form-card .eyebrow, .questions-panel .eyebrow, .vault-recent .eyebrow, .settings-card .eyebrow { display: none; }
 .projects-grid .project-card-header .badge { margin-left: 4px; }
+
+/* Ajustes · reparto del pipeline, y reparto por encargo en Nuevo trabajo. */
+.pipeline-form, .pipeline-effective { margin-bottom: 16px; }
+.pipeline-scope { display: grid; gap: 6px; max-width: 420px; }
+.pipeline-rows { display: grid; gap: 10px; margin: 12px 0; }
+.pipeline-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 12px; align-items: end; min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.job-launch .pipeline-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.pipeline-row legend { padding: 0 6px; font-size: 13px; font-weight: 620; color: var(--text); }
+.pipeline-row label { display: grid; gap: 4px; min-width: 0; }
+.pipeline-row :is(input, select) { width: 100%; min-width: 0; }
+.pipeline-row :is(input, select):disabled { opacity: .5; }
+.pipeline-row-note { grid-column: 1 / -1; margin: 0; font-size: 12.5px; color: var(--soft); overflow-wrap: anywhere; }
+.pipeline-row-note:empty { display: none; }
+.pipeline-error { color: var(--rose); }
+.queue-guide.pipeline-error { border-left-color: var(--rose); }
+.pipeline-effective-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.pipeline-effective-block h4 { margin: 0 0 8px; font-size: 14px; font-weight: 620; }
+.pipeline-effective-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0; font-size: 13px; }
+.pipeline-effective-list dt { color: var(--soft); }
+.pipeline-effective-list dd { margin: 0; overflow-wrap: anywhere; }
+.pipeline-escalations { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.job-launch { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.job-launch summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; color: var(--text); }
+.job-launch summary span { color: var(--soft); }
+@media (max-width: 760px) {
+  .pipeline-row, .job-launch .pipeline-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .job-launch summary { min-height: 44px; }
+  #ajustes .form-footer .button-row .button { flex: 1 1 100%; }
+}
+@media (max-width: 370px) { .pipeline-row, .job-launch .pipeline-row { grid-template-columns: minmax(0, 1fr); } }
+
+/* Página del trabajo: ruta y etapas omitidas o añadidas, con su motivo. */
+.run-route { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; overflow-wrap: anywhere; }
+.run-route-title { margin: 0; color: var(--text); }
+.run-route-notes { margin: 6px 0 0; padding-left: 18px; color: var(--soft); }
+
+/* Ajustes · cuota; página del trabajo · diagnóstico. */
+.quota-form { margin-bottom: 16px; }
+.quota-warnings { margin: 0 0 12px; padding-left: 18px; font-size: 13px; color: var(--amber); overflow-wrap: anywhere; }
+.quota-warnings:empty { display: none; }
+.quota-check { display: flex !important; align-items: center; gap: 8px; min-height: 36px; }
+.quota-policy { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.run-diagnosis { margin: 0 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent-line); border-radius: 10px; overflow-wrap: anywhere; }
+.run-diagnosis h3 { margin: 0 0 6px; font-size: 14px; font-weight: 620; }
+.run-diagnosis p { margin: 0 0 6px; font-size: 13.5px; }
+.run-diagnosis-action { color: var(--text); }
+.run-diagnosis.is-producto, .run-diagnosis.is-incierto { border-left-color: var(--rose); }
+.run-diagnosis.is-cuota, .run-diagnosis.is-configuracion { border-left-color: var(--amber); }
+@media (max-width: 1100px) { .quota-policy { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 370px) { .quota-policy { grid-template-columns: minmax(0, 1fr); } }
+.pipeline-row input[type=checkbox] { width: auto; min-width: 0; flex: none; }

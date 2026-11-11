@@ -1,0 +1,5 @@
+Objetivo: en Flecha Trampa, añadir a la pantalla de partida un indicador de combo que crezca con cada acierto consecutivo y se reinicie al fallar, coherente con el ritmo rápido tipo StepMania vigente.
+
+Alcance: la escena de partida y su interfaz. No cambian la carta rítmica, el juicio ni el formato de guardado.
+
+Criterio de éxito: el combo aumenta en uno por acierto y vuelve a cero con un fallo; el indicador es legible durante una pista rápida y no tapa las notas; reiniciar la partida lo pone a cero; el proyecto importa y sus pruebas pasan en el Godot acreditado.

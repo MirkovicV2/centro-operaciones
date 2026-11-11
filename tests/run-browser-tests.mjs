@@ -8,7 +8,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const candidates = [process.env.PLAYWRIGHT_MODULE, path.join(root, 'workspaces', 'portfolio-motion', 'node_modules', 'playwright', 'index.mjs')].filter(Boolean);
+// An explicit module is authoritative, including an invalid path. Never silently
+// run another checkout's browser suite when a caller requested an isolated check.
+const candidates = process.env.PLAYWRIGHT_MODULE ? [process.env.PLAYWRIGHT_MODULE]
+  : [path.join(root, 'workspaces', 'portfolio-motion', 'node_modules', 'playwright', 'index.mjs')];
 
 export async function resolvePlaywright(paths = candidates) {
   for (const candidate of paths) {
