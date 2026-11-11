@@ -220,6 +220,7 @@ export async function acquireLedgerLock(root, waitMs) {
   }
 }
 
+const OPERATOR_LOCK_WAIT_MS = 10_000;
 async function mutate(root, action, waitMs = 0) {
   root = path.resolve(root);
   const lock = await acquireLedgerLock(root, waitMs);
@@ -1296,6 +1297,9 @@ export async function increaseJobAttemptLimit(root, id, maxAttempts) {
 // its effects and report are kept and the new assignment is a new Task that follows the previous one.
 export async function retryJob(root, id, { confirm = false, stoppedDeveloperRecovery, substitute, reason } = {}) {
   if (!confirm) throw new QueueError('Revisa los resultados/efectos previos y usa --confirm-reviewed para reintentar.');
+  // A person pressing Reintentar must not lose to the panel's own background ticks, which take the ledger lock every
+  // second and a half and read the whole ledger while they hold it (second real home-finance job: refused twice).
+  // Waiting is safe: the action below re-reads the state under the lock and validates it again.
   return mutate(root, async state => {
     const previous = state.jobs.find(j => j.id === id);
     if (!previous || previous.state !== 'needs_attention') throw new QueueError('Solo se pueden reabrir trabajos needs_attention.');
@@ -1372,7 +1376,7 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
     const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - amount), estimatedSpentUsd: state.budget.estimatedSpentUsd + amount };
     await commit(root, state, 'operator_retry', { jobs: [job], budget }, { jobId: id });
     return job;
-  });
+  }, OPERATOR_LOCK_WAIT_MS);
 }
 
 // Scope changed: the coordinator puts back a stage the route had left out (today only Diseño).

@@ -398,3 +398,27 @@ test('an eligible job V2 blocked before evidence is resumed once from the panel,
   assert.deepEqual(job.workflow.steps.filter(step => ['ux', 'developer', 'qa'].includes(step.key)).map(step => step.status), ['succeeded', 'succeeded', 'succeeded']);
   await assert.rejects(resumeWorkflowV2Receipt(root, job.id, { confirm: true }), /no está esperando/, 'only once');
 });
+
+test('an operator retry waits for a ledger lock held by a background tick instead of failing at once', async t => {
+  const { acquireLock, releaseLock } = await import('../queue.mjs');
+  const root = await tempRoot(t, 'wfv2-b-lockwait-');
+  await setAutoRun(root, 'agency', true, { confirm: true });
+  const workspace = path.join(root, 'workspaces', 'obi'); await fs.mkdir(path.join(workspace, '.git'), { recursive: true });
+  const sent = await confirmSubmission(root, 'receipt-v2l', { id: 'v2l-auto', business: 'agency', kind: 'code', title: 'V2', provider: 'orca', projectId: 'obi',
+    prompt: 'Objetivo: probar V2. Criterio: el candidato aprobado se integra.', workspace, isolated: true, branch: 'feature',
+    destination: { checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', baseBranch: 'main' }, autoIntent: { receiptId: 'receipt-v2l', eligible: true } });
+  const verify = async () => ({ checkout: 'workspaces/obi', workspace, branch: 'feature', repository: 'o/r', origin: 'https://github.com/o/r.git',
+    sha: 'a'.repeat(40), remoteSha: 'a'.repeat(40), baseBranch: 'main', baseSha: 'b'.repeat(40), verified: true });
+  await createAutoRunner(root, { verify, worker: async (job, ctx) => {
+    for (const key of ['ux', 'developer']) await ctx.reportStage({ key, status: 'succeeded', summary: `${key} listo` });
+    await ctx.reportStage({ key: 'qa', status: 'succeeded', summary: 'RESULTADO: APROBADO', workflowV2Snapshot: A });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', error: 'workflow_v2_blocked', summary: 'V2 bloqueado.',
+      workflowV2: { task: 'v2l-auto-aaaaaaaaaaaa', outcome: 'blocked', qaSnapshot: A, candidate: A, identity: 'id-1', evidenceId: null, reviews: [] } });
+    throw Object.assign(new Error('V2 bloqueado.'), { code: 'workflow_v2_blocked', uncertain: false });
+  } }).tick();
+  const held = await acquireLock(root);
+  setTimeout(() => { void releaseLock(held); }, 300);
+  const job = await resumeWorkflowV2Receipt(root, sent.job.id, { confirm: true });
+  assert.equal(job.state, 'queued');
+  assert.equal((await readAutoRun(root)).receipts[0].status, 'pending');
+});
