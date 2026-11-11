@@ -120,6 +120,18 @@ El panel escucha solo en `127.0.0.1`. Para compartirlo con otra persona, publica
 
 Una cuenta no listada recibe 403. `revisar` solo consulta; `ejecutar` puede lanzar, reintentar, aprobar y cerrar encargos pero no cambiar la configuración, la autoejecución ni los proyectos; `admin` puede todo. Cada evento del ledger, cada encargo nuevo y cada entrada del historial de autoejecución guardan `actor` (la cuenta de Tailscale, `local` desde este equipo o `cli:<usuario>` desde la CLI). Los registros anteriores no tienen ese campo y el panel los muestra como «desconocido»; el ledger no se reescribe.
 
+## Usarlo desde el móvil y actualizarlo desde el panel
+
+Con el acceso por Tailscale de la sección anterior, el móvil abre el panel del PC en directo (`https://<equipo>.<tailnet>.ts.net`) y se puede añadir a la pantalla de inicio como una app. El móvil no guarda una copia: el panel no tiene service worker y responde con `cache-control: no-store`, así que siempre muestra la versión que corre en el PC.
+
+Para que el PC esté al día, cuando `main` tiene commits nuevos el panel lo avisa arriba, en cualquier página: «Versión nueva del Centro: N cambios en main», con la lista de cambios y el botón **Actualizar ahora** (solo `admin`). Al pulsarlo:
+
+1. Consulta GitHub (`git fetch origin main`, como mucho cada 5 minutos) y comprueba que la carpeta está en `main`, sin cambios en archivos del repositorio y sin commits locales. Si no, lo dice y hay que actualizar a mano.
+2. Pasa las pruebas de la versión nueva en una copia aparte (`git worktree`), sin tocar la carpeta. Si fallan, no cambia nada.
+3. Si siguen sin haber trabajos en marcha, avanza con `git merge --ff-only` y reinicia el panel con el script de reinicio (`panel/reiniciar-panel.sh` o `panel\reiniciar-panel.ps1`, sin repetir las pruebas). La página se recarga sola cuando el panel nuevo responde.
+
+Nada se actualiza sin que alguien pulse el botón. Tras el primer reinicio desde el panel, el panel corre en segundo plano y su salida va a `panel/data/dashboard.stdout.log`.
+
 ## Verificar sin consumo
 
 ```powershell
