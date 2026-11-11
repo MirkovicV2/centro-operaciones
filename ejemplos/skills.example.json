@@ -1,0 +1,10 @@
+{
+  "_comentario": "Opcional y local. Copia a data/skills.json para añadir o retirar skills en un proyecto concreto. Los identificadores son los de skills/registry.json. remove solo retira skills opcionales (docs/SKILLS.md).",
+  "version": 1,
+  "proyectos": {
+    "ID_DEL_PROYECTO": {
+      "add": ["web-testing"],
+      "remove": ["godot-gdscript-patterns"]
+    }
+  }
+}

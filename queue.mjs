@@ -1,5 +1,6 @@
 import { workflowV2Resumable } from './workflow-v2-gate.mjs';
 import { validateJobLaunch } from './launch-choice.mjs';
+import { validateSkillChoice } from './skills-registry.mjs';
 import { validateJobRoute, routeOmission, routeOmits, routeWithStage, stageSatisfied } from './job-route.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -286,6 +287,7 @@ export function validateSpec(spec) {
   if (spec.kind === 'code' && (!spec.workspace || !spec.isolated)) throw new QueueError('Los trabajos de código requieren workspace y confirmación isolated.');
   try { validateJobLaunch(spec.launch); } catch (error) { throw new QueueError(error.message, 'launch_choice_invalid'); }
   try { validateJobRoute(spec.route, spec.kind); } catch (error) { throw new QueueError(error.message, 'job_route_invalid'); }
+  try { validateSkillChoice(spec.skills); } catch (error) { throw new QueueError(error.message, 'skill_choice_invalid'); }
 }
 
 export async function addJob(root, spec) {
@@ -300,7 +302,7 @@ export async function addJob(root, spec) {
     const provider = spec.provider ?? 'orca';
     const route = provider === 'orca' ? validateJobRoute(spec.route, spec.kind) : undefined;
     const workflow = workflowFor(spec.kind, provider, spec.business, spec.kind === 'code' && spec.autoIntent?.eligible === true, route);
-    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), ...(route ? { route } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
+    const job = { id, ...(spec.autoIntent ? { autoIntent: spec.autoIntent } : {}), ...(spec.ideaId ? { ideaId: spec.ideaId, ideaVersion: spec.ideaVersion } : {}), business: spec.business, kind: spec.kind, projectId: spec.projectId, projectName: spec.projectName, title: spec.title, prompt: spec.prompt, provider, workflow, workspace: spec.workspace ? path.resolve(spec.workspace) : null, branch: spec.branch || null, destination: spec.destination || null, ...(spec.launch ? { launch: validateJobLaunch(spec.launch) } : {}), ...(route ? { route } : {}), ...(spec.skills ? { skills: validateSkillChoice(spec.skills) } : {}), isolated: !!spec.isolated, maxAttempts: attemptLimit(spec), timeoutMs: spec.timeoutMs ?? (provider === 'orca' ? null : defaultExecutionTimeoutMs(spec.kind)),
       ...(provider === 'orca' && spec.timeoutMs != null ? { timeoutExplicit: true } : {}), maxUsd: spec.maxUsd ?? 0.1, maxOutputTokens: 1024, attempts: 0, state: 'queued', createdAt: stamp(), reservedUsd: 0,
       ...(currentActor() ? { actor: currentActor() } : {}) };
     job.contract = contract;
@@ -1335,7 +1337,7 @@ export async function retryJob(root, id, { confirm = false, stoppedDeveloperReco
           : { key: step.key, label: step.label, profile: step.profile, status: 'queued',
             ...(index === resetAt && IDENTIFIERS.taskId.test(step.taskId ?? '') && IDENTIFIERS.dispatchId.test(step.dispatchId ?? '') && (recovery || ['failed', 'cancelled', 'abandoned'].includes(step.dispatchStatus))
               ? { retryOf: { taskId: step.taskId, dispatchId: step.dispatchId, dispatchStatus: recovery ? 'stopped' : step.dispatchStatus,
-                ...(recovery ? { recoveryId: recovery.id } : {}), ...(step.orcaAgent ? { orcaAgent: step.orcaAgent } : {}), ...(step.launch?.agent ? { launch: step.launch } : {}),
+                ...(recovery ? { recoveryId: recovery.id } : {}), ...(step.orcaAgent ? { orcaAgent: step.orcaAgent } : {}), ...(step.launch?.agent ? { launch: step.launch } : {}), ...(step.skills?.length ? { skills: step.skills } : {}),
                 taskInputAttempt: step.taskInputAttempt ?? step.attempt ?? previous.attempts } }
               : {}),
           }),

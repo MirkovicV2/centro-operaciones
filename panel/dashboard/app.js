@@ -420,6 +420,10 @@ function renderRun(data) {
     else add('Modelo', 'No registrado', 'unknown');
     if (step.authorization) add('Autorizado por', step.authorization.coordinatorName || 'coordinador', 'observed');
     if (step.dispatchId) add('Dispatch', step.dispatchId, 'observed');
+    // Supplied is the Centro's own record; consulted is what the worker stated in its delivery.
+    if (step.skills?.length) add('Skills suministradas', step.skills.map(skill => skill.id).join(', '), 'observed');
+    if (step.skills?.length && step.skillsConsulted) add('Skills consultadas', step.skillsConsulted.length ? step.skillsConsulted.join(', ') : 'Ninguna declarada', 'reported');
+    for (const item of step.skillsOmitted || []) add('Skill no entregada', `${item.id}: ${item.reason}`, 'observed');
     body.append(kv);
     const summary = step.delivery?.summary || step.summary;
     if (summary) { const details = el('details', 'run-report'); details.dataset.panelDetail = `run-${job.id}-${step.key}`; details.append(el('summary', '', 'Informe de la etapa'), el('pre', 'workflow-stage-report', summary)); body.append(details); }

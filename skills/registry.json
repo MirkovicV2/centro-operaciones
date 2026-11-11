@@ -1,0 +1,171 @@
+{
+  "_comentario": "Catálogo revisado de skills del Centro. Cada archivo lleva su huella SHA-256: una skill que no coincide no se entrega. Tras revisar un cambio, node cli.mjs skills-accept --id <skill>. Ver docs/SKILLS.md.",
+  "version": 1,
+  "skills": [
+    {
+      "id": "game-production",
+      "title": "Producción de videojuegos",
+      "summary": "Diseñar, implementar y verificar partidas jugables: controles, ritmo, feedback, audio, Android y pruebas en el motor asignado, con una referencia por perfil.",
+      "root": ".codex/skills/game-production",
+      "entry": "SKILL.md",
+      "mode": "inline",
+      "required": true,
+      "appliesTo": {
+        "businesses": [
+          "games"
+        ],
+        "kinds": [
+          "code"
+        ],
+        "stages": [
+          "ux",
+          "developer",
+          "qa",
+          "reviewer"
+        ]
+      },
+      "source": {
+        "kind": "local"
+      },
+      "license": "Propia del Centro de Operaciones",
+      "localChanges": "Skill propia. Sigue bajo .codex/skills para que Codex la descubra también por su cuenta.",
+      "reviewedAt": "2026-11-11",
+      "stageFiles": {
+        "ux": [
+          "references/ux.md"
+        ],
+        "developer": [
+          "references/developer.md"
+        ],
+        "qa": [
+          "references/qa.md"
+        ],
+        "reviewer": [
+          "references/reviewer.md"
+        ]
+      },
+      "files": {
+        "SKILL.md": "c31c95ccc55ee1b57bcabd64fa7f1475d00ff2436ff02c962cedf3f2b9b3b881",
+        "references/ux.md": "a8c35046ecb1283fe5b475a32c37964b27cf331047788d124dc08d5960c5ee2d",
+        "references/developer.md": "2ef4b38ee64ab1f774cf55482cbc2bd4879de5f62cfc1eb8be995c8a41f1c1ae",
+        "references/qa.md": "c69340fcdec6a2a4cd34dbf776d0bd5eee26324e6ce054d682c2cc80507ea3cc",
+        "references/reviewer.md": "e45a142168d476cf22dde8d341f4243409b9edc721e6127e604066d520398d5f"
+      }
+    },
+    {
+      "id": "godot-gdscript-patterns",
+      "title": "Patrones de GDScript para Godot 4",
+      "summary": "Patrones de Godot 4 en GDScript: señales, escenas, máquinas de estado, recursos, pooling, componentes, gestión de escenas, guardado y rendimiento, con notas del Centro sobre guardados y versión del motor.",
+      "root": "skills/godot-gdscript-patterns",
+      "entry": "SKILL.md",
+      "mode": "reference",
+      "required": false,
+      "appliesTo": {
+        "businesses": [
+          "games"
+        ],
+        "kinds": [
+          "code"
+        ],
+        "stages": [
+          "developer",
+          "reviewer"
+        ]
+      },
+      "source": {
+        "kind": "github",
+        "repository": "wshobson/agents",
+        "path": "plugins/game-development/skills/godot-gdscript-patterns",
+        "revision": "9c61ab243def98f72da12abd41cfcf5bcd91af9d",
+        "retrievedAt": "2026-11-11"
+      },
+      "license": "MIT",
+      "licenseFile": "LICENSE",
+      "localChanges": "SKILL.md y las dos referencias son los originales sin cambios. Añadidos: LICENSE (copia de la licencia MIT de la raíz del repositorio de origen) y references/notas-del-centro.md, que advierte de no copiar la clave de cifrado del ejemplo de guardado y de contrastar la API con el motor instalado.",
+      "reviewedAt": "2026-11-11",
+      "stageFiles": {},
+      "files": {
+        "SKILL.md": "baee8a6df1556a517dcff9df8ebca0b763c3c8275752f12a146fd12eac994b55",
+        "references/details.md": "f5ba3e068b89ff216f7de50862d8c02c7d7d4be02c76ff19c0f63973fa232bbc",
+        "references/advanced-patterns.md": "659531834c96b493caeeba32303eeacafe0ed482439933beb0a1765af7288bec",
+        "references/notas-del-centro.md": "d108284fe2c41431286636cd346fefd905dc28d7d0cafcf193904125cdb31bc6",
+        "LICENSE": "f89abb55d9f073f38f1703e4518f0613c788c6174be7f13b8dfe48a1c076c746"
+      }
+    },
+    {
+      "id": "frontend-design",
+      "title": "Diseño de interfaz con criterio propio",
+      "summary": "Dirección visual deliberada para webs: partir del tema del encargo, tipografía, estructura, movimiento, textos de interfaz y autocrítica, evitando los rasgos de una página genérica.",
+      "root": "skills/frontend-design",
+      "entry": "SKILL.md",
+      "mode": "reference",
+      "required": false,
+      "appliesTo": {
+        "businesses": [
+          "agency"
+        ],
+        "kinds": [
+          "code"
+        ],
+        "stages": [
+          "ux",
+          "developer"
+        ]
+      },
+      "source": {
+        "kind": "github",
+        "repository": "anthropics/skills",
+        "path": "skills/frontend-design",
+        "revision": "2c5958ecac7cee2b583967a2c4981d0f4a75c579",
+        "retrievedAt": "2026-11-11"
+      },
+      "license": "Apache-2.0",
+      "licenseFile": "LICENSE.txt",
+      "localChanges": "Ninguno: SKILL.md y LICENSE.txt son idénticos al original.",
+      "reviewedAt": "2026-11-11",
+      "stageFiles": {},
+      "files": {
+        "SKILL.md": "d91970639e9f5c37682ac7ab60094d35f1c7c1f38d731bd56396563aee10c1d3",
+        "LICENSE.txt": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+      }
+    },
+    {
+      "id": "web-testing",
+      "title": "Pruebas de navegador para webs",
+      "summary": "Comprobar una web local en navegador real con el Playwright del proyecto: flujo principal, móvil a 320 y 390 px, teclado, accesibilidad básica y errores de consola, con evidencia por criterio.",
+      "root": "skills/web-testing",
+      "entry": "SKILL.md",
+      "mode": "reference",
+      "required": false,
+      "appliesTo": {
+        "businesses": [
+          "agency"
+        ],
+        "kinds": [
+          "code"
+        ],
+        "stages": [
+          "developer",
+          "qa",
+          "reviewer"
+        ]
+      },
+      "source": {
+        "kind": "github",
+        "repository": "anthropics/skills",
+        "path": "skills/webapp-testing",
+        "revision": "2c5958ecac7cee2b583967a2c4981d0f4a75c579",
+        "retrievedAt": "2026-11-11"
+      },
+      "license": "Apache-2.0",
+      "licenseFile": "LICENSE.txt",
+      "localChanges": "Adaptación: SKILL.md reescrito en español conservando el método del original (árbol de decisión, reconocer y luego actuar, esperar a la carga). No se incorporan scripts/with_server.py (ejecuta órdenes con shell=True y encadenadas, incompatible con la regla de un comando simple por llamada) ni examples/ (guiones de Python Playwright que escriben en rutas de otro entorno). Añadidos: uso del Playwright del proyecto sin instalar nada, recorrido móvil, teclado, accesibilidad básica y forma de la evidencia. LICENSE.txt es el original.",
+      "reviewedAt": "2026-11-11",
+      "stageFiles": {},
+      "files": {
+        "SKILL.md": "642d1890f507b6c69930e8a42163d1b5a7c984531d55af8bdbcec6cf1df1808f",
+        "LICENSE.txt": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362"
+      }
+    }
+  ]
+}

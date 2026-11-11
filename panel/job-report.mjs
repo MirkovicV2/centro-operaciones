@@ -32,6 +32,9 @@ function stageReport(job, key, label) {
   if (exact) facts.push({ label: 'Dispatch', value: step.dispatchId, level: 'observed' });
   const launched = launchText(step);
   if (launched) facts.push({ label: 'Modelo', ...launched });
+  if (step.skills?.length) facts.push({ label: 'Skills suministradas', value: step.skills.map(skill => `${skill.id} (${skill.manifest.slice(0, 12)})`).join(', '), level: 'observed' });
+  if (step.skills?.length && step.skillsConsulted) facts.push({ label: 'Skills consultadas', value: step.skillsConsulted.length ? step.skillsConsulted.join(', ') : 'Ninguna declarada', level: 'reported' });
+  for (const item of step.skillsOmitted ?? []) facts.push({ label: 'Skill no entregada', value: clip(`${item.id}: ${item.reason}`), level: 'observed' });
   const delivery = step.delivery;
   if (delivery?.summary) facts.push({ label: 'Resumen del agente', value: clip(delivery.summary), level: 'reported' });
   else if (step.summary) facts.push({ label: 'Resumen', value: clip(step.summary), level: 'reported' });

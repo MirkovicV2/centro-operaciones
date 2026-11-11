@@ -9,6 +9,7 @@ import { addJob, addJobStage, loadState, runQueue, setBudget, retryJob, increase
 import { createWorker } from './providers.mjs';
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 import { readPipeline, previewPipeline, previewText } from './pipeline-config.mjs';
+import { skillsStatus, acceptSkill } from './skills-registry.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from './orca-provider.mjs';
 import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
 
@@ -24,6 +25,9 @@ node cli.mjs add --business games|agency --kind analysis|code --title "Título" 
   Reparto de este encargo: --launch-file "reparto.json" ({"roles":{"desarrollador":{"agent":"claude","model":"sonnet","effort":"high"},"qa":{"agent":"codex","effort":"high"}}})
   Ruta de un trabajo de código: --route interfaz|funcional|documentacion [--reason "por qué"] (por defecto interfaz: Diseño → Desarrollo → QA → Revisión;
   funcional y documentacion omiten Diseño y exigen el motivo; QA y Revisión nunca se omiten. docs/RUTAS.md)
+  Skills de este encargo: --skills-file "skills.json" ({"add":["web-testing"],"remove":["frontend-design"]}; las obligatorias no se retiran)
+node cli.mjs skills                    Estado de cada skill del registro frente a su huella (docs/SKILLS.md)
+node cli.mjs skills-accept --id SKILL  Tras revisar un cambio, registra las nuevas huellas de esa skill
 node cli.mjs add-stage --id IDENTIFICADOR --stage ux --reason "por qué cambia el alcance"
   Añade Diseño a un trabajo cuya ruta lo omitía, mientras Desarrollo no tenga asignación.
 node cli.mjs preview --business games|agency --kind analysis|code [--project ID_PROYECTO] [--launch-file "reparto.json"]
@@ -50,7 +54,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -229,13 +233,19 @@ async function main() {
       const branch = validateBranchOption(o.branch);
       if (branch && o.kind !== 'code') throw new QueueError('--branch solo aplica a trabajos de código.');
       result = await addJob(ROOT, { id: o.id, business: o.business, kind: o.kind, title: o.title, prompt: await fs.readFile(promptPath, 'utf8'), provider: o.provider, workspace: o.workspace, isolated: o.isolated, maxAttempts: numeric(o['max-attempts'], undefined), timeoutMs: timeoutSeconds === null ? undefined : timeoutSeconds * 1000, maxUsd: numeric(o['max-usd'], 0.1),
-        ...(branch ? { branch } : {}), ...(acceptance ? { contract: { version: 1, acceptance } } : {}), ...(launch ? { launch } : {}), ...(o.route ? { route: { id: o.route, reason: o.reason } } : {}) });
+        ...(branch ? { branch } : {}), ...(acceptance ? { contract: { version: 1, acceptance } } : {}), ...(launch ? { launch } : {}), ...(o.route ? { route: { id: o.route, reason: o.reason } } : {}), ...(o['skills-file'] ? { skills: await readLaunchFile(o['skills-file']) } : {}) });
       break;
     }
     case 'run':
       if (o.execute) await assertPanelNotRunning();
       result = await runQueue(ROOT, { execute: !!o.execute, worker: createWorker(), maxJobs: numeric(o['max-jobs'], 5), jobId: o.id });
       break;
+    case 'skills':
+    case 'skills-accept': {
+      try { result = command === 'skills-accept' ? await acceptSkill(o.id) : (await skillsStatus()).map(({ manifest, ...skill }) => ({ ...skill, manifest: manifest.slice(0, 12) })); }
+      catch (error) { if (String(error.code ?? '').startsWith('skill_')) throw new QueueError(error.message, error.code); throw error; }
+      break;
+    }
     case 'add-stage': result = await addJobStage(ROOT, o.id, { stage: o.stage, reason: o.reason }); break;
     case 'retry': result = await retryJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'attempt-limit': {

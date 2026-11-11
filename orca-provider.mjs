@@ -2,6 +2,7 @@ import { normalizeProjectLevels, resolveLaunch, launchArgs } from './launch-choi
 import { readStageContracts, contractsBrief } from './project-contracts.mjs';
 import { readPipeline, resolveStageLaunch } from './pipeline-config.mjs';
 import { routeOmission, routeOmits } from './job-route.mjs';
+import { prepareStageSkills, consultedSkills } from './skills-registry.mjs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,7 +24,6 @@ import { excerpt } from './redaction.mjs';
 import { bindWorkflowV2Approval, priorV2Submission, resolveWorkflowV2Approval, runWorkflowV2Gate, workflowV2For } from './workflow-v2-gate.mjs';
 export { ORCA_EXE };
 const PROFILE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.codex', 'agents');
-const GAME_SKILL_DIR = path.resolve(PROFILE_DIR, '..', 'skills', 'game-production');
 const ROLES = {
   planificador: { name: 'planificador', stageKey: 'planner', label: 'Planificación', model: 'gpt-6-luna', effort: 'high' },
   ux: { name: 'ux', stageKey: 'ux', label: 'Diseño UX', model: 'gpt-6.1-sol', effort: 'medium' },
@@ -291,18 +291,6 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
   let profile;
   try { profile = profileInstructions(await fs.readFile(profilePath, 'utf8')); }
   catch { throw new ProviderError('orca_profile_missing', `No existe el perfil Orca configurado: ${role.name}.`); }
-  let gameSkill = '';
-  if (job.business === 'games' && job.kind === 'code') {
-    try {
-      const [skill, reference] = await Promise.all([
-        fs.readFile(path.join(GAME_SKILL_DIR, 'SKILL.md'), 'utf8'),
-        fs.readFile(path.join(GAME_SKILL_DIR, 'references', role.stageKey + '.md'), 'utf8'),
-      ]);
-      gameSkill = `SKILL DE VIDEOJUEGOS · game-production\n${skill.trim()}\n\nREFERENCIA DE TU PERFIL\n${reference.trim()}`;
-    } catch {
-      throw new ProviderError('orca_game_skill_missing', `Falta la guía de videojuegos del perfil ${role.name}.`);
-    }
-  }
   let roleContracts = '';
   try { roleContracts = contractsBrief(await readStageContracts(ctx.root, { business: job.business, projectId: job.projectId, stage: role.stageKey })); }
   catch (error) { throw new ProviderError('project_contract_invalid', error.code === 'project_contract_invalid' ? error.message : 'No se pudieron leer los contratos de rol del Centro.', { uncertain: false }); }
@@ -327,6 +315,23 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
   }
   const resumeCompleted = savedStep?.status === 'failed' && ['completed', 'unknown'].includes(savedStep.dispatchStatus);
   const existingDispatch = (['running', 'blocked'].includes(savedStep?.status) || resumeCompleted) ? savedStep.dispatchId : null;
+  // Skills (skills-registry.mjs) are resolved only for a fresh assignment: a resumed dispatch and a native retry
+  // keep the brief they were given, so a later change to a skill never blocks recovering work already assigned.
+  let stageSkills = null;
+  if (!existingDispatch && !savedStep?.retryOf) {
+    try { stageSkills = await prepareStageSkills({ root: ctx.root, job, stage: role.stageKey, ...(ctx.skillsRoot ? { codeRoot: ctx.skillsRoot } : {}) }); }
+    catch (error) {
+      if (!String(error.code ?? '').startsWith('skill_')) throw error;
+      // Recorded like a launch Orca rejected: no worker exists, so a retry starts the stage afresh instead of looking for a dispatch.
+      await ctx.reportStage?.({ key: role.stageKey, status: 'failed', dispatchStatus: 'rejected', error: error.code, summary: error.message });
+      throw new ProviderError(error.code, error.message, { uncertain: false });
+    }
+  }
+  const suppliedSkills = stageSkills?.supplied ?? savedStep?.retryOf?.skills ?? savedStep?.skills ?? [];
+  const inlineSkills = (stageSkills?.inline ?? []).map(({ skill, texts }) => [
+    skill.id === 'game-production' ? 'SKILL DE VIDEOJUEGOS · game-production' : `SKILL DEL CENTRO · ${skill.id}`, texts[0],
+    ...(texts.length > 1 ? ['', 'REFERENCIA DE TU PERFIL', texts.slice(1).join('\n\n')] : []),
+  ].join('\n')).join('\n\n');
   // A native retry keeps its Task's original title; the checkpoint records the current queue attempt separately.
   const displayName = savedStep?.retryOf || existingDispatch
     ? originalTaskDisplayName(job, savedStep)
@@ -349,7 +354,8 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
   const spec = [
     `PERFIL EXISTENTE: ${role.name}. Respeta el alcance del perfil y no crees ni delegues en otros agentes.`,
     profile,
-    gameSkill,
+    inlineSkills,
+    stageSkills?.brief ?? '',
     roleContracts,
     `EMPRESA: ${job.business}.`,
     job.branch ? `DESTINO CONFIRMADO: ${workspace}; rama ${job.branch}. No crees ni cambies ramas.` : '',
@@ -426,7 +432,7 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     const specArtifact = retry ? originalTaskSpec(job, savedStep) : await saveDispatchSpec(ctx.root, specIdentity, spec);
     if (retry && specArtifact) await verifyDispatchSpec(ctx.root, specArtifact);
     const brief = retry ? null : dispatchBrief(specArtifact, specIdentity, orcaAgent);
-    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, launch,
+    await ctx.reportStage?.({ key: role.stageKey, profile: role.name, label: role.label, ...display, runId, attempt: job.attempts, taskInputAttempt, status: 'running', dispatchStatus: 'starting', orcaAgent, launchLevel, launch, ...(suppliedSkills.length ? { skills: suppliedSkills } : {}), ...(stageSkills?.omitted.length ? { skillsOmitted: stageSkills.omitted } : {}),
       ...(role.stageKey === 'qa' && job.workflowV2Snapshot ? { workflowV2Snapshot: job.workflowV2Snapshot } : {}), inputChars: specArtifact?.chars ?? spec.length, inputBytes: specArtifact?.bytes ?? Buffer.byteLength(spec),
       ...(authorization && !retry ? { authorization: { ...authorization, at: new Date().toISOString() } } : {}), ...(specArtifact ? { specArtifact } : {}), ...(brief ? { launchInputChars: brief.length, launchInputBytes: Buffer.byteLength(brief) } : {}), deliveryVersion: job.contract?.version ?? null });
     let started;
@@ -614,6 +620,8 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
         dispatchStatus: 'completed', taskId: identity.taskId, attempt: job.attempts, taskInputAttempt,
         ...summarizeStage(delivery?.summary ?? text), ...evidence, delivery, artifact, outputChars: text.length, resultMessageId: report.messageId ?? null,
         ...(deliveryTransport ? { deliveryTransport } : {}),
+        // Supplied is the Centro's record; consulted is what the worker states in its evidence.
+        ...(suppliedSkills.length ? { skillsConsulted: consultedSkills(suppliedSkills, delivery) } : {}),
       });
       return { text, dispatchId, taskId: identity.taskId, ...evidence, delivery, artifact };
     }
