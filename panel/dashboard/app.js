@@ -132,6 +132,18 @@ function stableOperation(namespace, signature, retiredId) {
   return id;
 }
 
+// Creating a repository publishes to GitHub: the button needs a second, explicit click and says what it will do.
+function createRemoteButton(projectId, onDone) {
+  const button = el('button', 'button secondary', 'Crear el repositorio en GitHub'); button.type = 'button';
+  button.onclick = async () => {
+    if (button.dataset.armed !== 'true') { button.dataset.armed = 'true'; button.textContent = 'Confirmar: crear repositorio privado y subir las ramas'; return; }
+    button.disabled = true;
+    try { const made = await api(`/api/projects/${projectId}/create-remote`, { method: 'POST', body: JSON.stringify({ confirm: true }) }); notify(`Repositorio ${made.repository} creado (privado). Ramas subidas: ${made.pushed.join(', ')}.`); await onDone?.(made); }
+    catch (error) { notify(error.message, true); button.disabled = false; button.dataset.armed = 'false'; button.textContent = 'Crear el repositorio en GitHub'; }
+  };
+  return button;
+}
+
 function renderAutomation(raw) {
   const root = $('#automation-controls');
   if (!root) return;
@@ -173,6 +185,18 @@ function renderAutomation(raw) {
         catch (error) { notify(error.message, true); retry.disabled = false; }
       };
       row.append(retry);
+    }
+    if (receipt.status === 'blocked' && /^destination_/.test(receipt.blockCode || '')) {
+      const facts = Object.entries(receipt.blockDetails || {}).map(([key, value]) => `${key}: ${value}`).join(' · ');
+      if (facts) row.append(el('p', 'receipt-details', facts));
+      const again = el('button', 'button secondary', 'Volver a comprobar el destino'); again.type = 'button';
+      again.onclick = async () => {
+        again.disabled = true;
+        try { await api(`/api/auto-run/${receipt.id}/retry-destination`, { method: 'POST', body: JSON.stringify({ confirm: true }) }); notify('Se vuelve a comprobar el destino antes de empezar.'); await refresh(); }
+        catch (error) { notify(error.message, true); again.disabled = false; }
+      };
+      row.append(again);
+      if (receipt.blockCode === 'destination_repository_missing' && receipt.spec?.projectId) row.append(createRemoteButton(receipt.spec.projectId, refresh));
     }
     if (['blocked', 'needs_attention'].includes(receipt.status)) {
       const review = el('button', 'button secondary', 'Cerrar recibo tras revisión'); review.type = 'button';
@@ -1839,7 +1863,32 @@ function confirmDestination(project, objective = '', successCriteria = '') {
     const submit = event => { event.preventDefault(); value = { projectId: project.id, checkout: project.checkout, branch: project.branch, baseBranch: project.baseBranch || '', objective: form.elements.objective.value.trim(), successCriteria: form.elements.successCriteria.value.trim() }; dialog.close(); };
     form.addEventListener('submit', submit); dialog.addEventListener('close', finish, { once: true });
     $('#cancel-destination').onclick = () => dialog.close(); dialog.showModal(); $('#cancel-destination').focus();
+    checkDestinationRemote(dialog, form, project);
   });
+}
+
+// Asks the panel whether the remote is really there before the request leaves: a missing repository or branch is
+// cheaper to learn here than as a blocked receipt after the coordinator has routed. An unavailable check never blocks.
+function checkDestinationRemote(dialog, form, project) {
+  const send = form.querySelector('button[type="submit"]');
+  let note = dialog.querySelector('.destination-check');
+  if (!note) { note = el('p', 'destination-check'); note.setAttribute('role', 'status'); $('#destination-context').after(note); }
+  dialog.querySelector('.destination-create')?.remove();
+  const unknown = 'No se pudo comprobar el remoto ahora; se comprobará al admitir el trabajo.';
+  const look = () => {
+    note.classList.remove('pipeline-error'); note.textContent = 'Comprobando el repositorio remoto…'; if (send) send.disabled = false;
+    api(`/api/projects/${project.id}/destination-check`).then(check => {
+      if (!dialog.open) return;
+      if (check.ok === true) { note.textContent = `Remoto comprobado: ${check.repository} · ${check.branch}.`; return; }
+      if (check.ok !== false) { note.textContent = unknown; return; }
+      note.classList.add('pipeline-error'); if (send) send.disabled = true;
+      note.textContent = `No se puede enviar todavía. ${check.reason}${check.details?.stderr ? ` Git dijo: ${check.details.stderr}` : ''}`;
+      if (check.code === 'destination_repository_missing' && !dialog.querySelector('.destination-create')) {
+        const create = createRemoteButton(project.id, () => { create.remove(); look(); }); create.classList.add('destination-create'); note.after(create);
+      }
+    }).catch(() => { if (dialog.open) note.textContent = unknown; });
+  };
+  look();
 }
 
 for (const key of ['project', 'focus', 'tag', 'status', 'order']) $(`#ideas-${key}`).addEventListener('change', event => {

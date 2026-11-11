@@ -9,7 +9,8 @@ import { resolveOperationsRoot } from './operations-root.mjs';
 import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
 import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, cancelQueuedJob, settledQaRevalidation, stoppedDeveloperCheckpoint, actorContext } from './queue.mjs';
 import { parseTailscaleAccess, assertRoleAllows } from './access-control.mjs';
-import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt, resumeWorkflowV2Receipt } from '../auto-run.mjs';
+import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt, resumeWorkflowV2Receipt, retryDestinationAdmission } from '../auto-run.mjs';
+import { destinationCheck, createMissingRemote } from '../project-remote.mjs';
 import { workflowV2Resumable } from '../workflow-v2-gate.mjs';
 import { createWorker } from '../providers.mjs';
 import { checkoutChoices, sendIdeaToCoordinator, routeCoordinatorIdea } from './agency-assistant/idea-workflow.mjs';
@@ -124,6 +125,11 @@ async function plannedLaunches(jobs) {
   }))]));
 }
 // Read-only: what a job would be launched with. The files are read on every call, so an edit shows without a restart.
+async function registeredProject(id) {
+  const project = (await loadDashboardState(QUEUE_ROOT)).projects.find(item => item.id === id);
+  if (!project) throw Object.assign(new Error('No encuentro ese proyecto.'), { status: 404 });
+  return project;
+}
 async function launchPreview(params) {
   let launch;
   if (params.get('launch')) { try { launch = JSON.parse(params.get('launch')); } catch { throw Object.assign(new Error('launch no es JSON válido.'), { status: 400 }); } }
@@ -357,6 +363,8 @@ async function handleApi(request, response, url, tailscale = null) {
   if (request.method === 'GET' && url.pathname === '/api/quota') return send(response, 200, await quotaSettings());
   if (request.method === 'GET' && url.pathname === '/api/pipeline') return send(response, 200, await pipelineSettings());
   if (request.method === 'GET' && url.pathname === '/api/config') return send(response, 200, await readDashboardConfig(QUEUE_ROOT));
+  const destinationProbe = request.method === 'GET' && url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9_-]+)\/destination-check$/);
+  if (destinationProbe) return send(response, 200, await destinationCheck(QUEUE_ROOT, await registeredProject(destinationProbe[1])));
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
   assertLocalRequest(request, tailscale);
   const body = await readJson(request);
@@ -370,6 +378,8 @@ async function handleApi(request, response, url, tailscale = null) {
   if (url.pathname === '/api/auto-run') return send(response, 200, await setAutoRun(QUEUE_ROOT, body.business, body.enabled, { confirm: body.confirm === true }));
   const checkoutRetry = url.pathname.match(/^\/api\/auto-run\/([a-zA-Z0-9_-]+)\/retry-checkout$/);
   if (checkoutRetry) return send(response, 200, await retryCoordinatedCheckout(QUEUE_ROOT, checkoutRetry[1], { confirm: body.confirm === true }));
+  const destinationRetry = url.pathname.match(/^\/api\/auto-run\/([a-zA-Z0-9_-]+)\/retry-destination$/);
+  if (destinationRetry) return send(response, 200, await retryDestinationAdmission(QUEUE_ROOT, destinationRetry[1], { confirm: body.confirm === true }));
   const receiptReview = url.pathname.match(/^\/api\/auto-run\/([a-zA-Z0-9_-]+)\/review$/);
   if (receiptReview) return send(response, 200, await reviewAutoReceipt(QUEUE_ROOT, receiptReview[1], { confirm: body.confirm === true }));
 
@@ -388,6 +398,8 @@ async function handleApi(request, response, url, tailscale = null) {
   if (url.pathname === '/api/projects') {
     return send(response, 201, await createProject(QUEUE_ROOT, body.name, body.business));
   }
+  const remoteCreate = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9_-]+)\/create-remote$/);
+  if (remoteCreate) return send(response, 200, await createMissingRemote(QUEUE_ROOT, await registeredProject(remoteCreate[1]), { confirm: body.confirm === true }));
   const projectUpdateMatch = url.pathname.match(/^\/api\/projects\/([a-zA-Z0-9_-]+)\/update$/);
   if (projectUpdateMatch) return send(response, 200, await updateProject(QUEUE_ROOT, projectUpdateMatch[1], body));
   if (url.pathname === '/api/ideas') {

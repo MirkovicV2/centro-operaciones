@@ -320,6 +320,8 @@ export function createAutoRunner(root, { worker, run = runQueue, verify = verify
         await update(receipt.id, admitted ? 'needs_attention' : 'blocked', {
           reason: error.message,
           ...(error.code === 'checkout_locked' && !admitted ? { blockCode: error.code } : {}),
+          // Why the destination check failed, so the person does not have to rerun Git by hand to find out.
+          ...(/^destination_[a-z_]+$/.test(error.code || '') && !admitted ? { blockCode: error.code, ...(blockDetails(error.details) ? { blockDetails: blockDetails(error.details) } : {}) } : {}),
         });
       } finally {
         if (checkoutLock) { await checkoutLock.close(); if (!uncertain) await fs.unlink(lockPath); }
@@ -373,6 +375,35 @@ export async function authorizeDecisionResume(root, jobId) {
     receipt.decisionRevision = revision; receipt.updatedAt = now();
     receipt.reason = 'Todas las decisiones recibidas; continúa el mismo encargo dentro de sus límites.';
     audit(state, 'decisions_resume_authorized', { receiptId: receipt.id, jobId, revision, attempt: job.attempts, dispatchId: stage.dispatchId });
+    return receipt;
+  });
+}
+
+// Bounded copy of a destination error's details (already redacted at the source): short scalars only.
+function blockDetails(details) {
+  if (!details || typeof details !== 'object') return null;
+  const kept = Object.entries(details).filter(([key, value]) => /^[A-Za-z]{2,24}$/.test(key) && ['string', 'number', 'boolean'].includes(typeof value)).slice(0, 8)
+    .map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 400) : value]);
+  return kept.length ? Object.fromEntries(kept) : null;
+}
+
+// The destination check failed before anything was admitted or dispatched (repository missing, branch not pushed,
+// no network). Once the person has fixed it, re-arm the same receipt: the runner repeats the full check before starting.
+export async function retryDestinationAdmission(root, id, { confirm = false } = {}) {
+  if (!confirm) throw new Error('Confirma que has corregido el destino.');
+  return change(root, async state => {
+    const receipt = state.receipts.find(item => item.id === id);
+    const job = (await loadState(root)).jobs.find(item => item.id === receipt?.jobId);
+    if (receipt?.status !== 'blocked' || !receipt.eligible || receipt.claimedAt || !/^destination_[a-z_]+$/.test(receipt.blockCode || '')
+      || job?.kind !== 'code' || job.state !== 'queued' || job.attempts !== 0 || job.startedAt || job.result || job.orphanRisk
+      || job.autoIntent?.receiptId !== id || job.workflow?.status !== 'queued' || job.workflow.currentStage != null
+      || !job.workflow.steps?.length || job.workflow.steps.some(step => !['queued', 'skipped'].includes(step.status) || step.runId || step.taskId || step.dispatchId)) {
+      throw new Error('El recibo no acredita un fallo de destino anterior al primer intento.');
+    }
+    const previous = receipt.blockCode;
+    receipt.status = 'pending'; receipt.updatedAt = now(); receipt.reason = 'Destino corregido; se vuelve a comprobar antes de empezar.';
+    delete receipt.blockCode; delete receipt.blockDetails;
+    audit(state, 'destination_retry', { receiptId: id, jobId: job.id, previous });
     return receipt;
   });
 }

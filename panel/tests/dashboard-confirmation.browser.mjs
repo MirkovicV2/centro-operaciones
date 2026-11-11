@@ -25,6 +25,8 @@ try {
   await updateProject(root, project.id, { checkout, baseBranch: 'main' });
   const configured = (await loadDashboardState(root)).projects[0];
   const posts = [], errors = [];
+  const created = []; let remoteChecks = 0;
+  let remote = { ok: false, code: 'destination_repository_missing', reason: 'El repositorio owner/repo no existe en GitHub o las credenciales de este equipo no lo ven. Créalo de nuevo o corrige el proyecto.', details: { command: 'git ls-remote', stderr: 'ERROR: Repository not found.' } };
   // Load the production handler without evaluating server.listen, timers or bot startup.
   const source = await fs.readFile(new URL('../dashboard.mjs', import.meta.url), 'utf8');
   const start = source.indexOf('async function handleApi(');
@@ -46,6 +48,7 @@ try {
     const request = route.request(), url = new URL(request.url());
     assert.equal(url.origin, 'http://127.0.0.1:43892', 'external request forbidden');
     if (request.method() === 'POST') {
+      if (/^\/api\/projects\/[^/]+\/create-remote$/.test(url.pathname)) { created.push(request.postDataJSON()); remote = { ok: true, repository: 'owner/repo', branch: 'main' }; return route.fulfill({ json: { repository: 'owner/repo', visibility: 'private', pushed: ['main'] } }); }
       assert.equal(url.pathname, '/api/jobs', 'enqueue must never call run');
       const body = request.postDataJSON(); posts.push(body);
       const response = {};
@@ -58,6 +61,7 @@ try {
         queue: summarize(queue), jobs: queue.jobs, projects: [configured], ideas: [], questions: [], domains: [], tasks: [], messages: [],
         settings: { autoRun: false, vaultPath: '', telegram: false } } });
     }
+    if (/^\/api\/projects\/[^/]+\/destination-check$/.test(url.pathname)) { remoteChecks++; return route.fulfill({ json: remote }); }
     if (url.pathname === '/api/config') return route.fulfill({ json: { autoRun: false, vaultPath: '' } });
     if (url.pathname === '/api/graph') return route.fulfill({ json: { connected: false } });
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
@@ -80,6 +84,19 @@ try {
   await page.locator('#job-form [name=successCriteria]').fill('Criterio original');
   await page.locator('#job-form [type=submit]').click();
   await page.locator('#destination-dialog').waitFor({ state: 'visible' });
+  // The remote is asked before anything is sent. A repository that is gone blocks the send and offers to create it,
+  // with a second explicit click; once it exists the same dialog can be confirmed.
+  await page.locator('.destination-check').filter({ hasText: 'No se puede enviar todavía' }).waitFor();
+  assert.match(await page.locator('.destination-check').innerText(), /owner\/repo no existe.*Repository not found/s);
+  assert.equal(await page.locator('#destination-form [type=submit]').isDisabled(), true);
+  const create = page.locator('#destination-dialog .destination-create');
+  await create.click(); assert.deepEqual(created, [], 'the first click only arms the button');
+  assert.match(await create.innerText(), /Confirmar: crear repositorio privado/);
+  await create.click();
+  await page.locator('.destination-check').filter({ hasText: 'Remoto comprobado: owner/repo · main.' }).waitFor();
+  assert.deepEqual(created, [{ confirm: true }]); assert.equal(await create.count(), 0); assert.equal(remoteChecks, 2);
+  assert.equal(await page.locator('#destination-form [type=submit]').isDisabled(), false);
+  assert.deepEqual(posts, [], 'nothing was submitted while the remote was missing');
   assert.equal(posts.length, 0, 'opening confirmation must not enqueue');
   assert.equal(await page.locator('#destination-form [name=objective]').inputValue(), 'Objetivo original');
   assert.equal(await page.locator('#destination-form [name=successCriteria]').inputValue(), 'Criterio original');
