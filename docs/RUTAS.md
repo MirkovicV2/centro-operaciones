@@ -48,3 +48,16 @@ Queda registrado quién la añadió, cuándo y por qué, y se muestra en la pág
 revisión, sin Task de Desarrollo). Un desarrollador que ya recibió su encargo sin diseño no puede recibir uno a mitad
 sin rehacer su asignación; en ese caso la duda de diseño se resuelve con la consulta al coordinador, o se crea un
 encargo nuevo con la ruta completa.
+
+## Periodo de prueba
+
+Omitir Diseño está en prueba desde noviembre de 2026. Lo que se vigila es si el coordinador clasifica mal: un encargo
+con ruta `funcional` o `documentacion` que sí tocaba interfaz o experiencia de juego.
+
+- `node metrics.mjs` lo apunta solo, en `pipeline.routes`: por cada ruta, cuántos encargos hubo, cuántas devoluciones
+  a Desarrollo, cuántos defectos bloqueantes, cuántas veces se añadió Diseño después y qué encargos conviene revisar.
+- Cuando revises uno de esos encargos y la causa fuera la ruta, anótalo en la tabla de abajo.
+- Si los errores de clasificación se repiten, se endurece el criterio del coordinador o se vuelve a la ruta completa.
+
+| Fecha | Encargo | Ruta elegida | Qué pasó | Corrección |
+| --- | --- | --- | --- | --- |
