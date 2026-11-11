@@ -170,3 +170,12 @@ test('route metrics flag jobs that skipped Design and then needed corrections, h
   assert.deepEqual([report.interfaz.jobs, report.interfaz.blockingFindings, report.interfaz.toReview], [1, 1, []], 'the full route is the baseline, never flagged');
   assert.equal(report.analisis, undefined);
 });
+
+test('a dispatch stopped and then recovered in place counts once, with its final status', async () => {
+  const { pipelineMetrics } = await import('../metrics.mjs');
+  const launch = { agent: 'claude', model: null, effort: null, substitutedFrom: { agent: 'codex', reason: 'cuota' } };
+  const step = status => ({ key: 'qa', status, dispatchId: 'ctx_recovered01', launch });
+  const job = { id: 'j', kind: 'code', provider: 'orca', state: 'succeeded', workflow: { steps: [step('succeeded')] }, workflowHistory: [{ steps: [step('blocked')] }] };
+  const [qa] = pipelineMetrics([job]).stages;
+  assert.deepEqual([qa.launched, qa.succeeded, qa.blocked, qa.substituted], [1, 1, 0, 1]);
+});

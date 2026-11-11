@@ -73,8 +73,10 @@ export function pipelineMetrics(jobs = []) {
     if (id !== 'interfaz' && (returns || blocking || added)) route.toReview.push(job.id);
   }
   for (const job of jobs) {
-    for (const workflow of job.workflowHistory ?? []) for (const step of workflow.steps ?? []) tally(job, step, false);
+    // The current workflow first: a dispatch stopped and then recovered in place keeps one entry with its final status
+    // (the pilots counted QA and Revisión as blocked although the same worker ended approved).
     for (const step of job.workflow?.steps ?? []) { tally(job, step, true); findings += (step.delivery?.findings ?? []).filter(item => item.severity === 'blocking').length; }
+    for (const workflow of [...(job.workflowHistory ?? [])].reverse()) for (const step of workflow.steps ?? []) tally(job, step, false);
     corrections += (job.livenessRecoveryHistory ?? []).filter(item => item.qualityAction?.type === 'correction').length;
     humanAnswers += (job.qualityAnswers?.length ?? 0) + (job.continuation?.decisions?.length ?? 0);
     quotaStops += (job.attemptHistory ?? []).filter(item => ['provider_quota_wait', 'provider_quota_exhausted'].includes(item.error)).length;

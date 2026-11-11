@@ -156,6 +156,21 @@ function closedOperation(namespace, signature) {
   return request.status === 'withdrawn' || job?.state === 'cancelled' ? previous : undefined;
 }
 
+// Workers told to escape non-ASCII sometimes escape twice, so a summary arrives as "Revisión". The stored evidence
+// keeps its exact bytes; only what the panel shows is decoded (summaries and report fields a person reads).
+const escapedUnicode = /\\u([0-9a-fA-F]{4})/g;
+const readable = text => typeof text === 'string' && text.includes('\\u') ? text.replace(escapedUnicode, (_, hex) => String.fromCharCode(parseInt(hex, 16))) : text;
+function readableStageText(raw) {
+  for (const job of raw?.jobs || []) for (const step of [...(job.workflow?.steps || []), ...(job.workflowHistory || []).flatMap(item => item.steps || [])]) {
+    step.summary = readable(step.summary);
+    const delivery = step.delivery;
+    if (!delivery) continue;
+    delivery.summary = readable(delivery.summary);
+    for (const item of [...(delivery.acceptance || []), ...(delivery.findings || [])]) { item.criterion = readable(item.criterion); item.summary = readable(item.summary); item.evidence = readable(item.evidence); }
+    if (Array.isArray(delivery.evidence)) delivery.evidence = delivery.evidence.map(readable);
+  }
+}
+
 function renderAutomation(raw) {
   const root = $('#automation-controls');
   if (!root) return;
@@ -1471,6 +1486,7 @@ async function refreshGraph() {
 async function refresh() {
   try {
     const raw = await api('/api/state');
+    readableStageText(raw);
     state.raw = raw;
     const data = scopeData(raw);
     state.data = data;

@@ -1,5 +1,6 @@
 data/
 .artifacts/
+entregas/
 node_modules/
 analysis/
 workspaces/
