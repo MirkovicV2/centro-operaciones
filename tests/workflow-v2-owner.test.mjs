@@ -36,6 +36,9 @@ test('the next V2 step names the exact command for each status (the panel used t
   assert.equal(nextV2Step(entry, TASK, { status: 'preparacion' }).action, 'retry');
   assert.equal(nextV2Step(entry, TASK, { status: 'aprobado' }).action, 'integrate');
   assert.equal(nextV2Step(entry, TASK, { status: 'aprobado' }).command, undefined, 'nothing to type once approved');
+  const github = nextV2Step({ ...entry, ownerDecision: 'github' }, TASK, { status: 'pendiente_owner' });
+  assert.equal(github.action, 'github'); assert.equal(github.command, undefined, 'no V2 command when the decision is on GitHub');
+  assert.equal(nextV2Step({ ...entry, ownerDecision: 'github' }, TASK, { status: 'bloqueado' }).action, 'unblock');
 });
 
 test('the live V2 status is read for the task on the reviewer step and only for governed jobs', async t => {

@@ -6,13 +6,19 @@
     "id-del-proyecto": {
       "stateRoot": "/ruta/fuera-del-checkout/wfv2-state",
       "reviewerConfig": "/ruta/a/reviewer.json",
-      "allowedPaths": ["src/", "tests/"],
-      "checks": ["unit-tests"],
+      "allowedPaths": [
+        "src/",
+        "tests/"
+      ],
+      "checks": [
+        "unit-tests"
+      ],
       "risks": [],
       "declaredTier": null,
       "timeoutMs": 3600000,
       "integrateAfterApproval": false,
-      "pythonEnv": null
+      "pythonEnv": null,
+      "ownerDecision": "v2"
     }
   }
 }

@@ -44,7 +44,9 @@ export const DEFAULT_CHECKS_TIMEOUT_MS = 900_000;
 // this grace is reported as no_checks (before the generic timeout, with a clearer action).
 export const DEFAULT_NO_CHECKS_GRACE_MS = 600_000;
 export async function integrateGitHub(job, ctx, { git, gh, persist = async () => {}, previous = null, now = () => new Date().toISOString(),
-  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = null, checksIntervalMs = 15_000, noChecksGraceMs = DEFAULT_NO_CHECKS_GRACE_MS } = {}) {
+  clock = () => Date.now(), wait = (ms, signal) => delay(ms, undefined, { signal }), checksTimeoutMs = null, checksIntervalMs = 15_000, noChecksGraceMs = DEFAULT_NO_CHECKS_GRACE_MS,
+  // Decision on GitHub (Workflow V2 "ownerDecision": "github"): never merge; wait until the owner merges this PR.
+  ownerMerges = false } = {}) {
   const intent = job.autoIntent;
   if (!intent || intent.eligible !== true || !intent.receiptId || job.state === 'cancelled') return { status: 'skipped', reason: 'not_eligible' };
   const dest = job.destination || {};
@@ -65,7 +67,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   const save = async (phase, extra = {}) => {
     Object.assign(record, extra, { phase, status: phase === 'complete' ? 'completed' : phase === 'needs_attention' || phase === 'checks_pending' ? phase : 'running', needsAttention: false, error: extra.error ?? null, updatedAt: now() });
     await persist(structuredClone(record));
-    const labels = { preflight_complete: 'Preflight aprobado; commit local preparado.', commit_intent: 'Commit local solicitado.', commit_confirmed: 'Commit local confirmado.', push_intent: 'Push solicitado; confirmación pendiente.', push_confirmed: 'Push remoto confirmado.', pr_intent: 'Creación de PR solicitada.', pr_confirmed: 'PR confirmada; checks pendientes.', checks_pending: 'Esperando comprobaciones de GitHub sobre la PR existente.', merge_intent: 'Merge solicitado; confirmación pendiente.', complete: 'Integración remota confirmada.', needs_attention: 'Necesita revisión manual.' };
+    const labels = { preflight_complete: 'Preflight aprobado; commit local preparado.', commit_intent: 'Commit local solicitado.', commit_confirmed: 'Commit local confirmado.', push_intent: 'Push solicitado; confirmación pendiente.', push_confirmed: 'Push remoto confirmado.', pr_intent: 'Creación de PR solicitada.', pr_confirmed: 'PR confirmada; checks pendientes.', checks_pending: ownerMerges ? 'PR abierta; esperando tu decisión: fusiónala en GitHub si te convence o ciérrala para rechazar.' : 'Esperando comprobaciones de GitHub sobre la PR existente.', merge_intent: 'Merge solicitado; confirmación pendiente.', complete: 'Integración remota confirmada.', needs_attention: 'Necesita revisión manual.' };
     const summary = [labels[phase] || phase, extra.commitSha ? `SHA ${extra.commitSha}` : '', extra.prUrl || '', extra.mergeSha ? `Merge ${extra.mergeSha}` : '', extra.error || ''].filter(Boolean).join(' · ');
     await ctx.reportStage?.({ key: 'integration', status: phase === 'needs_attention' ? 'blocked' : phase === 'complete' || phase === 'skipped' ? 'succeeded' : 'running', summary, ...extra });
   };
@@ -214,7 +216,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
         await save('complete', { prNumber: pr.number, prUrl: pr.url, commitSha: head, ...result.mergedByOwner, reconciled: true, mergedBy: 'owner' });
         return;
       }
-      if (result.ready) {
+      if (result.ready && !ownerMerges) {
         record.checks = result.checks;
         record.checkState = 'passed';
         record.checkedAt = now();
@@ -222,12 +224,13 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
         return;
       }
       // A mergeable PR still without a single registered check after the grace has no CI to wait for.
-      const noChecks = !result.failure && result.mergeable === 'MERGEABLE' && result.checks.length === 0 && clock() >= noChecksAt && clock() < deadline;
+      const noChecks = !ownerMerges && !result.failure && result.mergeable === 'MERGEABLE' && result.checks.length === 0 && clock() >= noChecksAt && clock() < deadline;
+      if (ownerMerges && result.failure === 'La PR dejó de estar abierta.') result.failure = 'Cerraste la PR sin fusionarla: el candidato queda rechazado y no se integra.';
       const signature = JSON.stringify(result);
       if (signature !== lastChecks || result.failure || noChecks || clock() >= deadline) {
         lastChecks = signature;
         await save('checks_pending', { prNumber: pr.number, prUrl: pr.url, checks: result.checks,
-          checkState: result.failure ? 'failed' : noChecks ? 'no_checks' : 'waiting', checkedAt: now(),
+          checkState: result.failure ? 'failed' : noChecks ? 'no_checks' : ownerMerges ? 'awaiting_owner' : 'waiting', checkedAt: now(),
           ...(result.failure ? { error: result.failure } : noChecks ? { error: 'La PR no tiene checks registrados.' } : {}), ...(clock() >= deadline ? { waitTimedOut: true } : {}) });
       }
       if (result.failure) throw Object.assign(new Error(`PR pendiente de revisión: ${result.failure}`), { code: 'github_checks_blocked' });
@@ -235,7 +238,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
       if (clock() >= deadline) throw Object.assign(new Error('PR pendiente de checks al agotar la espera acotada; conserva esta PR para revisión.'), { code: 'github_checks_timeout' });
       // Wake at the no_checks grace only while it is still ahead; afterwards poll at the normal interval
       // (a past grace used to collapse the wait to 1 ms and poll GitHub in a tight loop).
-      await wait(Math.min(checksIntervalMs, deadline - clock(), noChecksAt > clock() ? noChecksAt - clock() : Infinity), ctx.signal);
+      await wait(Math.min(checksIntervalMs, deadline - clock(), !ownerMerges && noChecksAt > clock() ? noChecksAt - clock() : Infinity), ctx.signal);
     }
   };
   await waitUntilReady();
@@ -244,6 +247,7 @@ export async function integrateGitHub(job, ctx, { git, gh, persist = async () =>
   // within the same deadline, while a changed head/base or terminal failure blocks.
   await waitUntilReady();
   if (record.phase === 'complete') return record;
+  if (ownerMerges) throw new Error('La decisión es del owner en GitHub: el Centro no fusiona esta PR.');
   await save('merge_intent', { prNumber: pr.number, prUrl: pr.url });
   await h(['pr', 'merge', String(pr.number), '--repo', repo, '--merge', '--match-head-commit', head]);
   const merged = JSON.parse(await h(['pr', 'view', String(pr.number), '--repo', repo, '--json', 'state,mergedAt,mergeCommit']));

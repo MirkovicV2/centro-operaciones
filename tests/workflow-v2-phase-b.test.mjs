@@ -446,3 +446,31 @@ test('an operator retry waits for a ledger lock held by a background tick instea
   assert.equal(job.state, 'queued');
   assert.equal((await readAutoRun(root)).receipts[0].status, 'pending');
 });
+
+test('decision on GitHub: a V2 recommendation to accept opens the integration, anything else still stops', async () => {
+  const github = () => ({ ...normalizeWorkflowV2(config({ integrateAfterApproval: true, ownerDecision: 'github' })).projects.obi, engineeringSystem: '/srv/engineering-system', python: 'python3' });
+  assert.equal(entryB().ownerDecision, 'v2', 'the V2 approval stays the default');
+  assert.throws(() => normalizeWorkflowV2(config({ ownerDecision: 'github' })), /necesita integrateAfterApproval/);
+  assert.throws(() => normalizeWorkflowV2(config({ integrateAfterApproval: true, ownerDecision: 'slack' })), /ownerDecision/);
+  const job = { id: 'v2b-1', kind: 'code', projectId: 'obi', title: 'x', workflowV2Snapshot: A, workflow: { steps: [{ key: 'reviewer' }, { key: 'integration' }] } };
+  const submit = (status, recommendation) => async argv => ({ code: 0, stderr: '', timedOut: false, stdout: JSON.stringify({ task: argv[argv.indexOf('submit') + 1], status, tier: 'STANDARD',
+    identity: 'id-1', evidence_id: 'ev-1', reviews: recommendation ? [{ role: 'unit', recommendation }] : [], steps: [{ unit: 'U1', candidate: C }] }) });
+  const updates = [];
+  const binding = await runWorkflowV2Gate(job, { ...ctxWith(updates), captureSnapshot: async () => A }, github(), '/tmp/ws', { run: submit('pendiente_owner', 'ACCEPT') });
+  assert.deepEqual(binding, { task: TASK, identity: 'id-1', evidenceId: 'ev-1', candidate: C, qaSnapshot: A });
+  assert.equal(updates.at(-1).status, 'succeeded'); assert.match(updates.at(-1).summary, /Tu decisión es la PR.*no la fusiona/s);
+  assert.equal(updates.at(-1).workflowV2.decision, 'github');
+  // A rejection, a block or a review without recommendation stop as before.
+  for (const [status, recommendation, code] of [['revision', 'REJECT', 'workflow_v2_rejected'], ['bloqueado', null, 'workflow_v2_blocked'], ['pendiente_owner', null, 'workflow_v2_owner_pending']]) {
+    const error = await runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, github(), '/tmp/ws', { run: submit(status, recommendation) }).catch(failure => failure);
+    assert.equal(error.code, code, status);
+  }
+  // The same submission read again after a restart gives the same binding; another identity does not.
+  const resolved = await resolveWorkflowV2Approval(job, ctxWith([]), github(), submitted({ outcome: 'recommended' }),
+    { run: statusRun({ task: TASK, status: 'pendiente_owner', identity: 'id-1', evidence_id: 'ev-1', reviews: [{ role: 'unit', recommendation: 'ACCEPT' }] }) });
+  assert.deepEqual(resolved, { task: TASK, identity: 'id-1', evidenceId: 'ev-1', candidate: C, qaSnapshot: A });
+  await assert.rejects(resolveWorkflowV2Approval(job, ctxWith([]), github(), submitted(),
+    { run: statusRun({ task: TASK, status: 'pendiente_owner', identity: 'id-2', evidence_id: 'ev-1', reviews: [{ role: 'unit', recommendation: 'ACCEPT' }] }) }), { code: 'workflow_v2_owner_pending' });
+  // With the default, the same summary still waits for the owner's V2 approval.
+  await assert.rejects(runWorkflowV2Gate(job, { ...ctxWith([]), captureSnapshot: async () => A }, entryB(), '/tmp/ws', { run: submit('pendiente_owner', 'ACCEPT') }), { code: 'workflow_v2_owner_pending' });
+});

@@ -1005,11 +1005,11 @@ export async function runOrca(job, ctx, {
     // Phase B: a candidate already submitted is never submitted again; its approval is read from V2.
     const submitted = workflowV2.integrateAfterApproval ? priorV2Submission(job, workflowV2Snapshot) : null;
     if (!submitted) {
-      await runWorkflowV2(reviewed, ctx, workflowV2, workspace);
-      // A returning gate must never fall through to the legacy integration path.
-      throw new ProviderError('workflow_v2_unexpected', 'Workflow V2 no devolvió un estado terminal verificable.', { uncertain: true });
-    }
-    workflowV2Approval = await resolveWorkflowV2(reviewed, ctx, workflowV2, submitted);
+      const recommended = await runWorkflowV2(reviewed, ctx, workflowV2, workspace);
+      // A returning gate must never fall through to the legacy integration path; only the decision on GitHub returns.
+      if (workflowV2.ownerDecision !== 'github' || !recommended?.task) throw new ProviderError('workflow_v2_unexpected', 'Workflow V2 no devolvió un estado terminal verificable.', { uncertain: true });
+      workflowV2Approval = recommended;
+    } else workflowV2Approval = await resolveWorkflowV2(reviewed, ctx, workflowV2, submitted);
     if (workflowV2Approval?.qaSnapshot !== workflowV2Snapshot || await captureSnapshot(workspace) !== workflowV2Snapshot) {
       const error = new ProviderError('workflow_v2_candidate_changed', 'El checkout ya no es el candidato que aprobaste en Workflow V2. No se integra; vuelve a pasar QA y V2.', { uncertain: false });
       await ctx.reportStage?.({ key: 'integration', status: 'blocked', error: error.code, summary: error.message });
@@ -1024,16 +1024,20 @@ export async function runOrca(job, ctx, {
     qa, review, captureSnapshot, persist: record => persistIntegration(ctx.root, record),
   });
   let integration = { status: 'skipped', reason: 'not_eligible' };
+  const githubDecision = Boolean(workflowV2Approval) && workflowV2?.ownerDecision === 'github';
   if (job.autoIntent?.eligible === true) {
     // Phase B: the record is bound to the owner's V2 approval before any effect (restart-safe).
     if (workflowV2Approval) previousIntegration = await bindWorkflowV2Approval(job, workflowV2Approval, {
       previous: previousIntegration, persist: record => persistIntegration(ctx.root, record) });
-    await ctx.reportStage?.({ key: 'integration', status: 'running', summary: workflowV2Approval ? 'Aprobado en Workflow V2; preparando preflight de integración del candidato aprobado.' : 'Revisión aprobada; preparando preflight de integración.',
+    await ctx.reportStage?.({ key: 'integration', status: 'running', summary: githubDecision ? 'Workflow V2 recomienda aceptar; preparando la PR del candidato revisado. La decisión es tuya: fusionarla.'
+      : workflowV2Approval ? 'Aprobado en Workflow V2; preparando preflight de integración del candidato aprobado.' : 'Revisión aprobada; preparando preflight de integración.',
       authorization: job.workflow?.steps?.find(step => step.key === 'integration')?.authorization
         ?? (job.coordination ? { ...stageAuthorization(job, 'integration', review ? { stage: 'reviewer', taskId: review.taskId, dispatchId: review.dispatchId } : { stage: 'reviewer' }),
           ...(workflowV2Approval ? { workflowV2Task: workflowV2Approval.task } : {}), at: new Date().toISOString() } : undefined) });
     try {
-      integration = await integrate({ ...job, integrationSnapshot: workflowV2Approval ? workflowV2Approval.qaSnapshot : integrationSnapshot }, ctx, { previous: previousIntegration, persist: record => persistIntegration(ctx.root, record) });
+      integration = await integrate({ ...job, integrationSnapshot: workflowV2Approval ? workflowV2Approval.qaSnapshot : integrationSnapshot }, ctx, { previous: previousIntegration, persist: record => persistIntegration(ctx.root, record),
+        // Decision on GitHub: the Centro opens the PR and waits; only the owner merges it.
+        ...(githubDecision ? { ownerMerges: true } : {}) });
       if (integration?.phase !== 'complete') throw new Error('La integración no confirmó su estado terminal remoto; necesita revisión.');
     } catch (error) {
       const prior = await readIntegration(ctx.root, job.autoIntent.receiptId);
@@ -1049,7 +1053,9 @@ export async function runOrca(job, ctx, {
   }
   // The work is finished and integrated: give the branch back. A failure here only delays others until the claim expires.
   await (ctx.releaseJobClaim ?? releaseJobClaim)(job, ctx.root).catch(() => {});
-  const reviewText = review ? review.text : `Workflow V2: aprobado por el owner (tarea ${workflowV2Approval.task}, identidad ${workflowV2Approval.identity}).`;
+  const reviewText = review ? review.text : githubDecision
+    ? `Workflow V2: recomendó aceptar y el owner fusionó la PR (tarea ${workflowV2Approval.task}, identidad ${workflowV2Approval.identity}).`
+    : `Workflow V2: aprobado por el owner (tarea ${workflowV2Approval.task}, identidad ${workflowV2Approval.identity}).`;
   return {
     provider: 'orca-quality-workflow',
     runId,

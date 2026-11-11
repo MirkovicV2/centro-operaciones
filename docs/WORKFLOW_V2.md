@@ -36,6 +36,20 @@ Si V2 se bloqueó antes de producir evidencia (por ejemplo, una comprobación si
 
 Necesita una versión de Engineering System en la que `wfv2 status` muestre `identity` y `evidence_id`.
 
+## Decidir solo en GitHub (`"ownerDecision": "github"`)
+
+Opcional por proyecto y solo con la fase B (`"integrateAfterApproval": true`). Por defecto es `"v2"`: lo de arriba.
+
+Con `"github"`, el owner decide una sola vez, en la PR:
+
+1. Tras QA se envía a V2 como siempre. Si todas las revisiones obligatorias **recomiendan aceptar**, el Centro no espera a `wfv2 approve`. Ata el registro de integración a ese envío (tarea, identidad, evidencia y huella) y abre la PR con exactamente ese candidato.
+2. El Centro **nunca fusiona** esa PR, aunque haya CI en verde. Espera a que la fusiones tú. **Fusionarla es tu aprobación** y el trabajo queda integrado. **Cerrarla sin fusionar es el rechazo**: el trabajo se para y no se integra nada. Si hay CI y falla, también se para.
+3. Si V2 recomienda rechazar, se bloquea o no tiene revisión, el trabajo se para igual que en la fase B.
+
+La tarea de V2 se queda en `pendiente_owner`: el registro de tu decisión es la PR fusionada. Mientras esperas, el trabajo sigue en curso y ocupa el ejecutor de su empresa, como cualquier integración que espera checks.
+
+Se decidió así el 11-11-2026 tras el Encargo 2 de home-finance, en el que el mismo candidato se aprobaba dos veces (en V2 y al fusionar). Activado solo en home-finance; Obi y Forge mantienen la aprobación en V2.
+
 ## Límites conocidos
 
 - Mientras un trabajo espera al owner, su recibo queda en `needs_attention`, y eso detiene la autoejecución de esa empresa, igual que en la fase A.

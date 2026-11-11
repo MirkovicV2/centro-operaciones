@@ -17,12 +17,17 @@
 // and the checkout still has the fingerprint QA validated. Each candidate gets its own V2
 // task (job id + fingerprint prefix), so a changed candidate needs a new approval.
 //
+// Decision on GitHub (per project, "ownerDecision": "github", needs phase B): when V2 recommends accepting,
+// the Centro does not wait for `wfv2 approve`. It opens the PR with exactly that candidate and never merges
+// it: the owner's merge on GitHub is the decision, and closing the PR is the rejection. A V2 rejection or
+// block still stops the job. The V2 task stays in pendiente_owner; the merged PR is the record.
+//
 // data/workflow-v2.json (local, private, gitignored like the rest of data/):
 //   { "version": 1, "engineeringSystem": "<checkout of engineering-system>", "python": "python3",
 //     "projects": { "<projectId>": { "stateRoot": "<dir outside the checkout>",
 //       "reviewerConfig": "<reviewer.json>" | null, "allowedPaths": ["src/"], "checks": ["unit-tests"],
 //       "risks": [], "declaredTier": null, "timeoutMs": 3600000, "integrateAfterApproval": false,
-//       "pythonEnv": "<virtualenv for checks declaring python_env>" | null } } }
+//       "pythonEnv": "<virtualenv for checks declaring python_env>" | null, "ownerDecision": "v2" | "github" } } }
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,11 +62,14 @@ export function normalizeWorkflowV2(value) {
     if (entry.declaredTier != null && !TIERS.has(entry.declaredTier)) fail(`${id}: declaredTier debe ser FAST, STANDARD, CRITICAL o null.`);
     if (entry.integrateAfterApproval != null && typeof entry.integrateAfterApproval !== 'boolean') fail(`${id}: integrateAfterApproval debe ser true o false.`);
     if (entry.pythonEnv != null && !absolute(entry.pythonEnv)) fail(`${id}: pythonEnv debe ser una ruta absoluta o null.`);
+    const ownerDecision = entry.ownerDecision ?? 'v2';
+    if (!['v2', 'github'].includes(ownerDecision)) fail(`${id}: ownerDecision debe ser "v2" o "github".`);
+    if (ownerDecision === 'github' && entry.integrateAfterApproval !== true) fail(`${id}: ownerDecision "github" necesita integrateAfterApproval: true.`);
     const timeoutMs = entry.timeoutMs ?? 3_600_000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 4 * 3_600_000) fail(`${id}: timeoutMs entre 60000 y 14400000.`);
     projects[id] = { stateRoot: entry.stateRoot, reviewerConfig: entry.reviewerConfig ?? null, allowedPaths: [...entry.allowedPaths],
       checks: [...(entry.checks ?? [])], risks: [...(entry.risks ?? [])], declaredTier: entry.declaredTier ?? null, timeoutMs,
-      integrateAfterApproval: entry.integrateAfterApproval === true, pythonEnv: entry.pythonEnv ?? null };
+      integrateAfterApproval: entry.integrateAfterApproval === true, pythonEnv: entry.pythonEnv ?? null, ownerDecision };
   }
   return { engineeringSystem: value.engineeringSystem, python, projects };
 }
@@ -159,8 +167,23 @@ const MESSAGES = {
   unexpected: 'Workflow V2 devolvió un estado que el Centro no reconoce.',
 };
 
-// Runs `wfv2 submit` on the checkout, reports the reviewer stage and always ends by throwing:
-// in phase A a governed job stops here for the owner.
+// With "ownerDecision": "github", a V2 summary in which every required review recommends accepting stands in
+// for the owner's V2 approval: the binding the integration is tied to. Null otherwise. Pure.
+export function githubRecommendation(entry, summary, prior) {
+  if (entry?.ownerDecision !== 'github' || !entry.integrateAfterApproval) return null;
+  const reviews = Array.isArray(summary?.reviews) ? summary.reviews : [];
+  const accepts = reviews.length > 0 && reviews.every(review => review?.recommendation === 'ACCEPT');
+  if (!accepts || !['pendiente_owner', 'revision', 'aprobado'].includes(summary?.status)) return null;
+  const identity = summary.identity ?? prior?.identity, evidenceId = summary.evidence_id ?? prior?.evidenceId;
+  if (typeof identity !== 'string' || !identity || typeof evidenceId !== 'string' || !evidenceId || !HEX64.test(prior?.candidate ?? '') || !HEX64.test(prior?.qaSnapshot ?? '')) return null;
+  if ((prior.identity && prior.identity !== identity) || (prior.evidenceId && prior.evidenceId !== evidenceId)) return null;
+  const binding = { task: prior.task, identity, evidenceId, candidate: prior.candidate, qaSnapshot: prior.qaSnapshot };
+  return { binding, record: { ...prior, ...binding, outcome: 'recommended', decision: 'github', status: String(summary.status) },
+    summary: `Workflow V2 recomienda aceptar (tarea ${prior.task}${summary.tier ? `, nivel ${summary.tier}` : ''}). Tu decisión es la PR: fusiónala si te convence o ciérrala para rechazar. El Centro no la fusiona.` };
+}
+
+// Runs `wfv2 submit` on the checkout and reports the reviewer stage. It ends by throwing (the job stops for the
+// owner), except with the decision on GitHub, where a recommendation to accept returns the binding to integrate.
 export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defaultRun } = {}) {
   const task = buildV2Task(job, entry);
   await ctx.reportStage?.({ key: 'reviewer', status: 'running', summary: `Workflow V2: enviando el candidato (tarea ${task.id}).`, workflowV2: { task: task.id } });
@@ -204,6 +227,12 @@ export async function runWorkflowV2Gate(job, ctx, entry, workspace, { run = defa
   const workflowV2 = { task: task.id, outcome, status: summary.status, tier: summary.tier ?? null, candidate, qaSnapshot: job.workflowV2Snapshot ?? null,
     identity: summary.identity ?? null, evidenceId: summary.evidence_id ?? null, reviews: summary.reviews ?? [],
     blockedReason: summary.blocked_reason ?? null, next: summary.next ?? null };
+  // Decision on GitHub: V2's recommendation to accept is enough to open the PR; the owner decides by merging it.
+  const recommendation = githubRecommendation(entry, summary, workflowV2);
+  if (recommendation) {
+    await ctx.reportStage?.({ key: 'reviewer', status: 'succeeded', summary: recommendation.summary, workflowV2: recommendation.record });
+    return recommendation.binding;
+  }
   const line = [MESSAGES[entry.integrateAfterApproval && outcome === 'owner_pending' ? 'owner_pending_b' : outcome], summary.tier ? `Nivel ${summary.tier}.` : '', summary.blocked_reason ? `Motivo: ${summary.blocked_reason}.` : '',
     summary.next ? `Siguiente: ${summary.next}` : ''].filter(Boolean).join(' ');
   await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: line.slice(0, 1000), error: code, workflowV2 });
@@ -250,6 +279,14 @@ export async function resolveWorkflowV2Approval(job, ctx, entry, prior, { run = 
     const error = new ProviderError('workflow_v2_identity_mismatch', 'Workflow V2 devolvió el estado de otra tarea.', { uncertain: true });
     await ctx.reportStage?.({ key: 'reviewer', status: 'blocked', summary: error.message, error: error.code, workflowV2: record('identity_mismatch') });
     throw error;
+  }
+  const recommended = githubRecommendation(entry, status, prior);
+  if (recommended && status.status !== 'aprobado') {
+    if (job.workflow?.steps?.find(step => step.key === 'reviewer')?.status !== 'succeeded') {
+      await ctx.reportStage?.({ key: 'reviewer', status: 'running', summary: `Workflow V2: comprobando la recomendación (tarea ${prior.task}).` });
+    }
+    await ctx.reportStage?.({ key: 'reviewer', status: 'succeeded', summary: recommended.summary, workflowV2: recommended.record });
+    return recommended.binding;
   }
   if (status.status === 'aprobado') {
     if (!('identity' in status) || !('evidence_id' in status)) {
@@ -355,6 +392,9 @@ export function nextV2Step(entry, task, summary) {
   const required = Array.isArray(summary?.required_reviews) ? summary.required_reviews.map(String) : [];
   const accepted = new Set(Array.isArray(summary?.accepted) ? summary.accepted.map(String) : []);
   const reviewed = new Set((Array.isArray(summary?.reviews) ? summary.reviews : []).map(review => String(review?.role ?? '')));
+  if (entry.ownerDecision === 'github' && ['pendiente_owner', 'revision', 'aprobado'].includes(status)) {
+    return { action: 'github', text: 'En este proyecto decides en GitHub: fusiona la PR si te convence o ciérrala para rechazar. No hace falta aprobar en V2.' };
+  }
   switch (status) {
     case 'pendiente_owner':
       return { action: 'approve', text: 'Las revisiones obligatorias están aceptadas: falta tu aprobación final de la tarea. Si no te convence, usa reject.', command: `${base} approve ${task}` };
