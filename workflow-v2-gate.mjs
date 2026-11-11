@@ -306,8 +306,10 @@ export async function bindWorkflowV2Approval(job, approval, { previous, persist 
 export function workflowV2Readmissible(job) {
   if (job?.state !== 'queued' || job.kind !== 'code') return false;
   const steps = job.workflow?.steps ?? [];
-  const v2 = steps.find(step => step.key === 'reviewer')?.workflowV2;
-  return Boolean(v2?.task && v2.identity && v2.evidenceId && HEX64.test(v2.qaSnapshot ?? '') && HEX64.test(v2.candidate ?? '')
+  const reviewer = steps.find(step => step.key === 'reviewer'), v2 = reviewer?.workflowV2;
+  // A resubmission (V2 blocked before producing evidence) carries the same uncommitted candidate but no evidence yet.
+  const evidenceless = reviewer?.status === 'blocked' && reviewer.error === 'workflow_v2_blocked' && !v2?.evidenceId && !(v2?.reviews?.length);
+  return Boolean(v2?.task && v2.identity && (v2.evidenceId || evidenceless) && HEX64.test(v2.qaSnapshot ?? '') && HEX64.test(v2.candidate ?? '')
     && steps.find(step => step.key === 'qa')?.status === 'succeeded');
 }
 

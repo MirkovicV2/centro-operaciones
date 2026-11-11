@@ -397,6 +397,30 @@ test('an eligible job V2 blocked before evidence is resumed once from the panel,
   assert.equal((await readAutoRun(root)).receipts[0].status, 'pending');
   assert.deepEqual(job.workflow.steps.filter(step => ['ux', 'developer', 'qa'].includes(step.key)).map(step => step.status), ['succeeded', 'succeeded', 'succeeded']);
   await assert.rejects(resumeWorkflowV2Receipt(root, job.id, { confirm: true }), /no está esperando/, 'only once');
+  // The unsubmitted candidate is still uncommitted in the checkout: admission must not require a clean tree
+  // (Encargo 2 of home-finance stayed queued with its receipt blocked as destination_dirty).
+  let dirty = true, ran = 0;
+  const dirtyVerify = async (_root, _job, { requireClean = true } = {}) => {
+    if (dirty && requireClean) throw Object.assign(new Error('Checkout no estaba limpio al admitir el job; se requiere revisión antes de ejecutar.'), { code: 'destination_dirty' });
+    return verify();
+  };
+  const worker = async (current, ctx) => {
+    ran++;
+    assert.deepEqual(current.workflow.steps.filter(step => ['ux', 'developer', 'qa'].includes(step.key)).map(step => step.status), ['succeeded', 'succeeded', 'succeeded']);
+    await ctx.reportStage({ key: 'reviewer', status: 'running', summary: 'Workflow V2: enviando el candidato.' });
+    await ctx.reportStage({ key: 'reviewer', status: 'blocked', error: 'workflow_v2_owner_pending', summary: 'Decide en V2.', workflowV2: submitted({ task: 'v2u-auto-aaaaaaaaaaaa' }) });
+    throw Object.assign(new Error('Decide tú en V2.'), { code: 'workflow_v2_owner_pending', uncertain: false });
+  };
+  // Reproduce what the previous version left: admission refused, job still queued, receipt blocked.
+  const auto = JSON.parse(await fs.readFile(path.join(root, 'data', 'auto-run.json'), 'utf8'));
+  delete auto.receipts[0].workflowV2Resume; auto.receipts[0].status = 'blocked'; auto.receipts[0].blockCode = 'destination_dirty';
+  await fs.writeFile(path.join(root, 'data', 'auto-run.json'), JSON.stringify(auto));
+  await readmitWorkflowV2Receipt(root, job.id, { confirm: true });
+  await createAutoRunner(root, { verify: dirtyVerify, worker }).tick();
+  assert.equal(ran, 1, 'the resubmission is admitted over the dirty candidate');
+  job = (await loadState(root)).jobs.find(item => item.id === sent.job.id);
+  assert.equal(job.state, 'needs_attention');
+  assert.equal(job.workflow.steps.find(step => step.key === 'reviewer').error, 'workflow_v2_owner_pending');
 });
 
 test('an operator retry waits for a ledger lock held by a background tick instead of failing at once', async t => {

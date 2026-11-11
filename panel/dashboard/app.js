@@ -213,7 +213,7 @@ function renderAutomation(raw) {
       };
       row.append(retry);
     }
-    if (receipt.status === 'blocked' && /^destination_/.test(receipt.blockCode || '')) {
+    if (receipt.status === 'blocked' && /^destination_/.test(receipt.blockCode || '') && !receipt.claimedAt) {
       const facts = Object.entries(receipt.blockDetails || {}).map(([key, value]) => `${key}: ${value}`).join(' · ');
       if (facts) row.append(el('p', 'receipt-details', facts));
       const again = el('button', 'button secondary', 'Volver a comprobar el destino'); again.type = 'button';
@@ -475,9 +475,9 @@ function renderRun(data) {
     diagnosis.append(el('p', 'run-diagnosis-action', `Qué hacer: ${job.diagnosis.action}`));
     main.append(diagnosis);
   }
-  if (job.state === 'needs_attention') {
+  if (job.state === 'needs_attention' || readmissionBlocked(job, receipt)) {
     const callout = el('section', 'run-callout');
-    callout.append(el('h3', '', 'Este trabajo espera tu decisión'), el('p', '', job.error?.message || 'Revisa la etapa y sus informes antes de continuar.'));
+    callout.append(el('h3', '', 'Este trabajo espera tu decisión'), el('p', '', job.state === 'queued' ? `El ejecutor no pudo volver a admitirlo: ${receipt.reason}` : job.error?.message || 'Revisa la etapa y sus informes antes de continuar.'));
     if (data.executor?.reason) callout.append(el('p', 'microcopy', data.executor.reason));
     const actions = el('div', 'run-actions'); actions.append(...jobActionButtons(job, data, receipt));
     callout.append(actions);
@@ -807,7 +807,7 @@ function renderJobs(data) {
     if (job.state === 'needs_attention') {
       detail.append(el('p', '', `Etapa: ${job.workflow?.currentStage || 'sin confirmar'} · Intento ${job.attempts}/${job.maxAttempts}. ${data.executor?.reason || 'Revisa los dispatches y confirma que no queda un agente activo antes de decidir.'}`));
       detail.append(...jobActionButtons(job, data, receipt));
-    }
+    } else if (readmissionBlocked(job, receipt)) detail.append(...jobActionButtons(job, data, receipt));
     card.append(detail);
     if (job.autoIntent) detail.append(el('p', '', `Recibo: ${job.autoIntent.receiptId} · ${job.autoIntent.eligible ? 'Elegible al confirmar' : 'Manual al confirmar'}`));
     if (receipt?.reason) detail.append(el('p', '', `Estado del recibo: ${receipt.status} · ${receipt.reason}`));
@@ -818,6 +818,13 @@ function renderJobs(data) {
   }
   if (!list.children.length) list.append(el('div', 'empty-state', 'No hay trabajos abiertos en esta vista. Los cerrados est?n en Historial.'));
   restoreDetails();
+}
+
+// A retried job whose new attempt the executor refused at admission: still queued, receipt blocked.
+// The only way out is the same «Reintentar», which readmits it; without this the card offered no action.
+function readmissionBlocked(job, receipt) {
+  return job.state === 'queued' && job.autoIntent?.eligible && receipt?.status === 'blocked' && job.attempts > 0
+    && receipt.retryAuthorizedAttempt === job.attempts;
 }
 
 // Retry / resolve for a job that needs review. Shared by the job card and the job page, so each action has one implementation.
@@ -831,7 +838,7 @@ function jobActionButtons(job, data, receipt) {
     && job.error?.code === 'delivery_incomplete' && job.workflow?.currentStage === 'qa' && qa?.dispatchSettled
     && ['blocked', 'failed'].includes(qa.delivery?.outcome) && qa.delivery.scope === 'complete' && qa.resultMessageId;
   const retryLabel = revalidate ? 'Revalidar QA' : interruptedDevelopment ? 'Retomar Desarrollo' : 'Reintentar después de revisar';
-  for (const [action, label] of [['retry', retryLabel], ['resolve', 'Cerrar trabajo']]) {
+  for (const [action, label] of [['retry', retryLabel], ...(job.state === 'queued' ? [] : [['resolve', 'Cerrar trabajo']])]) {
     const button = el('button', 'button secondary', label);
     button.disabled = !data.executor?.available || (action === 'retry' && !revalidate && job.attempts >= job.maxAttempts);
     button.title = !data.executor?.available ? data.executor?.reason : action === 'retry' && !revalidate && job.attempts >= job.maxAttempts ? 'Máximo de intentos alcanzado' : '';
