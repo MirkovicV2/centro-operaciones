@@ -618,7 +618,13 @@ async function runStage(job, ctx, roleKey, workspace, runId, instruction, prior 
     }
     if (['succeeded', 'failed', 'cancelled', 'abandoned'].includes(worker.state)) {
       if (job.contract?.version === 1 && worker.liveness !== 'exited') {
-        exitWaitAt ??= ctx.polling.now();
+        if (exitWaitAt === undefined) {
+          exitWaitAt = ctx.polling.now();
+          // The delivery is in and the worker has nothing left to do: ask Orca to release it now instead of waiting for it
+          // to leave on its own (two idle minutes per stage in the first real pilot). The confirmed exit is still awaited
+          // below; a release Orca cannot complete changes nothing.
+          try { await command(['orchestration', 'worker-release', '--dispatch', dispatchId], ctx.root, undefined); } catch { /* keep waiting as before */ }
+        }
         if (ctx.polling.now() - exitWaitAt < ctx.polling.exitTimeoutMs) {
           if (!exitWaitReported) {
             await ctx.reportStage?.({ key: role.stageKey, status: 'running', dispatchStatus: 'awaiting_exit', dispatchId, taskId, summary: 'Entrega recibida; esperando el cierre confirmado del mismo trabajador en Orca.' });

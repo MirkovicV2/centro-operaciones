@@ -239,7 +239,9 @@ test('native success without positive exit stays blocked and does not read compl
 test('completed work waits for delayed native release then consumes the same delivery once', async t => {
   const f = await fixture(t);
   let polls = 0, waits = 0;
+  const released = [];
   const command = async args => {
+    if (args[1] === 'worker-release') { released.push(args); throw new Error('release_pending'); }
     if (args[1] === 'worker-show' && ++polls < 4) {
       f.calls.push(args);
       const value = nativeStatus();
@@ -257,4 +259,6 @@ test('completed work waits for delayed native release then consumes the same del
   assert.equal(f.calls.filter(args => args[1] === 'inbox').length, 1);
   assert.equal(f.updates.filter(update => update.dispatchStatus === 'awaiting_exit').length, 1);
   assert.equal(f.calls.some(args => ['send', 'worker-stop'].includes(args[1])), false);
+  // Release is asked for once, as soon as the delivery is in; a release Orca cannot complete still ends in the confirmed exit.
+  assert.deepEqual(released, [['orchestration', 'worker-release', '--dispatch', identity.dispatchId]]);
 });
