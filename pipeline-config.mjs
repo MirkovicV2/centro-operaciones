@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { replaceLocalFile } from './atomic-file.mjs';
 import { LAUNCH_AGENTS, LAUNCH_ROLES, flagValue, validateJobLaunch } from './launch-choice.mjs';
+import { launchWithQuota } from './quota.mjs';
 
 // One effective resolution of what each stage is launched with: agent, model and effort.
 // Every entry point (CLI, Ideas, Nuevo trabajo, retries, automatic execution) goes through
@@ -216,19 +217,21 @@ const STAGE_LABELS = { planificador: 'Planificación', ux: 'Diseño', desarrolla
 export const routeRoles = kind => kind === 'analysis' ? ['planificador'] : ['ux', 'desarrollador', 'qa', 'revisor'];
 
 // What a job WOULD be launched with, before it is admitted. Pure: no job, no dispatch, no model call.
-export function previewPipeline({ business, kind, projectId = null, launch = null, levels, pipeline = EMPTY_PIPELINE, defaultAgent = 'codex', fallbackRoles = {} }) {
+export function previewPipeline({ business, kind, projectId = null, launch = null, levels, pipeline = EMPTY_PIPELINE, defaultAgent = 'codex', fallbackRoles = {}, quota = null }) {
   const invalid = message => Object.assign(new Error(message), { code: 'launch_choice_invalid' });
   if (!PIPELINE_BUSINESSES.includes(business)) throw invalid('La vista previa necesita business (agency o games).');
   if (!['analysis', 'code'].includes(kind)) throw invalid('La vista previa necesita kind (analysis o code).');
   const jobLaunch = validateJobLaunch(launch) ?? null;
   const stages = routeRoles(kind).map(roleName => ({ role: roleName, label: STAGE_LABELS[roleName],
-    ...resolveStageLaunch({ roleName, business, projectId, jobLaunch, levels, pipeline, defaultAgent, fallbackRoles }) }));
+    ...launchWithQuota(forcedAgent => resolveStageLaunch({ roleName, business, projectId, jobLaunch, levels, pipeline, defaultAgent, fallbackRoles, forcedAgent }), quota) }));
   const ignored = jobLaunch?.agent ? stages.filter(stage => jobLaunch.roles[stage.role] && jobLaunch.roles[stage.role].agent === undefined
     && !jobLaunch.roles[stage.role].escalada && stage.agent !== jobLaunch.agent).map(stage => stage.role) : [];
   return {
     business, kind, projectId, stages,
     ...(kind === 'code' ? { integration: 'Motor del Centro (GitHub), sin modelo' } : {}),
-    warnings: ignored.map(role => `La elección del encargo para ${role} es de ${jobLaunch.agent} y la etapa se lanza con otro agente: se ignora. Indica agent en ese rol para cambiarlo.`),
+    warnings: [...ignored.map(role => `La elección del encargo para ${role} es de ${jobLaunch.agent} y la etapa se lanza con otro agente: se ignora. Indica agent en ese rol para cambiarlo.`),
+      ...stages.filter(stage => stage.substitutedFrom).map(stage => `${stage.label}: ${stage.substitutedFrom.agent} está en la reserva o agotado; se lanzaría con ${stage.agent}.`),
+      ...stages.filter(stage => stage.quotaWait).map(stage => `${stage.label} no se lanzaría ahora. ${stage.quotaWait}`)],
   };
 }
 

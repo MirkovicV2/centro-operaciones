@@ -129,6 +129,17 @@ export function quotaDecision(quota, agent, now = Date.now()) {
   return { action: 'wait', status, ...(status.until && Date.parse(status.until) > now ? { until: status.until } : {}) };
 }
 
+// What a stage would really be launched with once the quota policy is applied: the same decision the engine takes at
+// launch, for previews. `resolve(forcedAgent)` returns the launch for the configured agent (null) or for a substitute.
+export function launchWithQuota(resolve, quota, now = Date.now()) {
+  const launch = resolve(null);
+  if (!quota || (!Object.keys(quota.proveedores).length && quota.sinDatos !== 'esperar')) return launch;
+  const decision = quotaDecision(quota, launch.agent, now);
+  if (decision.action === 'substitute') return { ...resolve(decision.to), substitutedFrom: { agent: launch.agent, reason: 'cuota', detail: decision.status.reason } };
+  if (decision.action === 'wait') return { ...launch, quotaWait: decision.status.reason };
+  return launch;
+}
+
 // Environment signs that work could be billed outside the subscription. The Centro only reads variable names.
 export function billingWarnings(quota, env = process.env) {
   const warnings = [];

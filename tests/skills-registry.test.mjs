@@ -43,6 +43,14 @@ test('skills are chosen by business, stage and kind; a project or a job may add 
   assert.deepEqual(ids({ business: 'agency', stage: 'planner', kind: 'analysis' }), []);
   // A games project with a web companion adds web-testing for QA; a job drops the Godot patterns.
   assert.deepEqual(ids({ business: 'games', stage: 'qa', projectChoice: { add: ['web-testing'] } }), ['game-production', 'web-testing']);
+  // A job routed without Design gets no interface skills by default (first pilot: a pure function was offered frontend-design
+  // and web-testing); the full route still does, and asking for one by name still works.
+  assert.deepEqual(ids({ business: 'agency', stage: 'developer', route: 'funcional' }), []);
+  assert.deepEqual(ids({ business: 'agency', stage: 'qa', route: 'documentacion' }), []);
+  assert.ok(ids({ business: 'agency', stage: 'developer', route: 'interfaz' }).includes('frontend-design'));
+  assert.deepEqual(ids({ business: 'agency', stage: 'developer' }), ids({ business: 'agency', stage: 'developer', route: 'interfaz' }));
+  assert.deepEqual(ids({ business: 'agency', stage: 'qa', route: 'funcional', jobChoice: { add: ['web-testing'] } }), ['web-testing']);
+  assert.ok(ids({ business: 'games', stage: 'developer', route: 'funcional' }).includes('game-production'), 'skills without routes apply to every route');
   const dropped = selectSkills(registry, { business: 'games', kind: 'code', stage: 'developer', jobChoice: { remove: ['godot-gdscript-patterns', 'game-production'], add: ['inexistente'] } });
   assert.deepEqual(dropped.selected.map(item => item.skill.id), ['game-production'], 'a required skill stays');
   assert.deepEqual(dropped.notes.map(note => note.id).sort(), ['game-production', 'godot-gdscript-patterns', 'inexistente']);

@@ -110,6 +110,9 @@
         "stages": [
           "ux",
           "developer"
+        ],
+        "routes": [
+          "interfaz"
         ]
       },
       "source": {
@@ -148,6 +151,9 @@
           "developer",
           "qa",
           "reviewer"
+        ],
+        "routes": [
+          "interfaz"
         ]
       },
       "source": {

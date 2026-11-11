@@ -65,7 +65,7 @@ import { inspectOrcaAgentSettings } from '../orca-settings.mjs';
 import { readPipeline, pipelineAgents, previewPipeline, writePipeline, disablePipeline, resolveStageLaunch, STAGE_ROLES, PIPELINE_BUSINESSES } from '../pipeline-config.mjs';
 import { LAUNCH_ROLES, LAUNCH_AGENTS } from '../launch-choice.mjs';
 import { currentActor, addJobStage } from './queue.mjs';
-import { readQuota, writeQuota, quotaStatus, billingWarnings, recordQuotaObservation, quotaConfigured, DEFAULT_QUOTA } from '../quota.mjs';
+import { readQuota, writeQuota, quotaStatus, billingWarnings, recordQuotaObservation, quotaConfigured, launchWithQuota, DEFAULT_QUOTA } from '../quota.mjs';
 import { diagnoseJob } from '../failure-taxonomy.mjs';
 import { readTeam, RESOURCE_NAMES } from '../team.mjs';
 import { readSharedMemory } from '../project-knowledge.mjs';
@@ -75,7 +75,8 @@ const usesClaude = await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS })
   .catch(error => { console.warn(`Reparto del pipeline no aplicable: ${error.message}`); return configuredOrcaAgent() === 'claude'; });
 const orcaPreflight = await inspectOrcaAgentSettings({ agent: usesClaude ? 'claude' : configuredOrcaAgent() }).catch(error => ({ available: false, reason: error.code || 'orca_settings_error', surface: 'unknown', permissionMode: null, warnings: [] }));
 for (const warning of usesClaude ? orcaPreflight.warnings : []) console.warn(`Preflight de Orca: ${warning}`);
-const launchSources = async () => ({ levels: await readLaunchLevels(QUEUE_ROOT), pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+const launchSources = async () => ({ levels: await readLaunchLevels(QUEUE_ROOT), pipeline: await readPipeline(QUEUE_ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles,
+  quota: await readQuota(QUEUE_ROOT).catch(() => null) });
 // The split as the settings view edits it. A broken file is reported, never silently replaced.
 async function pipelineSettings() {
   const levels = await readLaunchLevels(QUEUE_ROOT).catch(() => DEFAULT_LAUNCH_LEVELS);
@@ -120,7 +121,7 @@ async function plannedLaunches(jobs) {
   let sources;
   try { sources = await launchSources(); } catch { return new Map(); }
   return new Map(active.map(job => [job.id, Object.fromEntries((job.workflow?.steps || []).filter(step => STAGE_ROLES[step.key] && !step.launch && !['succeeded', 'skipped'].includes(step.status)).flatMap(step => {
-    try { const { origin, ...launch } = resolveStageLaunch({ roleName: STAGE_ROLES[step.key], business: job.business, projectId: job.projectId, jobLaunch: job.launch, ...sources }); return [[step.key, launch]]; }
+    try { const { origin, ...launch } = launchWithQuota(forcedAgent => resolveStageLaunch({ roleName: STAGE_ROLES[step.key], business: job.business, projectId: job.projectId, jobLaunch: job.launch, ...sources, forcedAgent }), sources.quota); return [[step.key, launch]]; }
     catch { return []; }
   }))]));
 }

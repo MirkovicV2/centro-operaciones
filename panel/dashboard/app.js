@@ -7,8 +7,9 @@ const statusNames = { queued: 'En cola', running: 'En marcha', retry_wait: 'Rein
 const businessNames = { agency: 'Agencia', games: 'Videojuegos' };
 // Pipeline split (Ajustes and Nuevo trabajo). Declared here because showSection runs before the end of this file.
 const roleLabels = { planificador: 'Planificación', ux: 'Diseño', desarrollador: 'Desarrollo', qa: 'QA', revisor: 'Revisión' };
-const sourceLabels = { 'por defecto': 'por defecto', general: 'perfil general', empresa: 'perfil de la empresa', proyecto: 'proyecto', encargo: 'este encargo', escalada: 'escalada' };
-const launchLabel = launch => [launch.agent, launch.model || 'modelo por defecto', launch.effort ? `esfuerzo ${launch.effort}` : 'esfuerzo por defecto'].join(' · ');
+const sourceLabels = { 'por defecto': 'por defecto', general: 'perfil general', empresa: 'perfil de la empresa', proyecto: 'proyecto', encargo: 'este encargo', escalada: 'escalada', 'sustitución': 'sustitución por cuota' };
+const launchLabel = launch => [launch.agent, launch.model || 'modelo por defecto', launch.effort ? `esfuerzo ${launch.effort}` : 'esfuerzo por defecto',
+  ...(launch.substitutedFrom ? [`en lugar de ${launch.substitutedFrom.agent}, que está en la reserva o agotado`] : []), ...(launch.quotaWait ? ['ahora no se lanzaría por cuota'] : [])].join(' · ');
 const pipelineState = { server: null, draft: null, dirty: false, loading: null };
 const emptyDraft = () => ({ general: { roles: {} }, empresas: {}, proyectos: {}, escaladas: {} });
 const cloneDraft = value => JSON.parse(JSON.stringify(value || emptyDraft()));
@@ -142,6 +143,17 @@ function createRemoteButton(projectId, onDone) {
     catch (error) { notify(error.message, true); button.disabled = false; button.dataset.armed = 'false'; button.textContent = 'Crear el repositorio en GitHub'; }
   };
   return button;
+}
+
+// A replay of the same text keeps its operation, so an uncertain send is never duplicated. The exception is a request
+// that is already closed (withdrawn, or its job cancelled): sending the same text again is then a new request
+// (first pilot: resending after a cancelled job silently pointed at the old one).
+function closedOperation(namespace, signature) {
+  const previous = JSON.parse(localStorage.getItem(`operations-${namespace}`) || '{}')[signature];
+  const request = previous && (state.raw?.coordinatorRequests || []).find(item => item.operationId === previous);
+  if (!request) return undefined;
+  const job = request.jobId && [...(state.raw?.queue?.jobs || []), ...(state.raw?.jobs || [])].find(item => item.id === request.jobId && item.state);
+  return request.status === 'withdrawn' || job?.state === 'cancelled' ? previous : undefined;
 }
 
 function renderAutomation(raw) {
@@ -1514,7 +1526,7 @@ $('#job-form').addEventListener('submit', async event => {
   let confirmation;
   if (values.kind === 'code') { confirmation = await confirmDestination(project, values.prompt, values.successCriteria); if (!confirmation) return; }
   const signature = JSON.stringify({ business: state.business, values, confirmation, launch: jobLaunchChoice() });
-  const operationId = stableOperation('submissions', signature);
+  const operationId = stableOperation('submissions', signature, closedOperation('submissions', signature));
   const payload = { operationId, confirmation, business: state.business, projectId: values.projectId, projectName: project?.name, kind: values.kind, title: values.title, prompt: confirmation ? confirmation.objective : values.prompt, successCriteria: confirmation ? confirmation.successCriteria : values.successCriteria, provider: 'orca', workspace: values.workspace, isolated, ...(jobLaunchChoice() ? { launch: jobLaunchChoice() } : {}) };
   const accepted = confirmation || await confirmIdeaAction('Enviar solicitud al coordinador', `${businessNames[state.business]} · ${values.title}. Se guarda una solicitud para que el coordinador decida entre análisis o desarrollo. Todavía no se crea un trabajo ni se inicia un agente.`, 'Enviar al coordinador');
   if (!accepted) return;

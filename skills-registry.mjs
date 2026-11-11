@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { JOB_ROUTES } from './job-route.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +47,8 @@ export function normalizeRegistry(value) {
     if (typeof skill.required !== 'boolean') fail(`${where}: required debe ser true o false.`);
     const applies = skill.appliesTo;
     if (!isObject(applies) || !list(applies.businesses, BUSINESSES) || !list(applies.stages, SKILL_STAGES) || !list(applies.kinds, ['analysis', 'code'])) fail(`${where}: appliesTo necesita businesses, kinds y stages válidos.`);
+    // Optional: the routes a skill makes sense for. A skill about interfaces is noise in a job the coordinator routed without Design.
+    if (applies.routes !== undefined && !list(applies.routes, Object.keys(JOB_ROUTES))) fail(`${where}: appliesTo.routes solo admite ${Object.keys(JOB_ROUTES).join(', ')}.`);
     const source = skill.source;
     if (!isObject(source) || !['local', 'github'].includes(source.kind)) fail(`${where}: source.kind debe ser local o github.`);
     if (source.kind === 'github' && (!/^[\w.-]+\/[\w.-]+$/.test(source.repository ?? '') || !safeRelative(source.path) || !/^[a-f0-9]{40}$/.test(source.revision ?? ''))) fail(`${where}: una fuente github necesita repository, path y revision (commit de 40 hex).`);
@@ -60,7 +63,7 @@ export function normalizeRegistry(value) {
       stageFiles[stage] = [...files];
     }
     return { id: skill.id, title: skill.title.trim(), summary: skill.summary.trim(), root: skill.root, entry: skill.entry, mode: skill.mode, required: skill.required,
-      appliesTo: { businesses: [...applies.businesses], kinds: [...applies.kinds], stages: [...applies.stages] },
+      appliesTo: { businesses: [...applies.businesses], kinds: [...applies.kinds], stages: [...applies.stages], ...(applies.routes ? { routes: [...applies.routes] } : {}) },
       source: { ...source }, license: skill.license.trim(), ...(skill.licenseFile ? { licenseFile: skill.licenseFile } : {}), localChanges: skill.localChanges.trim(),
       ...(skill.reviewedAt ? { reviewedAt: String(skill.reviewedAt) } : {}), stageFiles, files: { ...skill.files } };
   }) };
@@ -99,10 +102,12 @@ export async function readProjectSkillChoices(root) {
 }
 
 // Which skills a stage gets, and why any requested change was not applied.
-export function selectSkills(registry, { business, kind, stage, projectChoice, jobChoice }) {
+export function selectSkills(registry, { business, kind, stage, projectChoice, jobChoice, route = 'interfaz' }) {
   const byId = new Map(registry.skills.map(skill => [skill.id, skill]));
   const fits = skill => skill.appliesTo.stages.includes(stage) && skill.appliesTo.kinds.includes(kind);
-  const selected = new Map(registry.skills.filter(skill => fits(skill) && skill.appliesTo.businesses.includes(business)).map(skill => [skill.id, { skill, origin: 'empresa' }]));
+  // The route only filters what the business gives by default; a project or a job that asks for a skill by name still gets it.
+  const onRoute = skill => !skill.appliesTo.routes || skill.appliesTo.routes.includes(route);
+  const selected = new Map(registry.skills.filter(skill => fits(skill) && onRoute(skill) && skill.appliesTo.businesses.includes(business)).map(skill => [skill.id, { skill, origin: 'empresa' }]));
   const notes = [];
   for (const [choice, origin] of [[projectChoice, 'proyecto'], [jobChoice, 'encargo']]) {
     for (const id of choice?.add ?? []) {
@@ -167,7 +172,7 @@ async function materialize(root, jobId, skill, check, files) {
 export async function prepareStageSkills({ root, codeRoot = CODE_ROOT, job, stage }) {
   const registry = await readRegistry(codeRoot);
   const projectChoices = await readProjectSkillChoices(root);
-  const { selected, notes } = selectSkills(registry, { business: job.business, kind: job.kind, stage,
+  const { selected, notes } = selectSkills(registry, { business: job.business, kind: job.kind, stage, route: job.route?.id ?? 'interfaz',
     projectChoice: job.projectId ? projectChoices[job.projectId] : undefined, jobChoice: job.skills });
   const supplied = [], omitted = [...notes], inline = [], references = [];
   for (const { skill, origin } of selected) {

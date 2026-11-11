@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_QUOTA, billingWarnings, normalizeQuota, providerFailureSignal, quotaDecision, quotaStatus, readQuota, recordQuotaObservation } from '../quota.mjs';
+import { DEFAULT_QUOTA, billingWarnings, launchWithQuota, normalizeQuota, providerFailureSignal, quotaDecision, quotaStatus, readQuota, recordQuotaObservation } from '../quota.mjs';
+import { previewPipeline, normalizePipeline } from '../pipeline-config.mjs';
+import { normalizeLaunchLevels, DEFAULT_LAUNCH_LEVELS, LAUNCH_LEVELS } from '../orca-provider.mjs';
 import { diagnoseJob } from '../failure-taxonomy.mjs';
 
 const now = Date.parse('2026-11-11T12:00:00Z');
@@ -109,4 +111,25 @@ test('a stopped job is named by its cause, with the next step', () => {
   assert.deepEqual([waiting.category, waiting.waiting, waiting.until], ['cuota', true, at(-4)]);
   assert.equal(diagnoseJob({ state: 'queued' }), null); assert.equal(diagnoseJob({ state: 'succeeded' }), null);
   assert.equal(diagnoseJob({ state: 'retry_wait', error: { code: 'provider_unavailable' }, nextAttemptAt: at(-1) }).waiting, true);
+});
+
+test('the preview shows what the quota policy would really launch (seen in the first pilot: it announced Codex while Codex was in the reserve)', () => {
+  const fresh = new Date().toISOString(), later = new Date(Date.now() + 48 * 3_600_000).toISOString();
+  const providers = { codex: { autenticacion: 'suscripcion', usadoPorcentaje: 93, observadoEn: fresh, reiniciaEn: later }, claude: { autenticacion: 'suscripcion', usadoPorcentaje: 62, observadoEn: fresh } };
+  const pipeline = normalizePipeline({ version: 1, general: { roles: { desarrollador: { agent: 'claude', model: 'sonnet', effort: 'medium' }, qa: { agent: 'codex', model: 'gpt-6.1-sol', effort: 'medium' } } } }, { levelNames: LAUNCH_LEVELS });
+  const base = { business: 'agency', kind: 'code', levels: normalizeLaunchLevels({}), pipeline, defaultAgent: 'codex', fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles };
+  const stage = (preview, role) => preview.stages.find(item => item.role === role);
+  const plain = previewPipeline(base);
+  assert.equal(stage(plain, 'qa').agent, 'codex'); assert.equal(stage(plain, 'qa').substitutedFrom, undefined);
+  const substituted = previewPipeline({ ...base, quota: quota(providers, { alAgotar: 'sustituir', sustituciones: { codex: 'claude', claude: 'codex' } }) });
+  const qa = stage(substituted, 'qa');
+  assert.deepEqual([qa.agent, qa.model, qa.substitutedFrom.agent, qa.substitutedFrom.reason], ['claude', null, 'codex', 'cuota'], 'the Codex model never travels to Claude');
+  assert.equal(stage(substituted, 'desarrollador').substitutedFrom, undefined);
+  assert.ok(substituted.warnings.some(item => /QA: codex está en la reserva o agotado; se lanzaría con claude/.test(item)));
+  const waiting = previewPipeline({ ...base, quota: quota(providers) });
+  assert.equal(stage(waiting, 'qa').agent, 'codex'); assert.match(stage(waiting, 'qa').quotaWait, /93 %/);
+  assert.ok(waiting.warnings.some(item => /QA no se lanzaría ahora/.test(item)));
+  // No quota file, or one with nothing noted: exactly the configured launch.
+  assert.deepEqual(launchWithQuota(() => ({ agent: 'codex' }), DEFAULT_QUOTA), { agent: 'codex' });
+  assert.deepEqual(launchWithQuota(() => ({ agent: 'codex' }), null), { agent: 'codex' });
 });

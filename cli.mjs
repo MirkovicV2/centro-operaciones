@@ -9,6 +9,7 @@ import { addJob, addJobStage, loadState, runQueue, setBudget, retryJob, increase
 import { createWorker } from './providers.mjs';
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 import { readPipeline, previewPipeline, previewText } from './pipeline-config.mjs';
+import { readQuota } from './quota.mjs';
 import { skillsStatus, acceptSkill } from './skills-registry.mjs';
 import { readSharedMemory, proposeLesson, listProposals, acceptLesson } from './project-knowledge.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from './orca-provider.mjs';
@@ -215,7 +216,8 @@ async function main() {
     case 'preview': {
       try {
         const preview = previewPipeline({ business: o.business, kind: o.kind, projectId: o.project ?? null, launch: await readLaunchFile(o['launch-file']),
-          levels: await readLaunchLevels(ROOT), pipeline: await readPipeline(ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles });
+          levels: await readLaunchLevels(ROOT), pipeline: await readPipeline(ROOT, { levelNames: LAUNCH_LEVELS }), defaultAgent: configuredOrcaAgent(), fallbackRoles: DEFAULT_LAUNCH_LEVELS.roles,
+          quota: await readQuota(ROOT).catch(() => null) });
         console.log(previewText(preview));
       } catch (error) {
         // Configuration messages name a file and a field, never a secret: show them as they are.
