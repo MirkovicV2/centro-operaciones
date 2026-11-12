@@ -109,7 +109,7 @@ Este proceso vive **solo en este PC**, que debe permanecer encendido y conectado
 
 ## Acceso para dos personas por Tailscale
 
-El panel escucha solo en `127.0.0.1`. Para compartirlo con otra persona, publica el puerto con Tailscale Serve (HTTPS, sin Funnel) y crea `data/tailscale-access.json` (no versionado). El formato antiguo con una sola cuenta sigue valiendo (`{ "hostname": "equipo.tailnet.ts.net", "login": "cuenta@ejemplo.test" }`, que actúa como `admin`). Para varias cuentas:
+El panel escucha solo en `127.0.0.1`. Para compartirlo con otra persona, publica el puerto con Tailscale Serve (HTTPS, sin Funnel; en Linux `sudo tailscale serve --bg 4187`) y crea `panel/data/tailscale-access.json` (no versionado; ojo, dentro de `panel/`, no en el `data/` de la raíz). El panel lo lee al arrancar: reinícialo tras crearlo o cambiarlo. El formato antiguo con una sola cuenta sigue valiendo (`{ "hostname": "equipo.tailnet.ts.net", "login": "cuenta@ejemplo.test" }`, que actúa como `admin`). Para varias cuentas:
 
 ```json
 { "hostname": "equipo.tailnet.ts.net", "users": [
