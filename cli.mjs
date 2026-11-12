@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { addJob, addJobStage, loadState, runQueue, setBudget, retryJob, increaseJobAttemptLimit, resolveJob, cancelQueuedJob, routeJob, reconcileOrcaJob, reconcileCodeJob, verifyOrcaWorkerRecord, verifyOrcaRunRecords, verifyOrcaApprovalTranscript, retractFalseSuccess, completeReviewedCodeJob, summarize, QueueError, actorContext } from './queue.mjs';
-import { reconcileOwnerMergedIntegration } from './auto-run.mjs';
+import { reconcileOwnerMergedIntegration, recordManualDelivery } from './auto-run.mjs';
 import { createWorker } from './providers.mjs';
 import { ORCA_EXE, configuredOrcaAgent } from './local-tools.mjs';
 import { readPipeline, previewPipeline, previewText } from './pipeline-config.mjs';
@@ -62,6 +62,7 @@ node cli.mjs resolve --id IDENTIFICADOR --confirm-reviewed
 node cli.mjs cancel --id IDENTIFICADOR --confirm-reviewed   Solo trabajos en cola que no han arrancado nunca
 node cli.mjs retract --id IDENTIFICADOR --confirm-reviewed
 node cli.mjs reconcile-owner-merge --id IDENTIFICADOR --confirm-reviewed   La PR de integración la fusionaste tú: la comprueba en GitHub y cierra el trabajo como integrado
+node cli.mjs deliver-manual --id IDENTIFICADOR --pr 3,4 [--repo propietario/nombre] --evidence-file informe.md --confirm-reviewed   Integraste las PR a mano: comprueba en GitHub que están fusionadas y cierra el trabajo como entregado (la revisión que no se hizo queda como omitida, no aprobada)
 node cli.mjs complete --id IDENTIFICADOR --evidence-file "informe.md" --confirm-reviewed
 node cli.mjs budget --usd LIMITE_TOTAL --model MODELO --input-per-million TARIFA --output-per-million TARIFA
 
@@ -70,7 +71,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help', 'sin-pipeline', 'sin-referencias']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million', 'run', 'name']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million', 'run', 'name', 'pr', 'repo']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -309,6 +310,13 @@ async function main() {
     case 'cancel': result = await cancelQueuedJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'resolve': result = await resolveJob(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'reconcile-owner-merge': result = await reconcileOwnerMergedIntegration(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
+    case 'deliver-manual': {
+      if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con el informe de la entrega a mano.');
+      const evidencePath = path.resolve(o['evidence-file']);
+      if ((await fs.stat(evidencePath)).size > 12_000) throw new QueueError('El informe supera los 12.000 bytes.');
+      result = await recordManualDelivery(ROOT, o.id, { confirm: !!o['confirm-reviewed'], prNumbers: String(o.pr ?? '').split(',').filter(Boolean).map(Number), repository: o.repo || '', evidence: await fs.readFile(evidencePath, 'utf8') });
+      break;
+    }
     case 'retract': result = await retractFalseSuccess(ROOT, o.id, { confirm: !!o['confirm-reviewed'] }); break;
     case 'complete': {
       if (!o['evidence-file']) throw new QueueError('Indica --evidence-file con el informe de entrega revisada.');
