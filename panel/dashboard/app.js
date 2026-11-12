@@ -1773,6 +1773,77 @@ void refresh();
 showSection();
 setInterval(refresh, 8000);
 
+// «Actualizar el Centro»: when main has new commits, any page shows them with one button (also from the phone, by
+// Tailscale). The panel tests that version in a separate copy, brings it in and restarts only with no job running.
+const updateState = { status: null, open: false, polling: null, startupAt: null };
+async function checkUpdate({ fresh = false } = {}) {
+  try { updateState.status = await api(`/api/update${fresh ? '?fresh=1' : ''}`); }
+  catch { updateState.status = null; }
+  renderUpdate();
+  const phase = updateState.status?.operation?.phase;
+  clearTimeout(updateState.polling);
+  if (['probando', 'actualizando'].includes(phase)) updateState.polling = setTimeout(checkUpdate, 3000);
+  if (phase === 'reiniciando') void waitForRestart();
+}
+async function waitForRestart() {
+  const before = updateState.startupAt ?? state.raw?.settings?.runtime?.startupAt;
+  for (let attempt = 0; attempt < 120; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const raw = await fetch('/api/state', { cache: 'no-store' }).then(response => response.ok ? response.json() : null);
+      if (raw?.settings?.runtime?.startupAt && raw.settings.runtime.startupAt !== before) { location.reload(); return; }
+    } catch { /* restarting */ }
+  }
+  notify('El panel no ha vuelto a arrancar solo; revisa el PC.', true);
+}
+function renderUpdate() {
+  const box = $('#update-banner'); box.replaceChildren();
+  const status = updateState.status, operation = status?.operation ?? { phase: 'idle' };
+  if (!status) return;
+  if (['probando', 'actualizando', 'reiniciando'].includes(operation.phase)) {
+    box.append(el('div', 'update-strip is-working', operation.message ?? 'Actualizando el Centro…'));
+    return;
+  }
+  if (operation.phase === 'error' && !updateState.dismissedError) {
+    const strip = el('div', 'update-strip is-error');
+    strip.append(el('span', '', `Actualización fallida: ${operation.message}`));
+    const close = el('button', 'text-button', 'Cerrar'); close.type = 'button';
+    close.onclick = () => { updateState.dismissedError = true; renderUpdate(); };
+    strip.append(close); box.append(strip);
+  }
+  if (!status.available) return;
+  const strip = el('div', 'update-strip');
+  const toggle = el('button', 'text-button', updateState.open ? 'Ocultar' : 'Ver cambios'); toggle.type = 'button';
+  toggle.onclick = () => { updateState.open = !updateState.open; renderUpdate(); };
+  strip.append(el('span', '', `Versión nueva del Centro: ${status.behind} cambio${status.behind === 1 ? '' : 's'} en main.`), toggle);
+  box.append(strip);
+  if (!updateState.open) return;
+  const details = el('div', 'update-details');
+  const list = el('ul');
+  for (const commit of status.commits) list.append(el('li', '', `${commit.subject} · ${commit.author} · ${commit.sha}`));
+  if (status.behind > status.commits.length) list.append(el('li', 'microcopy', `… y ${status.behind - status.commits.length} más.`));
+  details.append(list);
+  if (!status.canUpdate) details.append(el('p', 'microcopy', status.reason));
+  else {
+    details.append(el('p', 'microcopy', 'Antes de cambiar nada se pasan las pruebas de esta versión en una copia aparte (un par de minutos). Si pasan y no hay trabajos en marcha, se instala y el panel se reinicia; esta página se recargará sola.'));
+    const go = el('button', 'button', 'Actualizar ahora'); go.type = 'button';
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        await api('/api/update', { method: 'POST', body: JSON.stringify({ confirm: true, target: status.remote }) });
+        updateState.startupAt = state.raw?.settings?.runtime?.startupAt ?? null;
+        updateState.dismissedError = false;
+        await checkUpdate();
+      } catch (error) { notify(error.message, true); go.disabled = false; }
+    };
+    details.append(go);
+  }
+  if (status.fetchError) details.append(el('p', 'microcopy', `Última consulta a GitHub fallida: ${status.fetchError}`));
+  box.append(details);
+}
+void checkUpdate();
+setInterval(() => { if (!['probando', 'actualizando', 'reiniciando'].includes(updateState.status?.operation?.phase)) void checkUpdate(); }, 5 * 60_000);
+
 function scopeData(raw) {
   const scoped = { ...raw, executor: raw.executor?.byBusiness?.[state.business] ?? raw.executor };
   for (const key of ['jobs', 'projects', 'ideas', 'questions']) scoped[key] = (raw[key] || []).filter(item => item.business === state.business && !(key === 'questions' && item.status === 'withdrawn'));

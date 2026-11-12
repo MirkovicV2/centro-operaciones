@@ -1193,6 +1193,13 @@ dialog::backdrop { background: rgba(20,20,24,.32); }
 .brand { padding-bottom: 10px; }
 /* Bloqueos de cola: una franja fina; el detalle está en Atención y en la ficha. */
 #global-blockers:empty { display: none; }
+#update-banner:empty { display: none; }
+#update-banner { margin: 0 0 12px; overflow-wrap: anywhere; }
+.update-strip { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: space-between; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--accent-line); font-size: 13.5px; }
+.update-strip.is-working { border-style: dashed; }
+.update-strip.is-error { border-color: var(--red, #d1453b); margin-bottom: 6px; }
+.update-details { margin-top: 6px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); font-size: 13px; }
+.update-details ul { margin: 0 0 8px; padding-left: 18px; max-height: 240px; overflow: auto; }
 .blocker-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 8px 12px; margin-bottom: 14px; border-left-width: 3px; }
 .blocker-banner > b { font-size: 12.5px; }
 .blocker-item { display: flex; flex: 1 1 100%; align-items: center; gap: 12px; padding: 6px 0 0; margin: 0; border-top: 1px solid var(--amber-line); }

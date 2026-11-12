@@ -11,6 +11,7 @@ import { resolveOperationsRoot } from './operations-root.mjs';
 import { recordQualityPlan, syncQualityHandoffs, verifyQualityQuestion } from './quality-handoff.mjs';
 import { QUEUE_BUSINESSES, loadState as loadQueue, summarize, recoverDashboardQueue, retryJob, resolveJob, cancelQueuedJob, settledQaRevalidation, stoppedDeveloperCheckpoint, isDeliveryTransportCheckpoint, actorContext } from './queue.mjs';
 import { parseTailscaleAccess, assertRoleAllows } from './access-control.mjs';
+import { createSelfUpdate } from './self-update.mjs';
 import { readAutoRun, setAutoRun, createAutoRunner, reviewAutoReceipt, retryAutoReceipt, resumeWorkflowV2Receipt, readmitWorkflowV2Receipt, retryDestinationAdmission } from '../auto-run.mjs';
 import { destinationCheck, createMissingRemote } from '../project-remote.mjs';
 import { workflowV2Resumable, workflowV2Readmissible, workflowV2Live, workflowV2RetryRefusal, candidateFiles } from '../workflow-v2-gate.mjs';
@@ -53,6 +54,8 @@ import {
 
 const APP_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const QUEUE_ROOT = resolveOperationsRoot(APP_ROOT);
+// «Actualizar el Centro» from the panel: the repository is the folder above panel/, which may differ from QUEUE_ROOT.
+const selfUpdate = createSelfUpdate(path.resolve(APP_ROOT, '..'), { jobsRunning: async () => (await loadQueue(QUEUE_ROOT)).jobs.filter(job => job.state === 'running').length });
 const coordinatorHealth = createCoordinatorHealth(QUEUE_ROOT);
 const PORT = Number(process.env.CENTRO_OPERATIONS_PORT || 4187);
 // 7: { hostname, login } (one admin) or { hostname, users: [{ login, role }] } with roles admin, ejecutar, revisar.
@@ -401,11 +404,16 @@ async function handleApi(request, response, url, tailscale = null) {
     const live = await workflowV2Live(QUEUE_ROOT, job);
     return send(response, 200, { live, candidate: live && job.state !== 'succeeded' ? await candidateFiles(job.workspace) : null });
   }
+  if (request.method === 'GET' && url.pathname === '/api/update') return send(response, 200, await selfUpdate.status({ fresh: url.searchParams.get('fresh') === '1' }));
   if (request.method !== 'POST') return send(response, 405, { error: 'Método no permitido.' });
   assertLocalRequest(request, tailscale);
   const attachmentUpload = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/attachments$/);
   if (attachmentUpload) return send(response, 201, await attachIdeaZip(attachmentUpload[1], request, url.searchParams.get('name')));
   const body = await readJson(request);
+  if (url.pathname === '/api/update') {
+    if (body.confirm !== true) return send(response, 400, { error: 'Confirma la actualización.' });
+    return send(response, 202, await selfUpdate.start({ target: body.target }));
+  }
   const attachmentRemove = url.pathname.match(/^\/api\/ideas\/([a-zA-Z0-9_-]+)\/attachments\/remove$/);
   if (attachmentRemove) return send(response, 200, { attachments: await removeIdeaReferences(QUEUE_ROOT, attachmentRemove[1], body.name) });
   const contextRequest = url.pathname.match(/^\/api\/coordinator\/requests\/([a-zA-Z0-9_-]+)\/context$/);
