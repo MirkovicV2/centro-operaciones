@@ -22,8 +22,8 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HELP = `Centro de operaciones local — videojuegos (games) y agencia (agency)
 
 node cli.mjs status
-node cli.mjs instalar [--sin-pipeline]
-  Crea en data/ lo que falte de la configuración compartida del equipo (reparto de modelos por etapa e identidad de este PC). No sobrescribe nada.
+node cli.mjs instalar [--sin-pipeline] [--sin-referencias]
+  Crea en data/ lo que falte de la configuración compartida del equipo (reparto de modelos por etapa, conjuntos de referencias de perfil-equipo/referencias e identidad de este PC). No sobrescribe nada.
 node cli.mjs vincular --business agency|games --run run_ID [--id ID] [--name "Nombre"]
   Escribe data/coordinator-bindings.json con el propietario de esa Run según Orca (y su terminal, si está conectada). Guarda una copia del archivo anterior.
 node cli.mjs add --business games|agency --kind analysis|code --title "Título" --prompt-file "instruccion.txt" [--id identificador]
@@ -69,7 +69,7 @@ No se ejecuta nada en segundo plano. El presupuesto API inicial es 0 USD.
 Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo del proveedor.
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
-const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help', 'sin-pipeline']);
+const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help', 'sin-pipeline', 'sin-referencias']);
 const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million', 'run', 'name']);
 function parse(args) {
   const command = args.shift() ?? 'help';
@@ -222,7 +222,7 @@ async function main() {
       break;
     }
     case 'instalar': {
-      const report = await installLocalConfig(ROOT, { pipeline: !o['sin-pipeline'] });
+      const report = await installLocalConfig(ROOT, { pipeline: !o['sin-pipeline'], referencias: !o['sin-referencias'] });
       for (const file of report.created) console.log(`creado: ${file}`);
       for (const file of report.kept) console.log(`ya existía (sin tocar): ${file}`);
       for (const text of report.notes) console.log(`aviso: ${text}`);
