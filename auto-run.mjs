@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { inspectCommittedIntegration, inspectEffectFreeIntegration, effectFreeIntegrationRecord } from './integration-recovery.mjs';
 import { replaceLocalFile } from './atomic-file.mjs';
 import { assertQualityAction, queueContractRevisionRetry, recoverableChecksTimeout, uxReturnSource, developerDecisionSource, stageDecisionSource, isPartialStageResume, settledOrcaObservation, settledQaRevalidation, stoppedDeveloperCheckpoint } from './queue.mjs';
-import { currentActor, settleOwnerMergedJob } from './queue.mjs';
+import { currentActor, deliverManualJob, settleOwnerMergedJob } from './queue.mjs';
 import { createContractRevision, assertContractRevisionCheckpoint, assertContractRevisionProof, contractRevisionHash, originalContractRevisionJob } from './contract-revision.mjs';
 import { workflowV2Resumable, workflowV2Readmissible } from './workflow-v2-gate.mjs';
 
@@ -1168,6 +1168,47 @@ export async function reconcileOwnerMergedIntegration(root, jobId, { confirm = f
     delete current.workflowV2Resume;
     audit(state, 'owner_merge_reconciled', { receiptId: receipt.id, jobId, prNumber: record.prNumber, mergeSha: pr.mergeCommit.oid });
   });
+  return settled;
+}
+
+// Closes as delivered a job whose work was integrated by hand (PRs merged outside the Centro).
+// Confirms on GitHub, read-only, that every PR is merged into the base from the job's branch, then
+// records the delivery. The review that never ran is NOT marked approved (see deliverManualJob).
+export async function recordManualDelivery(root, jobId, { prNumbers = [], repository = '', evidence = '', confirm = false, gh = runGh } = {}) {
+  if (!confirm) throw new Error('Confirma que las PR están fusionadas; usa --confirm-reviewed.');
+  root = path.resolve(root);
+  const numbers = [...new Set(prNumbers)];
+  if (!numbers.length || numbers.some(n => !Number.isInteger(n) || n < 1)) throw new Error('Indica al menos una PR fusionada (--pr 3,4).');
+  const job = (await loadState(root)).jobs.find(item => item.id === jobId);
+  if (!job || job.kind !== 'code') throw new Error('No existe ese trabajo de código.');
+  const saved = await readAutoRun(root);
+  const receipt = saved.receipts.find(item => item.jobId === jobId);
+  const record = receipt ? saved.integrations?.[receipt.id] : null;
+  const repo = String(repository || record?.repository || job.destination?.repository || '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('Indica el repositorio (--repo propietario/nombre).');
+  const base = record?.baseBranch || job.destination?.baseBranch || 'main';
+  const pullRequests = [];
+  for (const number of numbers) {
+    const pr = JSON.parse(await gh(['pr', 'view', String(number), '--repo', repo, '--json', 'number,state,mergedAt,mergeCommit,baseRefName,headRefName'], job.workspace));
+    if (pr.number !== number || pr.state !== 'MERGED' || !pr.mergedAt || !/^[a-f0-9]{40,64}$/i.test(pr.mergeCommit?.oid || ''))
+      throw new Error(`La PR #${number} no está fusionada; no se registra la entrega.`);
+    if (pr.baseRefName !== base || pr.headRefName !== job.branch)
+      throw new Error(`La PR #${number} no es de la rama ${job.branch} hacia ${base}; no se registra la entrega.`);
+    pullRequests.push({ number, mergeSha: pr.mergeCommit.oid });
+  }
+  const settled = await deliverManualJob(root, jobId, { pullRequests, evidence }, { confirm: true });
+  if (receipt) {
+    const last = pullRequests[pullRequests.length - 1];
+    await change(root, state => {
+      const current = state.receipts.find(item => item.id === receipt.id);
+      state.integrations ||= {};
+      state.integrations[receipt.id] = { ...(state.integrations[receipt.id] || { jobId, receiptId: receipt.id, repository: repo, sourceBranch: job.branch, baseBranch: base }),
+        phase: 'complete', status: 'completed', needsAttention: false, error: null, prNumber: last.number, mergeSha: last.mergeSha, reconciled: true, mergedBy: 'owner', manual: true, updatedAt: now() };
+      current.status = 'completed'; current.reason = 'Entrega integrada a mano en GitHub; sin revisión de código completada en el Centro.'; current.updatedAt = now();
+      delete current.workflowV2Resume;
+      audit(state, 'manual_delivery_recorded', { receiptId: receipt.id, jobId, prNumbers: numbers });
+    });
+  }
   return settled;
 }
 

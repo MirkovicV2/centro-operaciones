@@ -1630,6 +1630,46 @@ export async function settleOwnerMergedJob(root, id, integration, { confirm = fa
   });
 }
 
+// The owner (or Claude on the owner's explicit request) integrated the work by hand: the PRs are
+// merged but the Centro never saw it (workers stopped, job closed by the operator). The caller has
+// already confirmed on GitHub that every PR is merged. This records the job as delivered WITHOUT
+// inventing approvals: only the integration step is marked succeeded; any step that did not
+// succeed (typically the review) is recorded as skipped and the result says so.
+export async function deliverManualJob(root, id, delivery, { confirm = false } = {}) {
+  if (!confirm) throw new QueueError('Confirma que las PR están fusionadas y que no hay trabajadores activos; usa --confirm-reviewed.');
+  const prs = delivery?.pullRequests;
+  const evidence = typeof delivery?.evidence === 'string' ? delivery.evidence.trim() : '';
+  if (!Array.isArray(prs) || !prs.length || prs.some(pr => !Number.isInteger(pr.number) || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/i.test(pr.mergeSha || '')))
+    throw new QueueError('Faltan las PR fusionadas con su merge commit.');
+  if (!evidence || Buffer.byteLength(evidence, 'utf8') > 12_000) throw new QueueError('El informe de entrega debe tener entre 1 y 12.000 bytes.');
+  return mutate(root, async state => {
+    const previous = state.jobs.find(j => j.id === id);
+    if (!previous || previous.kind !== 'code' || !['needs_attention', 'cancelled'].includes(previous.state) || previous.retractedSuccess)
+      throw new QueueError('Solo se entrega a mano un trabajo de código parado (needs_attention) o cerrado por el operador.');
+    const steps = previous.workflow?.steps ?? [];
+    const done = key => steps.find(step => step.key === key)?.status === 'succeeded';
+    if (!done('developer') || !done('qa')) throw new QueueError('El desarrollo y las pruebas deben constar como completados; no se entrega a mano un trabajo sin implementar.');
+    const at = stamp();
+    const last = prs[prs.length - 1];
+    const skipped = [];
+    const nextSteps = steps.map(step => {
+      if (step.key === 'integration') return { ...step, status: 'succeeded', error: null, updatedAt: at,
+        summary: `Integrado a mano: ${prs.map(pr => `PR #${pr.number} · Merge ${pr.mergeSha}`).join('; ')}` };
+      if (step.status === 'succeeded' || step.routeOmitted) return step;
+      skipped.push(step.key);
+      return { ...step, status: 'skipped', error: null, updatedAt: at, summary: 'No se completó en el Centro; la entrega se integró a mano sin esta etapa.' };
+    });
+    const workflow = previous.workflow ? { ...previous.workflow, status: 'succeeded', currentStage: null, completedAt: at, updatedAt: at, steps: nextSteps } : previous.workflow;
+    const job = { ...previous, state: 'succeeded', error: null, workflow, reservedUsd: 0, orphanRisk: false, finishedAt: at, reviewedAt: at, manualDelivery: true,
+      result: { ...(previous.result || {}), provider: 'owner-manual-delivery', text: evidence,
+        manualDelivery: { pullRequests: prs.map(pr => ({ number: pr.number, mergeSha: pr.mergeSha })), skippedSteps: skipped, recordedAt: at } } };
+    const reserved = previous.reservedUsd ?? 0;
+    const budget = { ...state.budget, reservedUsd: Math.max(0, state.budget.reservedUsd - reserved) };
+    await commit(root, state, 'manual_delivery_recorded', { jobs: [job], budget }, { jobId: id, prNumber: last.number, mergeSha: last.mergeSha, skippedSteps: skipped });
+    return job;
+  });
+}
+
 export async function retractFalseSuccess(root, id, { confirm = false } = {}) {
   if (!confirm) throw new QueueError('Comprueba la respuesta y el checkout; usa --confirm-reviewed para retirar el falso éxito.');
   return mutate(root, async state => {
