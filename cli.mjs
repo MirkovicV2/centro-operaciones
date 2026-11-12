@@ -15,6 +15,7 @@ import { skillsStatus, acceptSkill } from './skills-registry.mjs';
 import { readSharedMemory, proposeLesson, listProposals, acceptLesson } from './project-knowledge.mjs';
 import { readLaunchLevels, LAUNCH_LEVELS, DEFAULT_LAUNCH_LEVELS } from './orca-provider.mjs';
 import { installLocalConfig } from './instalacion.mjs';
+import { linkCoordinator } from './panel/coordinator-link.mjs';
 import { verifyReconciliationDestination } from './reconciliation-destination.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,8 @@ const HELP = `Centro de operaciones local — videojuegos (games) y agencia (age
 node cli.mjs status
 node cli.mjs instalar [--sin-pipeline] [--sin-referencias]
   Crea en data/ lo que falte de la configuración compartida del equipo (reparto de modelos por etapa, conjuntos de referencias de perfil-equipo/referencias e identidad de este PC). No sobrescribe nada.
+node cli.mjs vincular --business agency|games --run run_ID [--id ID] [--name "Nombre"]
+  Escribe data/coordinator-bindings.json con el propietario de esa Run según Orca (y su terminal, si está conectada). Guarda una copia del archivo anterior.
 node cli.mjs add --business games|agency --kind analysis|code --title "Título" --prompt-file "instruccion.txt" [--id identificador]
   [--provider orca|auto|api|codex] [--max-attempts 1-5] [--timeout-seconds SEGUNDOS] [--max-usd 0.10]
   Intentos por defecto: Orca 5; otros proveedores 2. Orca no tiene límite de duración por defecto.
@@ -67,7 +70,7 @@ Las tarifas y el gasto mostrado son estimaciones locales; consulta el consumo de
 Las instrucciones se guardan localmente. Nunca incluyas claves o contraseñas.
 `;
 const FLAGS = new Set(['execute', 'isolated', 'confirm-reviewed', 'help', 'sin-pipeline', 'sin-referencias']);
-const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million']);
+const KNOWN = new Set([...FLAGS, 'business', 'kind', 'title', 'prompt-file', 'id', 'evidence-file', 'decision-file', 'dispatch-id', 'provider', 'max-attempts', 'timeout-seconds', 'max-usd', 'workspace', 'branch', 'acceptance-file', 'launch-file', 'project', 'route', 'reason', 'stage', 'skills-file', 'substitute', 'requires', 'max-jobs', 'usd', 'model', 'input-per-million', 'output-per-million', 'run', 'name']);
 function parse(args) {
   const command = args.shift() ?? 'help';
   const options = {};
@@ -223,6 +226,15 @@ async function main() {
       for (const file of report.created) console.log(`creado: ${file}`);
       for (const file of report.kept) console.log(`ya existía (sin tocar): ${file}`);
       for (const text of report.notes) console.log(`aviso: ${text}`);
+      return;
+    }
+    case 'vincular': {
+      let linked;
+      try { linked = await linkCoordinator(ROOT, { business: o.business, runId: o.run, id: o.id, name: o.name }); }
+      catch (error) { if (String(error.code ?? '').startsWith('link_')) throw new QueueError(error.message, error.code); throw error; }
+      console.log(linked.changed ? `vinculado: ${linked.coordinator} (${linked.business}) → Run ${linked.runId}, terminal ${linked.senderId}` : `sin cambios: ${linked.coordinator} ya apuntaba a ${linked.runId}`);
+      if (linked.backup) console.log(`copia del archivo anterior: ${linked.backup}`);
+      console.log('Comprueba la conexión con curl -fsS http://127.0.0.1:4187/api/coordinators (el panel lee el archivo en cada envío).');
       return;
     }
     case 'preview': {

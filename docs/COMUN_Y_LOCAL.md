@@ -45,7 +45,7 @@ Esta es la frontera entre lo que viaja en el repositorio (`main`) y lo que cada 
    No sobrescribe nada que ya exista: un conjunto de referencias que este PC ya tiene no se reimporta. `--sin-pipeline` no crea el reparto de modelos y `--sin-referencias` no instala las referencias.
 3. `node cli.mjs preview --business agency --kind code` muestra qué agente y modelo recibirá cada etapa.
 4. Comprueba en ese PC que Orca acepta esos modelos y esfuerzos con tus cuentas: el Centro valida la forma del archivo, no que el proveedor ofrezca el modelo (`PIPELINE_CONFIG.md`). Si no los tienes, cámbialos en **Ajustes → Agentes y modelos por etapa** o borra `data/pipeline.json` para volver al agente único.
-5. Conecta tu bóveda en **Conocimiento**, registra tus proyectos y vincula tus coordinadores de Orca (`COORDINATOR_OPERATIONS.md`).
+5. Conecta tu bóveda en **Conocimiento**, registra tus proyectos y vincula tus coordinadores de Orca: crea la Run desde la sesión de cada coordinador y ejecuta `node cli.mjs vincular --business agency --run run_…` (`UBUNTU_CLAUDE.md`, pasos 3 y 4). El vínculo es local porque nombra sesiones vivas de tu Orca; lo que viaja en el repositorio es el comando que lo crea.
 
 Para cambiar el perfil del equipo, edita `perfil-equipo/pipeline.json` y súbelo: lo recibirán los PCs que ejecuten `instalar` por primera vez; los que ya tienen su `data/pipeline.json` conservan el suyo.
 
